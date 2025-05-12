@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+*.egg
+venv/
+.venv/
+
+# IDE specific
+*.iml
+
+# Secrets / Config
+.env
+secrets.yaml
+config.local.yaml
+
+# Data / Logs
+*.db
+*.sqlite
+*.sqlite3
+*.log
+data/
