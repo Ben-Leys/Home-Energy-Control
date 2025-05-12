@@ -11,12 +11,12 @@ venv/
 .venv/
 
 # IDE specific
+.idea/
 *.iml
 
 # Secrets / Config
 .env
-secrets.yaml
-config.local.yaml
+config.yaml
 
 # Data / Logs
 *.db
