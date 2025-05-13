@@ -6,13 +6,12 @@ from pathlib import Path
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 from xml.etree import ElementTree as ElTree
+from dotenv import load_dotenv
+from hec.core.app_state import GLOBAL_APP_STATE
+from hec import constants
+from hec.core.config_loader import load_app_config
 
 logger = logging.getLogger(__name__)
-
-# ENTSO-E API Configuration
-ENTSOE_API_BASE_URL = "https://web-api.tp.entsoe.eu/api"
-DOCUMENT_TYPE_A44 = "A44"  # Price Document
-BELGIUM_DOMAIN = "10YBE----------2"
 
 
 class PricePoint:
@@ -23,21 +22,28 @@ class PricePoint:
         self.resolution_minutes = resolution_minutes
 
     def __repr__(self):
-        return f"PricePoint(ts='{self.timestamp_utc.isoformat()}', price={self.price_eur_per_mwh}, pos={self.position}, res={self.resolution_minutes}min)"
+        return (f"PricePoint(ts='{self.timestamp_utc.isoformat()}', price={self.price_eur_per_mwh}, "
+                f"pos={self.position}, res={self.resolution_minutes}min)")
 
 
-def fetch_entsoe_prices(target_day_local: datetime, entsoe_api_key: str) -> Optional[List[PricePoint]]:
+def fetch_entsoe_prices(target_day_local: datetime, entsoe_api_key: Optional[str] = None) -> Optional[List[PricePoint]]:
     """
     Fetches day-ahead electricity prices from ENTSO-E for a given target day.
     The target_day_local is expected to be a datetime object representing the start of the day in the local timezone.
     Prices are  for the day after the auction closes (usually auction for D+1 happens on D).
+    If entsoe_api_key is not provided, it attempts to load it from the environment.
 
     Returns:
-        A list of PricePoint objects if successful, None otherwise.
+        A list of PricePoint objects if successful, otherwise None.
     """
-    if not entsoe_api_key:
-        logger.error("ENTSO-E API key is not configured.")
-        return None
+    env_path = Path(__file__).resolve().parent.parent / ".env"
+    if env_path.exists():
+        load_dotenv(dotenv_path=env_path)
+        entsoe_api_key = os.getenv("ENTSOE_API_KEY")
+        if not entsoe_api_key:
+            logger.error("ENTSO-E API key not provided and not found in environment variable ENTSOE_API_KEY.")
+            GLOBAL_APP_STATE.set("app_state", constants.AppStatus.ALARM)
+            return None
 
     # ENTSO-E API expects periodStart and periodEnd in UTC
     # If target_day_local is for tomorrow, the period starts at 00:00 tomorrow local time
@@ -58,10 +64,13 @@ def fetch_entsoe_prices(target_day_local: datetime, entsoe_api_key: str) -> Opti
     period_start_utc_str = period_start_local.astimezone(timezone.utc).strftime('%Y%m%d%H%M')
     period_end_utc_str = period_end_local.astimezone(timezone.utc).strftime('%Y%m%d%H%M')
 
+    APP_CONFIG = load_app_config()
+    ENTSOE_CONFIG = APP_CONFIG['entsoe']
+
     params = {
-        "documentType": DOCUMENT_TYPE_A44,
-        "in_Domain": BELGIUM_DOMAIN,
-        "out_Domain": BELGIUM_DOMAIN,
+        "documentType": ENTSOE_CONFIG.get('document_type'),
+        "in_Domain": ENTSOE_CONFIG.get('domain'),
+        "out_Domain": ENTSOE_CONFIG.get('domain'),
         "periodStart": period_start_utc_str,
         "periodEnd": period_end_utc_str,
         "securityToken": entsoe_api_key,
@@ -71,12 +80,12 @@ def fetch_entsoe_prices(target_day_local: datetime, entsoe_api_key: str) -> Opti
 
     response = ''
     try:
-        response = requests.get(ENTSOE_API_BASE_URL, params=params, timeout=30)
+        response = requests.get(ENTSOE_CONFIG.get('api_base_url'), params=params, timeout=30)
         response.raise_for_status()
         logger.debug(f"ENTSO-E API response status: {response.status_code}")
     except requests.exceptions.RequestException as e:
         logger.error(f"ENTSO-E API request failed: {e}")
-        logger.debug(f"Request URL: {response.url if 'response' in locals() else ENTSOE_API_BASE_URL}")
+        logger.debug(f"Request URL: {response.url if 'response' in locals() else ENTSOE_CONFIG.get('api_base_url')}")
         logger.debug(f"Response content: {response.content if 'response' in locals() and response else 'No response'}")
         return None
 
@@ -208,38 +217,27 @@ def _parse_resolution_to_minutes(resolution_str: str) -> int:
         return 60
 
 
-# --- Example Usage (for testing this module directly) ---
+# --- Example for testing ---
 if __name__ == '__main__':
-    # Load .env for API key if running directly
-    from dotenv import load_dotenv
+    # Test for today's prices
+    # test_target_day = (datetime.now()).replace(hour=0, minute=0, second=0, microsecond=0)
+    # Test for tomorrow
+    test_target_day = (datetime.now()).replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
+    # test_target_day = datetime(2023, 10, 29).replace(hour=0, minute=0, second=0, microsecond=0) # Fall DST
+    # test_target_day = datetime(2024, 3, 31).replace(hour=0, minute=0, second=0, microsecond=0) # Spring DST
 
-    env_path = Path(__file__).resolve().parent.parent / ".env"
-    if env_path.exists():
-        load_dotenv(dotenv_path=env_path)
+    print(f"Attempting to fetch prices for local day: {test_target_day.strftime('%Y-%m-%d')}")
 
-    entsoe_key = os.getenv("ENTSOE_API_KEY")
-    if not entsoe_key:
-        print("Please set ENTSOE_API_KEY in your .env file to test.")
+    # Configure basic logging for standalone test
+    logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+
+    prices = fetch_entsoe_prices(test_target_day)
+
+    if prices is None:
+        print("API call failed critically or bad API key.")
+    elif not prices:  # Empty list
+        print("No prices available yet for the target day, or no data found.")
     else:
-        # Test for today's prices
-        # test_target_day = (datetime.now()).replace(hour=0, minute=0, second=0, microsecond=0)
-        # Test for tomorrow
-        test_target_day = (datetime.now()).replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
-        # test_target_day = datetime(2023, 10, 29).replace(hour=0, minute=0, second=0, microsecond=0) # Fall DST
-        # test_target_day = datetime(2024, 3, 31).replace(hour=0, minute=0, second=0, microsecond=0) # Spring DST
-
-        print(f"Attempting to fetch prices for local day: {test_target_day.strftime('%Y-%m-%d')}")
-
-        # Configure basic logging for standalone test
-        logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-
-        prices = fetch_entsoe_prices(test_target_day, entsoe_key)
-
-        if prices is None:
-            print("API call failed critically or bad API key.")
-        elif not prices:  # Empty list
-            print("No prices available yet for the target day, or no data found.")
-        else:
-            print(f"\nRetrieved {len(prices)} price points:")
-            for p in prices:
-                print(p)
+        print(f"\nRetrieved {len(prices)} price points:")
+        for p in prices:
+            print(p)
