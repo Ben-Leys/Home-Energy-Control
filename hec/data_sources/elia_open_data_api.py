@@ -1,0 +1,1 @@
+# Solar forecast options from other sources than elia
