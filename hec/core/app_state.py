@@ -14,11 +14,13 @@ class AppState:
 
     def __init__(self):
         self.current_values = {
-            "app_status": constants.AppStatus.STARTING,
+            "app_state": constants.AppStatus.STARTING,
+            "app_operating_mode": constants.OperatingMode.MODE_AUTO,
+            "app_manual_state": None,
             "p1_meter_data": None,  # Latest raw P1 data dict
             "inverter_data": None,  # Latest raw inverter data dict
             "inverter_status": constants.InverterStatus.OFFLINE,
-            "inverter_mode": constants.MODE_AUTO,  # auto, manual
+            "inverter_operating_mode": constants.OperatingMode.MODE_AUTO,  # auto, manual
             "inverter_manual_state": None,
             "ev_charge_status": constants.EVChargeStatus.OFFLINE,
             "ev_soc_percent": None,  # EV State of Charge (%)
@@ -27,7 +29,7 @@ class AppState:
             "solar_forecast_watts": None,  # Forecasted PV for current period
             "wind_forecast_pct": None,
             "electricity_grid_load_forecast_pct": None,
-            "evcc_mode": constants.MODE_AUTO,  # auto, manual
+            "evcc_operating_mode": constants.OperatingMode.MODE_AUTO,  # auto, manual
             "evcc_manual_state": None,
             "evcc_limit_amp": None,
             "evcc_smart_cost_limit": None,
