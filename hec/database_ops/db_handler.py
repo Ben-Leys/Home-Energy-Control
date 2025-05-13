@@ -4,7 +4,6 @@ import logging
 from datetime import datetime, timezone, timedelta
 from typing import List, Optional
 from pathlib import Path
-
 from hec.data_sources.day_ahead_price_api import PricePoint
 
 logger = logging.getLogger(__name__)
@@ -126,8 +125,8 @@ class DatabaseHandler:
             cursor = conn.cursor()
             sql = """
                 INSERT OR REPLACE INTO electricity_price_forecasts 
-                (forecast_timestamp_utc, price_eur_per_mwh, resolution_minutes, fetched_at_utc, region)
-                VALUES (?, ?, ?, ?, ?);
+                (forecast_timestamp_utc, price_eur_per_mwh, resolution_minutes, fetched_at_utc)
+                VALUES (?, ?, ?, ?);
             """
             cursor.executemany(sql, rows_to_insert)
             conn.commit()

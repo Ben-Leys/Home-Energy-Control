@@ -25,7 +25,8 @@ class AppState:
             "ev_charge_status": constants.EVChargeStatus.OFFLINE,
             "ev_soc_percent": None,  # EV State of Charge (%)
             "ev_charge_power_watts": 0,
-            "energy_prices": None,
+            "electricity_prices_today": None,
+            "electricity_prices_tomorrow": None,
             "solar_forecast_watts": None,  # Forecasted PV for current period
             "wind_forecast_pct": None,
             "electricity_grid_load_forecast_pct": None,

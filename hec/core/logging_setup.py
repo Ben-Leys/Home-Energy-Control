@@ -6,7 +6,7 @@ from pathlib import Path
 
 
 def start_logger(config):
-    """Configures logging for the application based on the provided config."""
+    """Configures logging for the application based on the config."""
     log_level_str = config.get('application', {}).get('log_level', 'INFO').upper()
     log_level = getattr(logging, log_level_str, logging.INFO)
 

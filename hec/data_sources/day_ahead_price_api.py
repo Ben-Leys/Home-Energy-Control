@@ -36,14 +36,14 @@ def fetch_entsoe_prices(target_day_local: datetime, entsoe_api_key: Optional[str
     Returns:
         A list of PricePoint objects if successful, otherwise None.
     """
-    env_path = Path(__file__).resolve().parent.parent / ".env"
-    if env_path.exists():
-        load_dotenv(dotenv_path=env_path)
-        entsoe_api_key = os.getenv("ENTSOE_API_KEY")
-        if not entsoe_api_key:
-            logger.error("ENTSO-E API key not provided and not found in environment variable ENTSOE_API_KEY.")
-            GLOBAL_APP_STATE.set("app_state", constants.AppStatus.ALARM)
-            return None
+
+    APP_CONFIG = load_app_config()
+
+    entsoe_api_key = os.getenv("ENTSOE_API_KEY")
+    if not entsoe_api_key:
+        logger.error("ENTSO-E API key not provided and not found in environment variable ENTSOE_API_KEY.")
+        GLOBAL_APP_STATE.set("app_state", constants.AppStatus.ALARM)
+        return None
 
     # ENTSO-E API expects periodStart and periodEnd in UTC
     # If target_day_local is for tomorrow, the period starts at 00:00 tomorrow local time
@@ -64,7 +64,6 @@ def fetch_entsoe_prices(target_day_local: datetime, entsoe_api_key: Optional[str
     period_start_utc_str = period_start_local.astimezone(timezone.utc).strftime('%Y%m%d%H%M')
     period_end_utc_str = period_end_local.astimezone(timezone.utc).strftime('%Y%m%d%H%M')
 
-    APP_CONFIG = load_app_config()
     ENTSOE_CONFIG = APP_CONFIG['entsoe']
 
     params = {
@@ -85,7 +84,7 @@ def fetch_entsoe_prices(target_day_local: datetime, entsoe_api_key: Optional[str
         logger.debug(f"ENTSO-E API response status: {response.status_code}")
     except requests.exceptions.RequestException as e:
         logger.error(f"ENTSO-E API request failed: {e}")
-        logger.debug(f"Request URL: {response.url if 'response' in locals() else ENTSOE_CONFIG.get('api_base_url')}")
+        logger.debug(f"Request URL: {response.url if response else ENTSOE_CONFIG.get('api_base_url')}")
         logger.debug(f"Response content: {response.content if 'response' in locals() and response else 'No response'}")
         return None
 
