@@ -10,7 +10,7 @@ def start_logger(config):
     log_level_str = config.get('application', {}).get('log_level', 'INFO').upper()
     log_level = getattr(logging, log_level_str, logging.INFO)
 
-    log_format = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    log_format = '%(asctime)s - %(levelname)s - %(name)s - %(message)s'
     date_format = '%Y-%m-%d %H:%M:%S'
 
     # Root logger

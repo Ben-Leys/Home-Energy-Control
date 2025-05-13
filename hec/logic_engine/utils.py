@@ -17,8 +17,8 @@ def convert_utc_price_points_to_local(
     """
     Converts a list of UTC PricePoint objects to a list of dictionaries,
     each representing a price interval with its local start time and other details.
-    Iterating through a list of dicts should be less complex than truncating local time converted to a string
-    to find the key that could possibly be a changing resolution time in a dict.
+    Iterating through a list of dicts to find the current price should be less complex than truncating local time,
+    convert to a string, to find the key that could possibly be a changing resolution time in a dict.
     """
     if not utc_price_points:
         return []

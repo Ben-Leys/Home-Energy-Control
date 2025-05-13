@@ -26,7 +26,7 @@ class PricePoint:
                 f"pos={self.position}, res={self.resolution_minutes}min)")
 
 
-def fetch_entsoe_prices(target_day_local: datetime, entsoe_api_key: Optional[str] = None) -> Optional[List[PricePoint]]:
+def fetch_entsoe_prices(target_day_local: datetime) -> Optional[List[PricePoint]]:
     """
     Fetches day-ahead electricity prices from ENTSO-E for a given target day.
     The target_day_local is expected to be a datetime object representing the start of the day in the local timezone.
@@ -41,20 +41,15 @@ def fetch_entsoe_prices(target_day_local: datetime, entsoe_api_key: Optional[str
 
     entsoe_api_key = os.getenv("ENTSOE_API_KEY")
     if not entsoe_api_key:
-        logger.error("ENTSO-E API key not provided and not found in environment variable ENTSOE_API_KEY.")
+        logger.error("ENTSO-E API key not found in environment variable ENTSOE_API_KEY.")
         GLOBAL_APP_STATE.set("app_state", constants.AppStatus.ALARM)
         return None
 
     # ENTSO-E API expects periodStart and periodEnd in UTC
     # If target_day_local is for tomorrow, the period starts at 00:00 tomorrow local time
-    # and ends at 00:00 the day after tomorrow local time.
-    # We need to convert these local times to UTC for the API query.
-
-    # Assume target_day_local is already the day for which prices are needed.
-    # E.g., if today is Monday, and we want Tuesday's prices, target_day_local is Tuesday 00:00.
+    # and ends at 00:00 the day after tomorrow local time. This needs to be converted to UTC.
 
     # To correctly handle DST transitions for the period, we need the local timezone.
-    # For simplicity, let's assume the system's local timezone.
     local_tz = datetime.now().astimezone().tzinfo
 
     period_start_local = target_day_local.replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=local_tz)
@@ -141,15 +136,14 @@ def _parse_entsoe_price_xml(xml_content: bytes, period_start_local: datetime) ->
                                                  namespaces=ns_map if namespace else None)
         resolution_minutes = _parse_resolution_to_minutes(resolution_str)
 
-        # The Period.timeInterval.start is crucial for anchoring the positions to actual UTC times
-        # It should match the period_start_utc requested, but good to use what the API confirms.
+        # The Period.timeInterval.start is crucial for anchoring the positions to actual UTC times.
+        # It should match the period_start_utc requested, but better to use what the API confirms.
         period_time_interval_start_str = period_element.findtext('.//ns:timeInterval/ns:start',
                                                                  namespaces=ns_map if namespace else None)
         if not period_time_interval_start_str:
             logger.error("Could not find Period.timeInterval.start in ENTSO-E response.")
             return None
 
-        # Parse with timezone awareness
         # ENTSO-E timestamps are UTC time
         try:
             current_interval_start_utc = datetime.strptime(period_time_interval_start_str, '%Y-%m-%dT%H:%MZ').replace(
@@ -158,8 +152,8 @@ def _parse_entsoe_price_xml(xml_content: bytes, period_start_local: datetime) ->
             logger.error(f"Could not parse period start time: {period_time_interval_start_str}")
             return None
 
-        logger.debug(
-            f"Parsing Period starting at {current_interval_start_utc.isoformat()} with resolution {resolution_minutes} min")
+        logger.debug(f"Parsing Period starting at {current_interval_start_utc.isoformat()} "
+                     f"with resolution {resolution_minutes} min")
 
         point_elements = period_element.findall('.//ns:Point', ns_map) if namespace else period_element.findall(
             './/Point')

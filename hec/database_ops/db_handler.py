@@ -151,7 +151,7 @@ class DatabaseHandler:
         local_tz = target_day_local.tzinfo if target_day_local.tzinfo else datetime.now().astimezone().tzinfo
 
         day_start_local = target_day_local.replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=local_tz)
-        day_end_local = (day_start_local + timedelta(days=1))  # Exclusive end
+        day_end_local = (day_start_local + timedelta(days=1))
 
         # Convert local day boundaries to UTC strings for querying
         day_start_utc_str = day_start_local.astimezone(timezone.utc).isoformat()
@@ -181,8 +181,7 @@ class DatabaseHandler:
                     position=0,  # Has no added value when retrieving
                     resolution_minutes=row["resolution_minutes"]
                 ))
-            logger.info(
-                f"Retrieved {len(results)} price points from DB for {target_day_local.strftime('%Y-%m-%d')}.")
+            logger.info(f"Retrieved {len(results)} price points from DB for {target_day_local.strftime('%Y-%m-%d')}.")
         except sqlite3.Error as e:
             logger.error(f"Error retrieving price forecasts from database: {e}", exc_info=True)
 
