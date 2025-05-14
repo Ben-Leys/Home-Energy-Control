@@ -9,24 +9,21 @@ from typing import Optional, Dict, Any
 from hec import constants as c
 from hec.core.app_state import GLOBAL_APP_STATE
 
-# from hec.utils.network_utils import get_ip_by_mac
 
 logger = logging.getLogger(__name__)
 
 
 class P1MeterHomeWizard:
-    def __init__(self, host: Optional[str] = None, mac: Optional[str] = None, request_timeout: int = 10):
+    def __init__(self, host: str = None, request_timeout: int = 10):
         """
         Initializes the HomeWizard P1 Meter client.
         Tries to use host if provided, otherwise attempts discovery via MAC (if func get_ip_by_mac is available).
 
         Args:
             host (Optional[str]): The IP address or hostname of the P1 meter.
-            mac (Optional[str]): The MAC address for discovery if host is not provided or fails.
             request_timeout (int): Timeout in seconds for HTTP requests.
         """
-        self.meter_ip: Optional[str] = host
-        self.meter_mac: Optional[str] = mac
+        self.meter_ip: str = host
         self.data_url: Optional[str] = None
         self.request_timeout: int = request_timeout
         self.is_initialized: bool = False
@@ -52,15 +49,7 @@ class P1MeterHomeWizard:
                 print(f"Connection attempt failed: {e}")
 
         # Fallback to MAC discovery if IP does not work
-        if self.meter_mac:
-            logger.info(f"P1 Meter IP: attempting discovery via MAC: {self.meter_mac}")
-            # TODO: implement get_ip_by_mac
-            # if discovered_ip:
-            #     self.meter_ip = discovered_ip
-            #     self.data_url = f"http://{self.meter_ip}/api/v1/data"
-            #     logger.info(f"P1 Meter: Discovered IP {self.meter_ip}. URL: {self.data_url}")
-            #     self.is_initialized = True
-            #     return
+        # Not implemented
 
         if not self.meter_ip:
             logger.error("P1 Meter: Not initialized. No host IP provided and MAC discovery failed.")
@@ -110,22 +99,23 @@ class P1MeterHomeWizard:
 # Example standalone test (if needed, but better to test via scheduled task)
 if __name__ == '__main__':
     logging.basicConfig(level=logging.DEBUG)
-    test_p1_host = "192.168.0.150"  # PUT YOUR ACTUAL P1 METER IP HERE FOR TESTING
+    test_p1_host = "192.168.0.150"  # Actual IP for testing
 
-    if test_p1_host :
+    if test_p1_host:
         print(f"--- Testing P1MeterHomeWizard with host: {test_p1_host} ---")
         p1_meter = P1MeterHomeWizard(host=test_p1_host)
 
         if p1_meter.is_initialized:
-            for _ in range(3):  # Fetch a few times
+            for _ in range(20):
                 test_data = p1_meter.refresh_data()
                 if test_data:
-                    print(f"Fetched at {test_data['timestamp_utc_iso']}: "
-                          f"Active Power={test_data.get('active_power_w')}W, "
-                          f"Total Import={test_data.get('total_power_import_kwh')}kWh, "
-                          f"L1 Voltage={test_data.get('active_voltage_l1_v')}V")
+                    print(f"Fetched at {test_data['timestamp_utc_iso']}:\n"
+                          f"   Active Power: {test_data.get('active_power_w')} W\n"
+                          f"   Total Import: {test_data.get('total_power_import_kwh')} kWh\n"
+                          f"   L1 Voltage: {test_data.get('active_voltage_l1_v')} V")
+                    print(test_data)
                 else:
                     print("Failed to fetch P1 data in this attempt.")
-                time.sleep(2)
+                time.sleep(15)
         else:
             print(f"P1 Meter client could not be initialized with host {test_p1_host}. Check IP and network.")

@@ -5,8 +5,8 @@ from enum import Enum, auto
 class AppStatus(Enum):
     STARTING = "starting"   # Application is in its startup sequence
     NORMAL = "normal"       # Everything is running as expected
-    DEGRADED = "degraded"   # Some non-critical functionality might be impaired
     WARNING = "warning"     # A condition that might lead to an error or degraded state if not addressed
+    DEGRADED = "degraded"   # Some non-critical functionality might be impaired
     ALARM = "alarm"         # A significant error has occurred, critical functions might be affected
     SHUTDOWN = "shutdown"   # Application is in the process of shutting down
 

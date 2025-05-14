@@ -2,14 +2,15 @@
 import logging
 import os
 import requests
-from pathlib import Path
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 from xml.etree import ElementTree as ElTree
-from dotenv import load_dotenv
 from hec.core.app_state import GLOBAL_APP_STATE
-from hec import constants
+from hec import constants as c
 from hec.core.config_loader import load_app_config
+
+
+BELPEX_AUCTION_OPENING_HOUR = 13
 
 logger = logging.getLogger(__name__)
 
@@ -22,15 +23,15 @@ class PricePoint:
         self.resolution_minutes = resolution_minutes
 
     def __repr__(self):
-        return (f"PricePoint(ts='{self.timestamp_utc.isoformat()}', price={self.price_eur_per_mwh}, "
-                f"pos={self.position}, res={self.resolution_minutes}min)")
+        return (f"PricePoint(ts: '{self.timestamp_utc.isoformat()} UTC', price: {self.price_eur_per_mwh} €/MWh, "
+                f"pos: {self.position}, res: {self.resolution_minutes} min)")
 
 
 def fetch_entsoe_prices(target_day_local: datetime) -> Optional[List[PricePoint]]:
     """
     Fetches day-ahead electricity prices from ENTSO-E for a given target day.
     The target_day_local is expected to be a datetime object representing the start of the day in the local timezone.
-    Prices are  for the day after the auction closes (usually auction for D+1 happens on D).
+    Prices are for the day after the auction closes (usually auction for D+1 happens on D).
     If entsoe_api_key is not provided, it attempts to load it from the environment.
 
     Returns:
@@ -39,10 +40,25 @@ def fetch_entsoe_prices(target_day_local: datetime) -> Optional[List[PricePoint]
 
     APP_CONFIG = load_app_config()
 
+    now_local = datetime.now().astimezone()
+    tomorrow_local = now_local + timedelta(days=1)
+    local_tz = datetime.now().astimezone().tzinfo
+
+    period_start_local = target_day_local.replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=local_tz)
+    period_end_local = (target_day_local + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0,
+                                                                      tzinfo=local_tz)
+    # Target day checks
+    if (target_day_local.day > tomorrow_local.day or
+            (target_day_local.day == tomorrow_local.day and now_local.hour < BELPEX_AUCTION_OPENING_HOUR)):
+        logger.info(
+            f"Attempting to fetch prices for ({period_start_local.strftime('%Y-%m-%d')}) before auction opening time "
+            f"({BELPEX_AUCTION_OPENING_HOUR}:00 local). Data will not be available. Returning empty list.")
+        return []
+
     entsoe_api_key = os.getenv("ENTSOE_API_KEY")
     if not entsoe_api_key:
         logger.error("ENTSO-E API key not found in environment variable ENTSOE_API_KEY.")
-        GLOBAL_APP_STATE.set("app_state", constants.AppStatus.ALARM)
+        GLOBAL_APP_STATE.set("app_state", c.AppStatus.ALARM)
         return None
 
     # ENTSO-E API expects periodStart and periodEnd in UTC
@@ -50,11 +66,6 @@ def fetch_entsoe_prices(target_day_local: datetime) -> Optional[List[PricePoint]
     # and ends at 00:00 the day after tomorrow local time. This needs to be converted to UTC.
 
     # To correctly handle DST transitions for the period, we need the local timezone.
-    local_tz = datetime.now().astimezone().tzinfo
-
-    period_start_local = target_day_local.replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=local_tz)
-    period_end_local = (target_day_local + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0,
-                                                                      tzinfo=local_tz)
 
     period_start_utc_str = period_start_local.astimezone(timezone.utc).strftime('%Y%m%d%H%M')
     period_end_utc_str = period_end_local.astimezone(timezone.utc).strftime('%Y%m%d%H%M')
@@ -84,14 +95,14 @@ def fetch_entsoe_prices(target_day_local: datetime) -> Optional[List[PricePoint]
         return None
 
     try:
-        return _parse_entsoe_price_xml(response.content, period_start_local)
+        return _parse_entsoe_price_xml(response.content)
     except Exception as e:
         logger.error(f"Failed to parse ENTSO-E XML response: {e}", exc_info=True)
         logger.debug(f"Problematic XML content: {response.content.decode('utf-8', errors='ignore')}")
         return None
 
 
-def _parse_entsoe_price_xml(xml_content: bytes, period_start_local: datetime) -> Optional[List[PricePoint]]:
+def _parse_entsoe_price_xml(xml_content: bytes) -> Optional[List[PricePoint]]:
     """Helper function to parse the XML and handle DST/gaps."""
     try:
         root = ElTree.fromstring(xml_content)

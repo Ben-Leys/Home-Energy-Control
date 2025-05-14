@@ -1,6 +1,6 @@
 # core/app_state.py
 import logging
-from hec import constants
+from hec import constants as c
 
 
 logger = logging.getLogger(__name__)
@@ -14,15 +14,16 @@ class AppState:
 
     def __init__(self):
         self.current_values = {
-            "app_state": constants.AppStatus.STARTING,
-            "app_operating_mode": constants.OperatingMode.MODE_AUTO,
+            "app_state": c.AppStatus.STARTING,
+            "app_operating_mode": c.OperatingMode.MODE_AUTO,
             "app_manual_state": None,
             "p1_meter_data": None,  # Latest raw P1 data dict
+            "p1_meter_last_stored_boundary_slot_utc_iso": None,
             "inverter_data": None,  # Latest raw inverter data dict
-            "inverter_status": constants.InverterStatus.OFFLINE,
-            "inverter_operating_mode": constants.OperatingMode.MODE_AUTO,  # auto, manual
+            "inverter_status": c.InverterStatus.OFFLINE,
+            "inverter_operating_mode": c.OperatingMode.MODE_AUTO,  # auto, manual
             "inverter_manual_state": None,
-            "ev_charge_status": constants.EVChargeStatus.OFFLINE,
+            "ev_charge_status": c.EVChargeStatus.OFFLINE,
             "ev_soc_percent": None,  # EV State of Charge (%)
             "ev_charge_power_watts": 0,
             "electricity_prices_today": None,
@@ -30,7 +31,7 @@ class AppState:
             "solar_forecast_watts": None,  # Forecasted PV for current period
             "wind_forecast_pct": None,
             "electricity_grid_load_forecast_pct": None,
-            "evcc_operating_mode": constants.OperatingMode.MODE_AUTO,  # auto, manual
+            "evcc_operating_mode": c.OperatingMode.MODE_AUTO,  # auto, manual
             "evcc_manual_state": None,
             "evcc_limit_amp": None,
             "evcc_smart_cost_limit": None,

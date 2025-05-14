@@ -2,7 +2,7 @@
 import sqlite3
 import logging
 from datetime import datetime, timezone, timedelta
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 from pathlib import Path
 from hec.data_sources.day_ahead_price_api import PricePoint
 
@@ -58,11 +58,11 @@ class DatabaseHandler:
             conn = self._get_connection()
             cursor = conn.cursor()
 
-            # Day-Ahead Price Forecasts Table
-            # Storing timestamps as TEXT in ISO 8601 format (UTC)
-            # Storing prices in EUR/MWh as fetched
+            # --- Day-Ahead Price Forecasts Table ---
+            # Timestamps as TEXT in ISO 8601 format (UTC)
+            # Prices in EUR/MWh as fetched
             cursor.execute("""
-                CREATE TABLE IF NOT EXISTS electricity_price_forecasts (
+                CREATE TABLE IF NOT EXISTS belpex_da_prices (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     forecast_timestamp_utc TEXT NOT NULL,    -- Start of the price interval (ISO 8601 UTC string)
                     price_eur_per_mwh REAL NOT NULL,
@@ -72,26 +72,44 @@ class DatabaseHandler:
                     UNIQUE (forecast_timestamp_utc, resolution_minutes) -- Ensure no duplicate entries for same interval
                 );
             """)
-            logger.info("Table 'electricity_price_forecasts' checked/created.")
+            logger.info("Table 'belpex_da_prices' checked/created.")
 
             cursor.execute("""
                 CREATE INDEX IF NOT EXISTS idx_price_forecast_timestamp_utc 
-                ON electricity_price_forecasts (forecast_timestamp_utc);
+                ON belpex_da_prices (forecast_timestamp_utc);
             """)
             logger.info("Index 'idx_price_forecast_timestamp_utc' checked/created.")
 
-            # Add other tables here later (P1 logs, Inverter logs, etc.)
-            # Example P1 log table:
-            # cursor.execute("""
-            # CREATE TABLE IF NOT EXISTS p1_meter_log (
-            #     timestamp_utc TEXT PRIMARY KEY, -- ISO 8601 UTC
-            #     -- Add your P1 fields here, e.g.:
-            #     active_power_import_w REAL,
-            #     active_power_export_w REAL,
-            #     gas_m3 REAL
-            # );
-            # """)
-            # logger.info("Table 'p1_meter_log' checked/created.")
+            # --- P1 Meter Log Table ---
+            cursor.execute("""
+                            CREATE TABLE IF NOT EXISTS p1_meter_log (
+                                timestamp_utc TEXT PRIMARY KEY,    -- ISO 8601 UTC string from the data dict
+                                wifi_strength INTEGER,
+                                smr_version TEXT,
+                                active_tariff INTEGER,
+                                total_power_import_kwh REAL,
+                                total_power_import_t1_kwh REAL,
+                                total_power_import_t2_kwh REAL,
+                                total_power_export_kwh REAL,
+                                total_power_export_t1_kwh REAL,
+                                total_power_export_t2_kwh REAL,
+                                active_power_w REAL,
+                                active_power_l1_w REAL,
+                                active_power_l2_w REAL,
+                                active_power_l3_w REAL,
+                                active_voltage_l1_v REAL,
+                                active_voltage_l2_v REAL,
+                                active_voltage_l3_v REAL,
+                                active_current_l1_a REAL,
+                                active_current_l2_a REAL,
+                                active_current_l3_a REAL,
+                                active_power_average_w REAL,
+                                monthly_power_peak_w REAL,
+                                monthly_power_peak_timestamp TEXT
+                            );
+                        """)
+            logger.info("Table 'p1_meter_log' checked/created.")
+            # No separate index needed for timestamp_utc as it's PRIMARY KEY
 
             conn.commit()
         except sqlite3.Error as e:
@@ -100,7 +118,7 @@ class DatabaseHandler:
         finally:
             pass
 
-    def store_price_forecasts(self, price_points: List[PricePoint]) -> int:
+    def store_da_prices(self, price_points: List[PricePoint]) -> int:
         """
         Stores a list of PricePoint objects into the database.
         Returns the number of rows inserted.
@@ -124,7 +142,7 @@ class DatabaseHandler:
             conn = self._get_connection()
             cursor = conn.cursor()
             sql = """
-                INSERT OR REPLACE INTO electricity_price_forecasts 
+                INSERT OR REPLACE INTO belpex_da_prices 
                 (forecast_timestamp_utc, price_eur_per_mwh, resolution_minutes, fetched_at_utc)
                 VALUES (?, ?, ?, ?);
             """
@@ -142,7 +160,7 @@ class DatabaseHandler:
 
         return inserted_count
 
-    def get_price_forecasts_for_day(self, target_day_local: datetime) -> List[PricePoint]:
+    def get_da_prices(self, target_day_local: datetime) -> List[PricePoint]:
         """
         Retrieves price forecasts for a specific local day from the database.
         Returns a list of PricePoint objects.
@@ -164,7 +182,7 @@ class DatabaseHandler:
             cursor = conn.cursor()
             sql = """
                 SELECT forecast_timestamp_utc, price_eur_per_mwh, resolution_minutes
-                FROM electricity_price_forecasts
+                FROM belpex_da_prices
                 WHERE forecast_timestamp_utc >= ? 
                   AND forecast_timestamp_utc < ? 
                 ORDER BY forecast_timestamp_utc;
@@ -187,6 +205,94 @@ class DatabaseHandler:
 
         return results
 
+    def store_p1_meter_data(self, p1_data: Dict[str, Any], app_state, boundary: int = 5) -> bool:
+        """
+        Stores a single P1 meter data record into the database within n-minute boundary.
+        Assumes p1_data dictionary contains all necessary fields including 'timestamp_utc_iso'.
+
+        Args:
+            p1_data (Dict[str, Any]): The P1 data including 'timestamp_utc_iso'.
+            app_state (AppState): The global application state instance.
+            boundary (int): The minute interval for storing (example: every 5 min).
+
+        Returns:
+            bool: True if data was stored, False otherwise.
+        """
+        if not p1_data or 'timestamp_utc_iso' not in p1_data:
+            logger.warning("P1 Meter: Missing key field for DB storage.")
+            return False
+
+        # Check if data needs to be stored
+        p1_data_ts_utc = datetime.fromisoformat(p1_data['timestamp_utc_iso'])
+        if p1_data_ts_utc.minute % boundary != 0:
+            logger.debug(f"P1 Meter: Current minute ({p1_data_ts_utc.minute}) is not a {boundary}-min boundary. "
+                         f"Skipping DB store.")
+            return False
+        last_boundary_minute = (p1_data_ts_utc.minute // boundary) * boundary
+        boundary_slot = p1_data_ts_utc.replace(minute=last_boundary_minute, second=0, microsecond=0)
+        boundary_slot_iso = boundary_slot.isoformat()
+        last_db_slot_iso = app_state.get("p1_meter_last_stored_boundary_slot_utc_iso")
+        if boundary_slot_iso == last_db_slot_iso:
+            logger.debug(f"P1 Meter: Already stored data for boundary slot {boundary_slot_iso}. Skipping DB store.")
+            return False
+
+        # Map API keys to DB columns
+        values = (
+            p1_data.get('timestamp_utc_iso'),
+            p1_data.get('wifi_strength'),
+            str(p1_data.get('smr_version', '')),  # Ensure SMR version is string
+            p1_data.get('active_tariff'),
+            p1_data.get('total_power_import_kwh'),
+            p1_data.get('total_power_import_t1_kwh'),
+            p1_data.get('total_power_import_t2_kwh'),
+            p1_data.get('total_power_export_kwh'),
+            p1_data.get('total_power_export_t1_kwh'),
+            p1_data.get('total_power_export_t2_kwh'),
+            p1_data.get('active_power_w'),
+            p1_data.get('active_power_l1_w'),
+            p1_data.get('active_power_l2_w'),
+            p1_data.get('active_power_l3_w'),
+            p1_data.get('active_voltage_l1_v'),
+            p1_data.get('active_voltage_l2_v'),
+            p1_data.get('active_voltage_l3_v'),
+            p1_data.get('active_current_l1_a'),
+            p1_data.get('active_current_l2_a'),
+            p1_data.get('active_current_l3_a'),
+            p1_data.get('active_power_average_w'),
+            p1_data.get('montly_power_peak_w'),
+            p1_data.get('montly_power_peak_timestamp')
+        )
+
+        sql = """
+            INSERT OR REPLACE INTO p1_meter_log (
+                timestamp_utc, wifi_strength, smr_version, active_tariff,
+                total_power_import_kwh, total_power_import_t1_kwh, total_power_import_t2_kwh,
+                total_power_export_kwh, total_power_export_t1_kwh, total_power_export_t2_kwh,
+                active_power_w, active_power_l1_w, active_power_l2_w, active_power_l3_w,
+                active_voltage_l1_v, active_voltage_l2_v, active_voltage_l3_v,
+                active_current_l1_a, active_current_l2_a, active_current_l3_a,
+                active_power_average_w, monthly_power_peak_w, monthly_power_peak_timestamp
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?); 
+        """
+
+        try:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            cursor.execute(sql, values)
+            conn.commit()
+            if cursor.rowcount > 0:
+                logger.debug(f"P1 Meter: Successfully stored data for timestamp {p1_data['timestamp_utc_iso']} in DB.")
+                # Update AppState with the boundary slot that was just successfully written
+                app_state.set("p1_meter_last_stored_boundary_slot_utc_iso", boundary_slot_iso)
+                return True
+            else:
+                logger.warning(
+                    f"P1 Meter: Data for timestamp {p1_data['timestamp_utc_iso']} was not stored (no rows affected).")
+                return False
+        except sqlite3.Error as e:
+            logger.error(f"P1 Meter: Error storing data in database: {e}", exc_info=True)
+            return False
+
 
 if __name__ == '__main__':
     from hec.core.config_loader import load_app_config
@@ -201,5 +307,5 @@ if __name__ == '__main__':
 
     # Retrieve electricity prices
     today_local = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
-    prices_today_from_db = db_handler.get_price_forecasts_for_day(today_local)
+    prices_today_from_db = db_handler.get_da_prices(today_local)
     print(prices_today_from_db)
