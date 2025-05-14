@@ -1,13 +1,13 @@
 # hec/logic_engine/scheduled_tasks.py
 import logging
 from datetime import datetime, timedelta, timezone
-from typing import Optional
+from typing import Optional, List, Dict, Any
 from apscheduler.schedulers.base import BaseScheduler
 
 from hec.core import constants as c
 from hec.core.app_state import GLOBAL_APP_STATE
 from hec.core.app_initializer import populate_price_data_in_appstate
-from hec.data_sources import day_ahead_price_api
+from hec.data_sources import day_ahead_price_api, elia_forecast_api
 from hec.data_sources.p1_meter_homewizard import P1MeterHomeWizard
 from hec.database_ops.db_handler import DatabaseHandler
 from hec.logic_engine.utils import convert_utc_price_points_to_local, parse_hh_mm_time_string
@@ -21,6 +21,7 @@ FETCH_PRICES_JOB_ID = "fetch_day_ahead_prices"
 fetch_prices_attempt_count = 0
 MIDNIGHT_ROLLOVER_JOB_ID = "midnight_rollover"
 P1_METER_JOB_ID = "p1_meter_update"
+FETCH_ELIA_FORECAST_JOB_ID = "fetch_elia_forecast"
 
 
 def task_fetch_and_store_day_ahead_prices(scheduler: BaseScheduler, db_handler: DatabaseHandler, app_config: dict):
@@ -131,6 +132,60 @@ def task_poll_p1_meter(db_handler: DatabaseHandler, p1_client: Optional[P1MeterH
         GLOBAL_APP_STATE.set("p1_meter_data", None)  # Clear stale data
 
 
+def task_fetch_elia_forecasts(db_handler: DatabaseHandler, app_config: dict):
+    """
+    Scheduled task to fetch various forecasts from Elia Open Data,
+    and store them in the database. Fetches for the next 5 days (D+1 to D+5).
+    Grid load forecast only available until D+4.
+    """
+    logger.info("Running task: Fetch Elia Renewables Forecasts.")
+
+    local_tz = datetime.now().astimezone().tzinfo
+
+    # Define the range of days to fetch (e.g., today + 1 to today + 5)
+    # Forecasts are for D+1, D+2, ..., D+5
+    days_to_fetch = 5
+
+    all_fetched_records: List[Dict[str, Any]] = []
+
+    for i in range(1, days_to_fetch + 1):  # From D+1 to D+5
+        target_day_utc = (datetime.now(timezone.utc) + timedelta(days=i)).replace(hour=0, minute=0, second=0,
+                                                                                  microsecond=0)
+        logger.info(f"Fetching Elia forecasts for day: {target_day_utc.strftime('%Y-%m-%d')}")
+
+        # Solar Forecast
+        solar_data = elia_forecast_api.fetch_solar_production_forecast(target_day_utc)
+        if solar_data is not None:  # None means critical error, [] means no data for day
+            all_fetched_records.extend(solar_data)
+        else:
+            logger.error(f"Failed to fetch solar forecast for {target_day_utc.date()}. Critical error.")
+
+        # Wind Forecast
+        wind_data = elia_forecast_api.fetch_wind_production_forecast(target_day_utc)
+        if wind_data is not None:
+            all_fetched_records.extend(wind_data)
+        else:
+            logger.error(f"Failed to fetch wind forecast for {target_day_utc.date()}. Critical error.")
+
+        # Grid Load Forecast (Elia API provides up to 4 days)
+        if i <= 4:  # Check if within 4-day limit for load forecast
+            load_data = elia_forecast_api.fetch_grid_load_forecast(target_day_utc)
+            if load_data is not None:
+                all_fetched_records.extend(load_data)
+            else:
+                logger.error(f"Failed to fetch grid load forecast for {target_day_utc.date()}. Critical error.")
+        else:
+            logger.debug(
+                f"Skipping grid load forecast for {target_day_utc.date()} as it's beyond Elia's 4-day limit.")
+
+    if all_fetched_records:
+        logger.info(f"Finished fetching Elia forecasts. Total days: {days_to_fetch} rec: {len(all_fetched_records)}.")
+        db_handler.store_elia_forecasts(all_fetched_records)
+    else:
+        logger.warning(f"No Elia forecast data fetched for {days_to_fetch} days. Check API.")
+        GLOBAL_APP_STATE.set("app_state", c.AppStatus.WARNING)
+
+
 def register_all_jobs(scheduler: BaseScheduler, db_handler: DatabaseHandler,
                       app_config: dict, p1_client: Optional[P1MeterHomeWizard]):
     """Registers all defined scheduled jobs with the provided scheduler instance."""
@@ -181,7 +236,7 @@ def register_all_jobs(scheduler: BaseScheduler, db_handler: DatabaseHandler,
         else:
             logger.warning(f"Could not parse time {scheduled_time}. Skipping job {MIDNIGHT_ROLLOVER_JOB_ID}.")
 
-        # Update P1 meter data
+        # P1 meter data update
         if p1_client:
             p1_meter_schedule = tasks_config.get(P1_METER_JOB_ID, {})
             p1_poll_interval_sec = p1_meter_schedule.get('poll_interval_seconds', 60)
@@ -198,6 +253,26 @@ def register_all_jobs(scheduler: BaseScheduler, db_handler: DatabaseHandler,
             logger.info(f"Job '{P1_METER_JOB_ID}' scheduled: interval {p1_poll_interval_sec} seconds.")
         else:
             logger.warning("P1 Meter client not initialized. P1 polling job not scheduled.")
+
+        elia_forecast_schedule = tasks_config.get(FETCH_ELIA_FORECAST_JOB_ID, {})
+        scheduled_time = elia_forecast_schedule.get('time')
+        parsed_time = parse_hh_mm_time_string(scheduled_time)
+        if parsed_time:
+            hour, minute = parsed_time
+            scheduler.add_job(
+                task_fetch_elia_forecasts,
+                trigger='cron',
+                hour=hour,
+                minute=minute,
+                id=FETCH_ELIA_FORECAST_JOB_ID,
+                args=[db_handler, app_config],
+                name="Fetch Elia Forecasts",
+                replace_existing=True
+            )
+            logger.info(
+                f"Job 'fetch_elia_renewables_forecasts' scheduled: CRON Daily at {scheduled_time}.")
+        else:
+            logger.warning(f"Could not parse time {scheduled_time}. Skipping job {FETCH_PRICES_JOB_ID}.")
 
     except Exception as e:
         logger.critical(f"Failed to register scheduled jobs: {e}", exc_info=True)

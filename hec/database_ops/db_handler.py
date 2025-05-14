@@ -59,31 +59,31 @@ class DatabaseHandler:
             cursor = conn.cursor()
 
             # --- Day-Ahead Price Forecasts Table ---
-            # Timestamps as TEXT in ISO 8601 format (UTC)
+            # Timestamps as TEXT in UTC
             # Prices in EUR/MWh as fetched
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS belpex_da_prices (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    timestamp_utc TEXT NOT NULL,    -- Start of the price interval (ISO 8601 UTC string)
+                    timestamp_utc TEXT NOT NULL,
                     price_eur_per_mwh REAL NOT NULL,
-                    resolution_minutes INTEGER NOT NULL,     -- e.g., 15, 30, 60
-                    fetched_at_utc TEXT NOT NULL,          -- When this data was retrieved (ISO 8601 UTC string)
+                    resolution_minutes INTEGER NOT NULL,  -- 15, 30, 60
+                    fetched_at_utc TEXT NOT NULL,  -- When this data was retrieved
                     source_api TEXT DEFAULT 'ENTSO-E',
-                    UNIQUE (timestamp_utc, resolution_minutes) -- Ensure no duplicate entries for same interval
+                    UNIQUE (timestamp_utc, resolution_minutes) -- Ensure no duplicate entries
                 );
             """)
-            logger.info("Table 'belpex_da_prices' checked/created.")
+            logger.info("Table belpex_da_prices checked/created.")
 
             cursor.execute("""
                 CREATE INDEX IF NOT EXISTS idx_price_timestamp_utc 
                 ON belpex_da_prices (timestamp_utc);
             """)
-            logger.info("Index 'idx_price_timestamp_utc' checked/created.")
+            logger.info("Index idx_price_timestamp_utc checked/created.")
 
             # --- P1 Meter Log Table ---
             cursor.execute("""
                             CREATE TABLE IF NOT EXISTS p1_meter_log (
-                                timestamp_utc TEXT PRIMARY KEY,    -- ISO 8601 UTC string from the data dict
+                                timestamp_utc TEXT PRIMARY KEY,    -- UTC string from the data dict
                                 wifi_strength INTEGER,
                                 smr_version TEXT,
                                 active_tariff INTEGER,
@@ -108,8 +108,30 @@ class DatabaseHandler:
                                 monthly_power_peak_timestamp TEXT
                             );
                         """)
-            logger.info("Table 'p1_meter_log' checked/created.")
+            logger.info("Table p1_meter_log checked/created.")
             # No separate index needed for timestamp_utc as it's PRIMARY KEY
+
+            # --- Elia Open Data Table ---
+            # Data_type: 'solar', 'wind', 'grid_load'
+            # All times are UTC for consistency.
+            cursor.execute("""
+                            CREATE TABLE IF NOT EXISTS elia_open_data (
+                                timestamp_utc TEXT NOT NULL,
+                                forecast_type TEXT NOT NULL,  -- solar, wind, grid_load
+                                resolution_minutes INTEGER NOT NULL,  -- 15, 60
+                                most_recent_forecast_mwh REAL,  -- For solar/wind/load
+                                monitored_capacity_mw REAL,  -- For solar/wind
+                                fetched_at_utc TEXT NOT NULL,  -- When this data was retrieved
+                                PRIMARY KEY (timestamp_utc, forecast_type, resolution_minutes) -- Unique
+                            );
+                        """)
+            logger.info("Table elia_open_data checked/created.")
+
+            cursor.execute("""
+                            CREATE INDEX IF NOT EXISTS idx_elia_forecast_type_ts 
+                            ON elia_open_data (forecast_type, timestamp_utc);
+                        """)
+            logger.info("Index idx_elia_forecast_type_ts checked/created.")
 
             conn.commit()
         except sqlite3.Error as e:
@@ -292,6 +314,103 @@ class DatabaseHandler:
         except sqlite3.Error as e:
             logger.error(f"P1 Meter: Error storing data in database: {e}", exc_info=True)
             return False
+
+    def store_elia_forecasts(self, forecasts: List[Dict[str, Any]]) -> int:
+        """
+        Stores a list of Elia forecast records into the database. Each dict in the list contains
+        forecast_type, resolution_minutes, timestamp_utc and forecast values.
+        """
+        if not forecasts:
+            logger.info("No Elia forecast points provided to store.")
+            return 0
+
+        rows_to_insert = []
+        now_utc_str = datetime.now(timezone.utc).isoformat()
+
+        for rec in forecasts:
+            # For type wind: monitoredcapacity becomes 0 for same-day data
+            # In that case, we want to keep the previous values
+            if rec.get('forecast_type') == 'wind' and rec.get('monitored_capacity_mw') == 0:
+                continue
+
+            # Ensure all required keys are present or handled
+            row_data = (
+                rec.get('timestamp_utc'),
+                rec.get('forecast_type'),
+                rec.get('resolution_minutes'),
+                rec.get('most_recent_forecast_mwh'),
+                rec.get('monitored_capacity_mw'),
+                now_utc_str  # fetched_at_utc
+            )
+            rows_to_insert.append(row_data)
+
+        inserted_count = 0
+        try:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            sql = """
+                INSERT OR REPLACE INTO elia_open_data (
+                    timestamp_utc, forecast_type, resolution_minutes,
+                    most_recent_forecast_mwh, monitored_capacity_mw,
+                    fetched_at_utc
+                ) VALUES (?, ?, ?, ?, ?, ?);
+            """
+            cursor.executemany(sql, rows_to_insert)
+            conn.commit()
+            inserted_count = cursor.rowcount
+            if inserted_count > 0:
+                logger.info(f"Successfully stored/updated {inserted_count} Elia forecast records.")
+            else:
+                logger.info(f"No new Elia forecast records to store (or all were duplicates).")
+        except sqlite3.Error as e:
+            logger.error(f"Error storing Elia forecasts in database: {e}", exc_info=True)
+        return inserted_count
+
+    def get_elia_forecasts(self, forecast_type: str, start_date_local: datetime,
+                           end_date_local: datetime) -> List[Dict[str, Any]]:
+        """
+        Retrieves Elia forecasts for a specific type and date range.
+        start/end_date_local should be timezone-aware.
+        """
+
+        results = []
+        local_tz = start_date_local.tzinfo if start_date_local.tzinfo else datetime.now().astimezone().tzinfo
+
+        start_utc_str = start_date_local.astimezone(timezone.utc).isoformat()
+        end_utc_str = end_date_local.astimezone(timezone.utc).isoformat()
+
+        logger.debug(f"Querying DB for Elia '{forecast_type}' forecasts between {start_utc_str} and {end_utc_str}")
+
+        try:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            sql = """
+                SELECT timestamp_utc, forecast_type, resolution_minutes,
+                       most_recent_forecast_mwh, monitored_capacity_mw, fetched_at_utc
+                FROM elia_renewables_forecasts
+                WHERE forecast_type = ?
+                  AND timestamp_utc >= ?
+                  AND timestamp_utc < ?
+                ORDER BY timestamp_utc;
+            """
+            cursor.execute(sql, (forecast_type, start_utc_str, end_utc_str))
+            rows = cursor.fetchall()
+
+            for row in rows:
+                record = dict(row)  # Convert to dict
+                # Ensure timestamp is a proper datetime object
+                record['timestamp_utc'] = datetime.fromisoformat(record['timestamp_utc'])
+                record['fetched_at_utc'] = datetime.fromisoformat(record['fetched_at_utc'])
+                results.append(record)
+
+            if results:
+                logger.info(f"Retrieved {len(results)} Elia '{forecast_type}' records from DB.")
+            else:
+                logger.info(f"No Elia '{forecast_type}' records found in DB for the period.")
+        except sqlite3.Error as e:
+            logger.error(f"Error retrieving Elia '{forecast_type}' forecasts from database: {e}", exc_info=True)
+
+        return results
 
 
 if __name__ == '__main__':
