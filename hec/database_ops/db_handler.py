@@ -64,21 +64,21 @@ class DatabaseHandler:
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS belpex_da_prices (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    forecast_timestamp_utc TEXT NOT NULL,    -- Start of the price interval (ISO 8601 UTC string)
+                    timestamp_utc TEXT NOT NULL,    -- Start of the price interval (ISO 8601 UTC string)
                     price_eur_per_mwh REAL NOT NULL,
                     resolution_minutes INTEGER NOT NULL,     -- e.g., 15, 30, 60
                     fetched_at_utc TEXT NOT NULL,          -- When this data was retrieved (ISO 8601 UTC string)
                     source_api TEXT DEFAULT 'ENTSO-E',
-                    UNIQUE (forecast_timestamp_utc, resolution_minutes) -- Ensure no duplicate entries for same interval
+                    UNIQUE (timestamp_utc, resolution_minutes) -- Ensure no duplicate entries for same interval
                 );
             """)
             logger.info("Table 'belpex_da_prices' checked/created.")
 
             cursor.execute("""
-                CREATE INDEX IF NOT EXISTS idx_price_forecast_timestamp_utc 
+                CREATE INDEX IF NOT EXISTS idx_price_timestamp_utc 
                 ON belpex_da_prices (timestamp_utc);
             """)
-            logger.info("Index 'idx_price_forecast_timestamp_utc' checked/created.")
+            logger.info("Index 'idx_price_timestamp_utc' checked/created.")
 
             # --- P1 Meter Log Table ---
             cursor.execute("""
@@ -143,7 +143,7 @@ class DatabaseHandler:
             cursor = conn.cursor()
             sql = """
                 INSERT OR REPLACE INTO belpex_da_prices 
-                (forecast_timestamp_utc, price_eur_per_mwh, resolution_minutes, fetched_at_utc)
+                (timestamp_utc, price_eur_per_mwh, resolution_minutes, fetched_at_utc)
                 VALUES (?, ?, ?, ?);
             """
             cursor.executemany(sql, rows_to_insert)
@@ -191,8 +191,8 @@ class DatabaseHandler:
             rows = cursor.fetchall()
 
             for row in rows:
-                # forecast_timestamp_utc is stored as TEXT, convert back to datetime
-                ts_utc = datetime.fromisoformat(row["forecast_timestamp_utc"])
+                # timestamp_utc is stored as TEXT, convert back to datetime
+                ts_utc = datetime.fromisoformat(row["timestamp_utc"])
                 results.append(PricePoint(
                     timestamp_utc=ts_utc,
                     price_eur_per_mwh=row["price_eur_per_mwh"],

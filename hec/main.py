@@ -2,7 +2,7 @@ import logging
 import time
 from threading import Thread
 
-from hec import constants as c
+from hec.core import constants as c
 from hec.core.api_setup import run_api_server
 from hec.core.app_initializer import (populate_app_state, initialize_database_handler,
                                       initialize_p1_meter_client)

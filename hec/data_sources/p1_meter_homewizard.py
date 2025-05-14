@@ -6,7 +6,7 @@ import time
 from datetime import datetime, timezone
 from typing import Optional, Dict, Any
 
-from hec import constants as c
+from hec.core import constants as c
 from hec.core.app_state import GLOBAL_APP_STATE
 
 

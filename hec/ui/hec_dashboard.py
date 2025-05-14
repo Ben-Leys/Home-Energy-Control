@@ -1,30 +1,36 @@
 # hec/ui/dashboard_app.py
 import streamlit as st
 import requests
-import pandas as pd
-from datetime import datetime, timedelta
-import time
+from datetime import datetime
 
-# Assuming your constants are accessible if running streamlit from project root
-# and PYTHONPATH includes the project root or 'hec' is installed.
-# If running `streamlit run hec/ui/dashboard_app.py` from project root, this should work:
+
+# Set PYTHONPATH to . (project root)
+# streamlit run hec/ui/hec_dashboard.py
 try:
-    from hec import constants as c  # Use K as alias for constants
+    from hec.core import constants as c
+    from hec.core.config_loader import load_app_config
 except ImportError:
-    st.error("Could not import constants. Make sure you run Streamlit from the project root "
+    st.error("Could not import from 'hec.core'. Make sure you run Streamlit from the project root "
              "and 'hec' package is in PYTHONPATH.")
     exit(1)
 
 
-# Configuration for the API
-MAIN_APP_API_URL = "http://localhost:5000/api/v1/state"  # Adjust if main app runs on different host/port
-FETCH_INTERVAL_SECONDS = 1  # How often to refresh data
+# Configuration of the API
+APP_CONFIG = load_app_config()
+server_config = APP_CONFIG.get('api_server', {})
+port = server_config.get('port', 5000)
 
+# Configuration of the dashboard
+dashboard_config = APP_CONFIG.get('dashboard', {})
+host = dashboard_config.get('host', 'localhost')
+refresh_interval = dashboard_config.get('refresh_interval', 15)
+
+main_app_api_url = f"http://{host}:{port}/api/v1/state"
 
 # --- Helper to get data from Main App API ---
 def get_main_app_state():
     try:
-        response = requests.get(MAIN_APP_API_URL, timeout=3)
+        response = requests.get(main_app_api_url, timeout=3)
         response.raise_for_status()
         return response.json()
     except requests.exceptions.RequestException as e:
@@ -50,7 +56,7 @@ def get_status_color(app_status_str: str) -> str:
 
 
 # --- UI Sections ---
-@st.fragment(run_every=FETCH_INTERVAL_SECONDS)
+@st.fragment(run_every=refresh_interval)
 def display_dashboard_fragment():
     state = get_main_app_state()
 

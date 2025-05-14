@@ -3,7 +3,7 @@ from datetime import datetime
 from enum import Enum
 from flask import Flask, jsonify
 
-from hec import constants as c
+from hec.core import constants as c
 from hec.core.app_state import GLOBAL_APP_STATE
 
 api_app = Flask(__name__)
@@ -72,3 +72,4 @@ def run_api_server(app_config: dict):
         api_app.run(host=host, port=port, debug=debug_mode, use_reloader=False)
     except Exception as e:
         logger.error(f"API server failed to start or crashed: {e}", exc_info=True)
+        GLOBAL_APP_STATE.set("app_state", c.AppStatus.DEGRADED)

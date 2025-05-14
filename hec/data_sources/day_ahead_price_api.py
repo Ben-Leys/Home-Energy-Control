@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 from xml.etree import ElementTree as ElTree
 from hec.core.app_state import GLOBAL_APP_STATE
-from hec import constants as c
+from hec.core import constants as c
 from hec.core.config_loader import load_app_config
 
 

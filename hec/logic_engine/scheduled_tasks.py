@@ -4,7 +4,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional
 from apscheduler.schedulers.base import BaseScheduler
 
-from hec import constants as c
+from hec.core import constants as c
 from hec.core.app_state import GLOBAL_APP_STATE
 from hec.core.app_initializer import populate_price_data_in_appstate
 from hec.data_sources import day_ahead_price_api
