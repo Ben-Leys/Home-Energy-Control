@@ -9,9 +9,6 @@ from hec.core.app_state import GLOBAL_APP_STATE
 from hec.core import constants as c
 from hec.core.config_loader import load_app_config
 
-
-BELPEX_AUCTION_OPENING_HOUR = 13
-
 logger = logging.getLogger(__name__)
 
 
@@ -39,6 +36,8 @@ def fetch_entsoe_prices(target_day_local: datetime) -> Optional[List[PricePoint]
     """
 
     APP_CONFIG = load_app_config()
+    entsoe_config = APP_CONFIG['entsoe']
+    auction_opening_hour = entsoe_config.get('auction_opening_hour')
 
     now_local = datetime.now().astimezone()
     tomorrow_local = now_local + timedelta(days=1)
@@ -49,10 +48,10 @@ def fetch_entsoe_prices(target_day_local: datetime) -> Optional[List[PricePoint]
                                                                       tzinfo=local_tz)
     # Target day checks
     if (target_day_local.day > tomorrow_local.day or
-            (target_day_local.day == tomorrow_local.day and now_local.hour < BELPEX_AUCTION_OPENING_HOUR)):
+            (target_day_local.day == tomorrow_local.day and now_local.hour < auction_opening_hour)):
         logger.info(
             f"Attempting to fetch prices for ({period_start_local.strftime('%Y-%m-%d')}) before auction opening time "
-            f"({BELPEX_AUCTION_OPENING_HOUR}:00 local). Data will not be available. Returning empty list.")
+            f"({auction_opening_hour}:00 local). Data will not be available. Returning empty list.")
         return []
 
     entsoe_api_key = os.getenv("ENTSOE_API_KEY")
@@ -70,12 +69,10 @@ def fetch_entsoe_prices(target_day_local: datetime) -> Optional[List[PricePoint]
     period_start_utc_str = period_start_local.astimezone(timezone.utc).strftime('%Y%m%d%H%M')
     period_end_utc_str = period_end_local.astimezone(timezone.utc).strftime('%Y%m%d%H%M')
 
-    ENTSOE_CONFIG = APP_CONFIG['entsoe']
-
     params = {
-        "documentType": ENTSOE_CONFIG.get('document_type'),
-        "in_Domain": ENTSOE_CONFIG.get('domain'),
-        "out_Domain": ENTSOE_CONFIG.get('domain'),
+        "documentType": entsoe_config.get('document_type'),
+        "in_Domain": entsoe_config.get('domain'),
+        "out_Domain": entsoe_config.get('domain'),
         "periodStart": period_start_utc_str,
         "periodEnd": period_end_utc_str,
         "securityToken": entsoe_api_key,
@@ -85,12 +82,12 @@ def fetch_entsoe_prices(target_day_local: datetime) -> Optional[List[PricePoint]
 
     response = ''
     try:
-        response = requests.get(ENTSOE_CONFIG.get('api_base_url'), params=params, timeout=30)
+        response = requests.get(entsoe_config.get('api_base_url'), params=params, timeout=30)
         response.raise_for_status()
         logger.debug(f"ENTSO-E API response status: {response.status_code}")
     except requests.exceptions.RequestException as e:
         logger.error(f"ENTSO-E API request failed: {e}")
-        logger.debug(f"Request URL: {response.url if response else ENTSOE_CONFIG.get('api_base_url')}")
+        logger.debug(f"Request URL: {response.url if response else entsoe_config.get('api_base_url')}")
         logger.debug(f"Response content: {response.content if 'response' in locals() and response else 'No response'}")
         return None
 
