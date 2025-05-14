@@ -76,7 +76,7 @@ class DatabaseHandler:
 
             cursor.execute("""
                 CREATE INDEX IF NOT EXISTS idx_price_forecast_timestamp_utc 
-                ON belpex_da_prices (forecast_timestamp_utc);
+                ON belpex_da_prices (timestamp_utc);
             """)
             logger.info("Index 'idx_price_forecast_timestamp_utc' checked/created.")
 
@@ -181,11 +181,11 @@ class DatabaseHandler:
             conn = self._get_connection()
             cursor = conn.cursor()
             sql = """
-                SELECT forecast_timestamp_utc, price_eur_per_mwh, resolution_minutes
+                SELECT timestamp_utc, price_eur_per_mwh, resolution_minutes
                 FROM belpex_da_prices
-                WHERE forecast_timestamp_utc >= ? 
-                  AND forecast_timestamp_utc < ? 
-                ORDER BY forecast_timestamp_utc;
+                WHERE timestamp_utc >= ? 
+                  AND timestamp_utc < ? 
+                ORDER BY timestamp_utc;
             """
             cursor.execute(sql, (day_start_utc_str, day_end_utc_str))
             rows = cursor.fetchall()

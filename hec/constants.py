@@ -11,11 +11,6 @@ class AppStatus(Enum):
     SHUTDOWN = "shutdown"   # Application is in the process of shutting down
 
 
-class OperatingMode(Enum):
-    MODE_AUTO = "auto"      # System makes decisions
-    MODE_MANUAL = "manual"  # User manually picks state
-
-
 class AppManualState(Enum):
     NO_CHARGING = "no charging"
     CHARGE_WHEN_ANY_SOLAR_POWER = "charge when any solar power"
@@ -24,6 +19,11 @@ class AppManualState(Enum):
     CHARGE_WHEN_BUY_PRICE_NEGATIVE = "charge when buy price negative"
     CHARGE_NOW_WITH_CAPACITY_RATE = "charge now with capacity rate"
     CHARGE_NOW_NO_CAPACITY_RATE = "charge now no capacity rate"
+
+
+class OperatingMode(Enum):
+    MODE_AUTO = "auto"      # System makes decisions
+    MODE_MANUAL = "manual"  # User manually picks state
 
 
 class InverterStatus(Enum):

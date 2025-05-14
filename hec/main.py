@@ -1,7 +1,9 @@
 import logging
 import time
+from threading import Thread
 
 from hec import constants as c
+from hec.core.api_setup import run_api_server
 from hec.core.app_initializer import (populate_app_state, initialize_database_handler,
                                       initialize_p1_meter_client)
 from hec.core.app_state import GLOBAL_APP_STATE
@@ -41,6 +43,15 @@ def run_application():
     # --- POPULATE APP STATE ---
     populate_app_state(db_handler, APP_CONFIG)
 
+    # --- START API SERVER ---
+    api_thread = None
+    if APP_CONFIG.get('api_server', {}).get('enabled', True):
+        api_thread = Thread(target=run_api_server, args=(APP_CONFIG,), daemon=True)
+        api_thread.start()
+    else:
+        logger.info("API server is disabled in configuration.")
+
+    # Continue if no ALARM
     if GLOBAL_APP_STATE.get("app_state") == c.AppStatus.ALARM:
         logger.critical("Application initialization failed. Exiting.")
         if db_handler:
@@ -56,11 +67,14 @@ def run_application():
     try:
         scheduler.start()
         if run_scheduler_in_background:
-            logger.info("BackgroundScheduler started. Main thread will keep alive.")
             if GLOBAL_APP_STATE.get("app_state") == c.AppStatus.STARTING:
                 GLOBAL_APP_STATE.set("app_state", c.AppStatus.NORMAL)
-            while True:
-                time.sleep(3600)  # Sleep for a long time, scheduler runs in background
+            logger.info("BackgroundScheduler started. Main thread will wait for API thread or interrupt.")
+            if api_thread:
+                api_thread.join()
+            else:
+                while True:
+                    time.sleep(3600)  # Sleep, scheduler runs in background
     except (KeyboardInterrupt, SystemExit):
         logger.info("Application interrupt received. Shutting down...")
         GLOBAL_APP_STATE.set("app_state", c.AppStatus.SHUTDOWN)

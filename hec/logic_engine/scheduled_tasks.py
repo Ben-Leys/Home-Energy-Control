@@ -192,7 +192,7 @@ def register_all_jobs(scheduler: BaseScheduler, db_handler: DatabaseHandler,
                 id=P1_METER_JOB_ID,
                 args=[db_handler, p1_client],
                 name="Poll P1 Smart Meter",
-                misfire_grace_time=int(p1_poll_interval_sec / 2),
+                misfire_grace_time=max(1, int(p1_poll_interval_sec / 2)),
                 replace_existing=True  # If re-registering jobs on app restart
             )
             logger.info(f"Job '{P1_METER_JOB_ID}' scheduled: interval {p1_poll_interval_sec} seconds.")
