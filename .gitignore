@@ -24,3 +24,5 @@ config.yaml
 *.sqlite3
 *.log
 data/
+/packages.dot
+/packages.html

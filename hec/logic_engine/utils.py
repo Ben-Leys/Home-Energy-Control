@@ -118,6 +118,9 @@ def process_price_points(price_points: list, db_handler: DatabaseHandler, target
         db_handler (DatabaseHandler): Database handler for storing the price points.
         target_day (datetime): The target day for the price points (timezone-aware).
         app_state_key (str): The key under which to store the processed price points in the AppState.
+
+    Returns:
+        True in case of success, False in case of failure.
     """
     if price_points is None:
         logger.error(f"Critical API fetch error for {target_day.date()}.")

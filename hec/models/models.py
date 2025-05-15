@@ -1,13 +1,28 @@
+from dataclasses import dataclass, asdict, field
 from datetime import datetime
+from typing import Optional, Dict, Any
 
 
+@dataclass(frozen=True)
 class PricePoint:
-    def __init__(self, timestamp_utc: datetime, price_eur_per_mwh: float, position: int, resolution_minutes: int):
-        self.timestamp_utc = timestamp_utc  # Start of the interval (UTC)
-        self.price_eur_per_mwh = price_eur_per_mwh
-        self.position = position  # Original position from API (1-based)
-        self.resolution_minutes = resolution_minutes
+    """Contains raw price point information from API sources"""
+    timestamp_utc: datetime
+    price_eur_per_mwh: float
+    position: int
+    resolution_minutes: int
 
-    def __repr__(self):
-        return (f"PricePoint(ts: '{self.timestamp_utc.isoformat()} UTC', price: {self.price_eur_per_mwh} €/MWh, "
-                f"pos: {self.position}, res: {self.resolution_minutes} min)")
+
+@dataclass(frozen=True, order=True)
+class NetElectricityPriceInterval:
+    """Contains net electricity prices for various contract types at a time interval"""
+    interval_start_local: datetime = field(init=True, repr=True)
+    resolution_minutes: int
+    active_contract_type: str  # "dynamic", "fixed"
+    net_buy_price_eur_per_kwh: float
+    net_sell_price_eur_per_kwh: float
+    comparison_prices_eur_per_kwh: Optional[Dict[str, Dict[str, Optional[float]]]] = None  # Other types and prices
+
+    def to_dict(self) -> Dict[str, Any]:  # Helper to store in AppState
+        d = asdict(self)
+        d['interval_start_local'] = self.interval_start_local.isoformat()
+        return d

@@ -1,0 +1,61 @@
+# tariff.yaml
+# All tariffs in EUR
+# Most recent start_date on top
+active_contract:
+  - start_date: '01/11/2024'
+    type: dynamic
+
+energy_supplier:
+  independent:
+    subscription_cost: 5  # monthly
+
+  fixed:
+    - start_date: '01/03/2025'
+      buy_price_per_kwh: 0.1319
+    - start_date: '01/02/2025'
+      buy_price_per_kwh: 0.1507
+    - start_date: '01/01/2025'
+      buy_price_per_kwh: 0.148
+      sell_price_per_kwh: 0.02
+    - start_date: '01/12/2024'
+      buy_price_per_kwh: 0.1394
+    - start_date: '01/11/2024'
+      buy_price_per_kwh: 0.1411
+    - start_date: '01/10/2024'
+      buy_price_per_kwh: 0.1259
+    - start_date: '01/01/2024'
+      sell_price_per_kwh: 0.075
+
+  dynamic:
+    - start_date: '01/01/2025'
+      spot_sell_multiplier: 0.98
+      spot_sell_fixed_fee_per_kwh: 0.015
+    - start_date: '01/01/2024'
+      spot_buy_multiplier: 1.02
+      spot_buy_fixed_fee_per_kwh: 0.004
+      spot_sell_multiplier: 0.85
+      spot_sell_fixed_fee_per_kwh: 0.004
+      green_certificate_fee_per_kwh: 0.011
+      chp_certificate_fee_per_kwh: 0.00392
+
+
+grid_operator:
+  - start_date: '01/01/2025'
+    data_management: 17.51
+    grid_usage_fee_per_kwh: 0.06061
+    capacity_tariff_per_kw_per_year: 55.80
+  - start_date: '01/01/2024'
+    data_management: 14.28
+    grid_usage_fee_per_kwh: 0.0433249
+    capacity_tariff_per_kw_per_year: 37.9640234
+
+government:
+  - start_date: '01/01/2024'
+    energy_contribution_per_kwh: 0.0019261
+    excise_duty_tiers:
+      - threshold_kwh_yearly: 0  # Until next threshold
+        rate_eur_per_kwh: 0.04748
+      - threshold_kwh_yearly: 3000  # Anything above threshold
+        rate_eur_per_kwh: 0.04748
+    vat: 1.06  # Anything below this line will not have vat applied
+    federal_contribution_fund_per_kwh: 0

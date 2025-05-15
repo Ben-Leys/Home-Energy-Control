@@ -89,7 +89,11 @@ def fetch_entsoe_prices(target_day_local: datetime, app_config: dict) -> Optiona
 
 
 def _parse_entsoe_price_xml(xml_content: bytes) -> Optional[List[PricePoint]]:
-    """Helper function to parse the XML and handle DST/gaps."""
+    """
+    Helper function to parse the XML and handle DST/gaps.
+    Returns a list of PricePoint objects if successful, an empty list if no data was received and
+    None in case of failure.
+    """
     try:
         root = ElTree.fromstring(xml_content)
     except ElTree.ParseError as e:
