@@ -10,7 +10,7 @@ from hec.core.app_state import GLOBAL_APP_STATE
 from hec.data_sources import day_ahead_price_api, elia_forecast_api
 from hec.data_sources.p1_meter_homewizard import P1MeterHomeWizard
 from hec.database_ops.db_handler import DatabaseHandler
-from hec.logic_engine.utils import convert_utc_price_points_to_local, parse_hh_mm_time_string
+from hec.logic_engine.utils import convert_utc_price_points_to_local, parse_hh_mm_time_string, process_price_points
 
 logger = logging.getLogger(__name__)
 
@@ -29,46 +29,27 @@ def task_fetch_and_store_day_ahead_prices(scheduler: BaseScheduler, db_handler: 
     Handles retries by rescheduling itself if data is not yet available.
     """
     global fetch_prices_attempt_count
+
     day_ahead_schedule = app_config.get("scheduler", {}).get(FETCH_PRICES_JOB_ID, {})
     max_retries = day_ahead_schedule.get("max_retries", 36)
     retry_after = day_ahead_schedule.get("retry_after", 0)
+    retry_interval_minutes = app_config.get('scheduler', {}).get('price_fetch_retry_interval_min', 15)
 
     logger.info(f"Running task: Fetch and Store Day-Ahead Prices (Attempt: {fetch_prices_attempt_count + 1})")
 
     # Determine target date: ENTSO-E auction is for D+1
-    local_now = datetime.now().astimezone()  # Get current local time with timezone
-    target_day = local_now + timedelta(days=1)
+    target_day = (datetime.now().astimezone() + timedelta(days=1))
 
     price_points = day_ahead_price_api.fetch_entsoe_prices(target_day, app_config)
 
-    if price_points is None:
-        logger.error(
-            f"Error fetching prices for {target_day.strftime('%Y-%m-%d')}. Check API key or ENTSO-E status.")
-        fetch_prices_attempt_count += 1
-    elif not price_points:  # Empty list, data likely not published yet
-        if fetch_prices_attempt_count < max_retries:
-            logger.info(f"Prices for {target_day.strftime('%Y-%m-%d')} not yet available from ENTSO-E.")
-        fetch_prices_attempt_count += 1
-    else:
-        logger.info(
-            f"Successfully fetched {len(price_points)} price points for {target_day.strftime('%Y-%m-%d')}.")
-        db_handler.store_da_prices(price_points)  # Store raw PricePoint data
-
-        # Process for AppState (tomorrow's prices)
-        local_tz = target_day.tzinfo if target_day.tzinfo else datetime.now().astimezone().tzinfo
-
-        processed_prices_for_appstate = convert_utc_price_points_to_local(price_points, local_tz)
-        GLOBAL_APP_STATE.set("electricity_prices_tomorrow", processed_prices_for_appstate)
-        logger.info(f"Updated AppState with {len(processed_prices_for_appstate)} price points for tomorrow.")
-
+    if process_price_points(price_points, db_handler, target_day, "electricity_prices_tomorrow"):
         fetch_prices_attempt_count = 0
         return
 
-    # --- Handle Retries ---
+    # --- Handle Retries if no price points ---
+    fetch_prices_attempt_count += 1
     if fetch_prices_attempt_count < max_retries:
-        retry_interval_minutes = app_config.get('scheduler', {}).get('price_fetch_retry_interval_min', 15)
         next_run_time = datetime.now(timezone.utc) + timedelta(minutes=retry_after)
-
         try:
             scheduler.modify_job(FETCH_PRICES_JOB_ID, next_run_time=next_run_time)
             logger.info(f"Price fetch job rescheduled to run at {next_run_time.astimezone().isoformat()} "
@@ -283,46 +264,18 @@ def populate_price_data_in_appstate(db_handler: DatabaseHandler, target_day_loca
     Ensures price data for target_day_local is in AppState.
     Tries DB first. If missing and force_api_fetch_if_missing is True, tries API.
     """
-    logger.info(f"Populating price data for AppState key '{app_state_key}' (date: {target_day_local.strftime('%Y-%m-%d')})")
+    logger.info(f"Populating price data for AppState key '{app_state_key}' (date: {target_day_local.date()})")
 
     # Target_day_local is timezone-aware
-    local_tz = target_day_local.tzinfo if target_day_local.tzinfo else datetime.now().astimezone().tzinfo
-    target_day_local_aware = target_day_local.replace(tzinfo=local_tz)
+    local_tz = target_day_local.tzinfo or datetime.now().astimezone().tzinfo
+    target_day_local = target_day_local.replace(tzinfo=local_tz)
 
-    # Try to get from Database
-    price_points_db = db_handler.get_da_prices(target_day_local_aware)
+    # Try to get from database
+    price_points = db_handler.get_da_prices(target_day_local)
 
-    if price_points_db:
-        processed_prices = convert_utc_price_points_to_local(price_points_db, local_tz)
-        GLOBAL_APP_STATE.set(app_state_key, processed_prices)
-        logger.info(f"Loaded {len(processed_prices)} price intervals for '{app_state_key}' from DB into AppState.")
-        return True  # Data loaded from DB
+    if not price_points and force_api_fetch_if_missing:
+        logger.info(f"No DB data for '{app_state_key}' on {target_day_local.date()}, attempting API fetch.")
+        price_points = day_ahead_price_api.fetch_entsoe_prices(target_day_local, app_config)
 
-    logger.info(f"No prices for '{app_state_key}' ({target_day_local_aware.date()}) found in DB.")
-
-    # If missing in DB and force_api_fetch_if_missing is True, try API
-    if force_api_fetch_if_missing:
-        logger.info(f"Attempting API fetch for {target_day_local_aware.date()} for AppState key '{app_state_key}'.")
-
-        price_points = day_ahead_price_api.fetch_entsoe_prices(target_day_local_aware, app_config)
-
-        if price_points:  # API returned some data (could be empty list if not published)
-            logger.debug(f"API fetch returned {len(price_points)} price points for {target_day_local_aware.date()}.")
-            if len(price_points):  # Actually got price data
-                db_handler.store_da_prices(price_points)  # Store it in DB
-                processed_prices = convert_utc_price_points_to_local(price_points, local_tz)
-                GLOBAL_APP_STATE.set(app_state_key, processed_prices)
-                logger.debug(f"Loaded {len(processed_prices)} price points for '{app_state_key}' into AppState.")
-                return True
-            else:  # API returned empty list (data not published yet for that day)
-                logger.debug(f"API fetch for {target_day_local_aware.date()} returned no data (not published yet?)")
-                GLOBAL_APP_STATE.set(app_state_key, [])
-                return False
-        else:  # API call failed critically
-            logger.error(f"Critical API fetch error for {target_day_local_aware.date()}.")
-            GLOBAL_APP_STATE.set(app_state_key, [])
-            return False
-    else:
-        # Not forcing API fetch, and not found in DB
-        GLOBAL_APP_STATE.set(app_state_key, [])
-        return False
+    # Process the price points if available
+    return process_price_points(price_points, db_handler, target_day_local, app_state_key)

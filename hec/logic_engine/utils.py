@@ -5,7 +5,8 @@ from datetime import datetime, timedelta
 from typing import Optional, List, Dict, Any, Tuple
 
 import hec.models.models
-
+from hec.core.app_state import GLOBAL_APP_STATE
+from hec.database_ops.db_handler import DatabaseHandler
 
 logger = logging.getLogger(__name__)
 
@@ -106,3 +107,40 @@ def parse_hh_mm_time_string(time_str: str) -> Optional[Tuple[int, int]]:
     except ValueError:
         logger.error(f"Could not parse hour or minute as integer from time string: '{time_str}'.")
         return None
+
+
+def process_price_points(price_points: list, db_handler: DatabaseHandler, target_day: datetime, app_state_key: str):
+    """
+    Processes price points by storing them in the database and updating the AppState.
+
+    Args:
+        price_points (list): List of price points retrieved from the API.
+        db_handler (DatabaseHandler): Database handler for storing the price points.
+        target_day (datetime): The target day for the price points (timezone-aware).
+        app_state_key (str): The key under which to store the processed price points in the AppState.
+    """
+    if price_points is None:
+        logger.error(f"Critical API fetch error for {target_day.date()}.")
+        GLOBAL_APP_STATE.set(app_state_key, [])
+        return False
+
+    elif not price_points:
+        logger.debug(f"No price points available for {target_day.date()} (API data not yet published).")
+        GLOBAL_APP_STATE.set(app_state_key, [])
+        return False
+
+    logger.info(f"Processing {len(price_points)} price points for {target_day.date()}.")
+
+    # Store raw price points in the database
+    db_handler.store_da_prices(price_points)
+    logger.debug(f"Stored {len(price_points)} price points in the database.")
+
+    # Convert and process price points for the AppState
+    local_tz = target_day.tzinfo if target_day.tzinfo else datetime.now().astimezone().tzinfo
+    processed_prices = convert_utc_price_points_to_local(price_points, local_tz)
+
+    # Update AppState
+    GLOBAL_APP_STATE.set(app_state_key, processed_prices)
+    logger.info(f"Updated AppState with {len(processed_prices)} price points for '{app_state_key}'.")
+
+    return True
