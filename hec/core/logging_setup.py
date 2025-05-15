@@ -8,6 +8,7 @@ from pathlib import Path
 def start_logger(config):
     """Configures logging for the application based on the config."""
     log_level_str = config.get('application', {}).get('log_level', 'INFO').upper()
+    log_level_file = config.get('application', {}).get('log_level_file', 'DEBUG').upper()
     log_level = getattr(logging, log_level_str, logging.INFO)
 
     log_format = '%(asctime)s - %(levelname)s - %(name)s - %(message)s'
@@ -46,7 +47,7 @@ def start_logger(config):
             backupCount=backup_count,
             encoding='utf-8'
         )
-        file_handler.setLevel(log_level)
+        file_handler.setLevel(log_level_file)
         file_formatter = logging.Formatter(log_format, datefmt=date_format)
         file_handler.setFormatter(file_formatter)
         root_logger.addHandler(file_handler)

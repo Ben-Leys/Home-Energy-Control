@@ -172,90 +172,98 @@ def register_all_jobs(scheduler: BaseScheduler, db_handler: DatabaseHandler,
     try:
         tasks_config = app_config.get("tasks_schedule", {})
 
-        # Job to fetch Day-Ahead Prices
-        day_ahead_schedule = tasks_config.get(FETCH_PRICES_JOB_ID, {})
-        scheduled_time = day_ahead_schedule.get('time')
-        parsed_time = parse_hh_mm_time_string(scheduled_time)
-        if parsed_time:
-            hour, minute = parsed_time
-            scheduler.add_job(
-                task_fetch_and_store_day_ahead_prices,
-                trigger='cron',
-                hour=hour,
-                minute=minute,
-                id=FETCH_PRICES_JOB_ID,
-                args=[scheduler, db_handler, app_config],  # Pass scheduler for self-rescheduling
-                name="Fetch Day-Ahead ENTSO-E Prices",
-                misfire_grace_time=32400,  # 9 hours later still within the same day
-                replace_existing=True  # If re-registering jobs on app restart
-            )
-            logger.info(f"Job '{FETCH_PRICES_JOB_ID}' scheduled: CRON Daily at {scheduled_time}.")
-        else:
-            logger.warning(f"Could not parse time {scheduled_time}. Skipping job '{FETCH_PRICES_JOB_ID}'.")
+        job_definitions = [
+            {
+                "job_id": FETCH_PRICES_JOB_ID,
+                "task_function": task_fetch_and_store_day_ahead_prices,
+                "trigger": "cron",
+                "trigger_args": lambda cfg: {"hour": cfg[0], "minute": cfg[1]},
+                "job_args": [scheduler, db_handler, app_config],
+                "name": "Fetch Day-Ahead ENTSO-E Prices",
+                "misfire_grace_time": 32400,  # 9 hours
+            },
+            {
+                "job_id": MIDNIGHT_ROLLOVER_JOB_ID,
+                "task_function": task_midnight_rollover,
+                "trigger": "cron",
+                "trigger_args": lambda cfg: {"hour": cfg[0], "minute": cfg[1]},
+                "job_args": [db_handler, app_config],
+                "name": "Midnight Rollover",
+                "misfire_grace_time": 50400,  # 13 hours
+            },
+            {
+                "job_id": FETCH_ELIA_FORECAST_JOB_ID,
+                "task_function": task_fetch_elia_forecasts,
+                "trigger": "cron",
+                "trigger_args": lambda cfg: {"hour": cfg[0], "minute": cfg[1]},
+                "job_args": [db_handler, app_config],
+                "name": "Fetch Elia Forecasts",
+                "misfire_grace_time": 3600,  # 1 hour
+            },
+        ]
 
-        # Job to make midnight rollover
-        rollover_schedule = tasks_config.get(MIDNIGHT_ROLLOVER_JOB_ID, {})
-        scheduled_time = rollover_schedule.get('time')
-        parsed_time = parse_hh_mm_time_string(scheduled_time)
-        if parsed_time:
-            hour, minute = parsed_time
-            scheduler.add_job(
-                task_midnight_rollover,
-                trigger='cron',
-                hour=hour,
-                minute=minute,
-                id=MIDNIGHT_ROLLOVER_JOB_ID,
-                args=[db_handler, app_config],
-                name="Midnight rollover",
-                misfire_grace_time=50400,  # 13 hours later tomorrow's prices will be overwritten by day ahead fetch
-                replace_existing=True  # If re-registering jobs on app restart
-            )
-            logger.info(f"Job '{MIDNIGHT_ROLLOVER_JOB_ID}' scheduled: CRON Daily at {scheduled_time}.")
-        else:
-            logger.warning(f"Could not parse time {scheduled_time}. Skipping job '{MIDNIGHT_ROLLOVER_JOB_ID}'.")
+        # Register CRON jobs
+        for job in job_definitions:
+            task_config = tasks_config.get(job["job_id"], {})
+            scheduled_time = task_config.get('time')
+            parsed_time = parse_hh_mm_time_string(scheduled_time)
 
-        # P1 meter data update
+            if parsed_time:
+                trigger_args = job["trigger_args"](parsed_time)
+                register_job(
+                    scheduler,
+                    job_id=job["job_id"],
+                    func=job["task_function"],
+                    trigger=job["trigger"],
+                    trigger_args=trigger_args,
+                    job_args=job["job_args"],
+                    name=job["name"],
+                    grace_time=job["misfire_grace_time"],
+                )
+            else:
+                logger.warning(f"Could not parse time for job '{job['job_id']}'. Skipping.")
+
+        # Register P1 Meter job if applicable
         if p1_client:
             p1_meter_schedule = tasks_config.get(P1_METER_JOB_ID, {})
-            p1_poll_interval_sec = p1_meter_schedule.get('poll_interval_seconds', 60)
-            scheduler.add_job(
-                task_poll_p1_meter,
-                trigger='interval',
-                seconds=p1_poll_interval_sec,
-                id=P1_METER_JOB_ID,
-                args=[db_handler, p1_client],
+            poll_interval_sec = p1_meter_schedule.get('poll_interval_seconds', 60)
+            register_job(
+                scheduler,
+                job_id=P1_METER_JOB_ID,
+                func=task_poll_p1_meter,
+                trigger="interval",
+                trigger_args={"seconds": poll_interval_sec},
+                job_args=[db_handler, p1_client],
                 name="Poll P1 Smart Meter",
-                misfire_grace_time=max(1, int(p1_poll_interval_sec / 2)),
-                replace_existing=True  # If re-registering jobs on app restart
+                grace_time=max(1, poll_interval_sec // 2),
             )
-            logger.info(f"Job '{P1_METER_JOB_ID}' scheduled: interval {p1_poll_interval_sec} seconds.")
         else:
             logger.warning(f"P1 Meter client not initialized. '{P1_METER_JOB_ID}' job not scheduled.")
-
-        elia_forecast_schedule = tasks_config.get(FETCH_ELIA_FORECAST_JOB_ID, {})
-        scheduled_time = elia_forecast_schedule.get('time')
-        parsed_time = parse_hh_mm_time_string(scheduled_time)
-        if parsed_time:
-            hour, minute = parsed_time
-            scheduler.add_job(
-                task_fetch_elia_forecasts,
-                trigger='cron',
-                hour=hour,
-                minute=minute,
-                id=FETCH_ELIA_FORECAST_JOB_ID,
-                args=[db_handler, app_config],
-                name="Fetch Elia Forecasts",
-                replace_existing=True
-            )
-            logger.info(f"Job '{FETCH_ELIA_FORECAST_JOB_ID}' scheduled: CRON Daily at {scheduled_time}.")
-        else:
-            logger.warning(f"Could not parse time {scheduled_time}. Skipping job '{FETCH_PRICES_JOB_ID}'.")
 
     except Exception as e:
         logger.critical(f"Failed to register scheduled jobs: {e}", exc_info=True)
         GLOBAL_APP_STATE.set("app_state", c.AppStatus.ALARM)
         db_handler.close_connection()  # Clean up
         return
+
+
+def register_job(scheduler, job_id, func, trigger, trigger_args, job_args, name, grace_time, replace_existing=True):
+    """Helper to register a job with the scheduler."""
+    try:
+        scheduler.add_job(
+            func,
+            trigger=trigger,
+            id=job_id,
+            args=job_args,
+            name=name,
+            misfire_grace_time=grace_time,
+            replace_existing=replace_existing,
+            **trigger_args
+        )
+        logger.info(f"Job '{job_id}' scheduled: {trigger.upper()} with args {trigger_args}.")
+    except Exception as e:
+        logger.error(f"Failed to schedule job '{job_id}': {e}", exc_info=True)
+        GLOBAL_APP_STATE.set("app_state", c.AppStatus.WARNING)
 
 
 def populate_price_data_in_appstate(db_handler: DatabaseHandler, target_day_local: datetime, app_config: dict,
