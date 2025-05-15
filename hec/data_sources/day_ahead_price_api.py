@@ -9,13 +9,12 @@ import requests
 
 from hec.core import constants as c
 from hec.core.app_state import GLOBAL_APP_STATE
-from hec.core.config_loader import load_app_config
 from hec.models.models import PricePoint
 
 logger = logging.getLogger(__name__)
 
 
-def fetch_entsoe_prices(target_day_local: datetime) -> Optional[List[PricePoint]]:
+def fetch_entsoe_prices(target_day_local: datetime, app_config: dict) -> Optional[List[PricePoint]]:
     """
     Fetches day-ahead electricity prices from ENTSO-E for a given target day.
     The target_day_local is expected to be a datetime object representing the start of the day in the local timezone.
@@ -26,8 +25,7 @@ def fetch_entsoe_prices(target_day_local: datetime) -> Optional[List[PricePoint]
         A list of PricePoint objects if successful, otherwise None.
     """
 
-    APP_CONFIG = load_app_config()
-    entsoe_config = APP_CONFIG['entsoe']
+    entsoe_config = app_config['entsoe']
     auction_opening_hour = entsoe_config.get('auction_opening_hour')
 
     now_local = datetime.now().astimezone()
@@ -211,6 +209,8 @@ def _parse_resolution_to_minutes(resolution_str: str) -> int:
 
 # --- Example for testing ---
 if __name__ == '__main__':
+    from hec.core.config_loader import load_app_config
+    APP_CONFIG = load_app_config()
     # Test for today's prices
     # test_target_day = (datetime.now()).replace(hour=0, minute=0, second=0, microsecond=0)
     # Test for tomorrow
@@ -223,7 +223,7 @@ if __name__ == '__main__':
     # Configure basic logging for standalone test
     logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 
-    prices = fetch_entsoe_prices(test_target_day)
+    prices = fetch_entsoe_prices(test_target_day, APP_CONFIG)
 
     if prices is None:
         print("API call failed critically or bad API key.")

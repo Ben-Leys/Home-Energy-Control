@@ -7,24 +7,18 @@ from typing import List, Dict, Any, Optional
 
 from hec.core import constants as c
 from hec.core.app_state import GLOBAL_APP_STATE
-from hec.core.config_loader import load_app_config
 
 logger = logging.getLogger(__name__)
 
-APP_CONFIG = load_app_config()
-elia_config = APP_CONFIG.get('elia')
-
-elia_api_base_url = elia_config.get('api_base_url')
-elia_timezone = elia_config.get('timezone')
-
-# --- Dataset IDs for Elia Open Data ---
-elia_dataset_solar = elia_config.get('dataset_solar')
-elia_dataset_wind = elia_config.get('dataset_wind')
-elia_dataset_grid_load = elia_config.get('dataset_grid_load')
+elia_api_base_url = ""
+elia_timezone = ""
+elia_dataset_solar = ""
+elia_dataset_wind = ""
+elia_dataset_grid_load = ""
 
 
 # --- Common Helper for API Requests ---
-def _fetch_elia_data(dataset_id: str, url_params: str) -> Optional[List[Dict[str, Any]]]:
+def _fetch_elia_data(dataset_id: str, date_str: str, url_params: str) -> Optional[List[Dict[str, Any]]]:
     """
     Generic function to fetch data from Elia Open Data API.
 
@@ -38,6 +32,7 @@ def _fetch_elia_data(dataset_id: str, url_params: str) -> Optional[List[Dict[str
     url = f"{elia_api_base_url}/{dataset_id}/records{url_params}"
     logger.debug(f"Elia API: Fetching from {url}")
 
+    response = ''
     try:
         response = requests.get(url, timeout=30)
         response.raise_for_status()
@@ -45,36 +40,38 @@ def _fetch_elia_data(dataset_id: str, url_params: str) -> Optional[List[Dict[str
 
         results = data.get('results', [])
         if not results:
-            logger.warning(f"Elia API ({dataset_id}): No results found for date {date_str_for_api}.")
+            logger.warning(f"Elia API ({dataset_id}): No results found for date {date_str}.")
             return []  # Return empty list if no data, not None
 
         # Check for API specific errors in the results structure
         if 'message' in data and isinstance(data['message'], dict) and data['message'].get('type') == 'error':
             logger.error(
-                f"Elia API ({dataset_id}): API returned error: {data['message']['text']} for date {date_str_for_api}.")
+                f"Elia API ({dataset_id}): API returned error: {data['message']['text']} for date {date_str}.")
             GLOBAL_APP_STATE.set("app_state", c.AppStatus.WARNING)
             return None  # Critical API error
 
         return results
 
     except requests.exceptions.RequestException as e:
-        logger.error(f"Elia API ({dataset_id}): Request failed for date {date_str_for_api}: {e}", exc_info=True)
+        logger.error(f"Elia API ({dataset_id}): Request failed for date {date_str}: {e}", exc_info=True)
         GLOBAL_APP_STATE.set("app_state", c.AppStatus.WARNING)
         return None
     except json.JSONDecodeError as e:
-        logger.error(f"Elia API ({dataset_id}): Failed to decode JSON for {date_str_for_api}: {e}", exc_info=True)
-        logger.debug(f"Elia API ({dataset_id}): Raw response: {response.text if 'response' in locals() else 'N/A'}")
+        logger.error(f"Elia API ({dataset_id}): Failed to decode JSON for {date_str}: {e}", exc_info=True)
+        logger.debug(f"Elia API ({dataset_id}): Raw response: {response.text if response else 'N/A'}")
         GLOBAL_APP_STATE.set("app_state", c.AppStatus.WARNING)
         return None
     except Exception as e:
-        logger.error(f"Elia API ({dataset_id}): Error fetching data for {date_str_for_api}: {e}", exc_info=True)
+        logger.error(f"Elia API ({dataset_id}): Error fetching data for {date_str}: {e}", exc_info=True)
         GLOBAL_APP_STATE.set("app_state", c.AppStatus.WARNING)
         return None
 
 
 # --- Specific Forecast Fetchers ---
-def fetch_solar_production_forecast(target_day_local: datetime) -> Optional[List[Dict[str, Any]]]:
+def fetch_solar_production_forecast(target_day_local: datetime, app_config: dict) -> Optional[List[Dict[str, Any]]]:
     """Fetches solar production forecast data for a single day from Elia Open Data."""
+    global elia_api_base_url, elia_timezone, elia_dataset_solar
+
     date_str = target_day_local.strftime('%Y/%m/%d')
     select_params = "datetime,mostrecentforecast,monitoredcapacity"
     url_params = (
@@ -85,7 +82,7 @@ def fetch_solar_production_forecast(target_day_local: datetime) -> Optional[List
         f"&refine=region%3A%22Flemish-Brabant%22"
         f"&refine=datetime%3A{date_str}"
     )
-    results = _fetch_elia_data(elia_dataset_solar, url_params)
+    results = _fetch_elia_data(elia_dataset_solar, date_str, url_params)
     if results is None:
         return None
 
@@ -105,8 +102,10 @@ def fetch_solar_production_forecast(target_day_local: datetime) -> Optional[List
     return processed_records
 
 
-def fetch_wind_production_forecast(target_day_local: datetime) -> Optional[List[Dict[str, Any]]]:
+def fetch_wind_production_forecast(target_day_local: datetime, app_config: dict) -> Optional[List[Dict[str, Any]]]:
     """Fetches wind production forecast data for a single day from Elia Open Data."""
+    global elia_api_base_url, elia_timezone, elia_dataset_wind
+
     date_str = target_day_local.strftime('%Y/%m/%d')
     select_params = "datetime,sum(mostrecentforecast),sum(monitoredcapacity)"
     url_params = (
@@ -117,7 +116,7 @@ def fetch_wind_production_forecast(target_day_local: datetime) -> Optional[List[
         f"&timezone={elia_timezone}"
         f"&refine=datetime%3A{date_str}"
     )
-    results = _fetch_elia_data(elia_dataset_wind, url_params)
+    results = _fetch_elia_data(elia_dataset_wind, date_str, url_params)
     if results is None:
         return None
 
@@ -137,8 +136,10 @@ def fetch_wind_production_forecast(target_day_local: datetime) -> Optional[List[
     return processed_records
 
 
-def fetch_grid_load_forecast(target_day_local: datetime) -> Optional[List[Dict[str, Any]]]:
+def fetch_grid_load_forecast(target_day_local: datetime, app_config: dict) -> Optional[List[Dict[str, Any]]]:
     """Fetches grid load forecast data for a single day from Elia Open Data."""
+    global elia_api_base_url, elia_timezone, elia_dataset_grid_load
+
     date_str = target_day_local.strftime('%Y/%m/%d')
     select_params = "datetime,mostrecentforecast"
     url_params = (
@@ -148,7 +149,7 @@ def fetch_grid_load_forecast(target_day_local: datetime) -> Optional[List[Dict[s
         f"&timezone={elia_timezone}"
         f"&refine=datetime%3A{date_str}"
     )
-    results = _fetch_elia_data(elia_dataset_grid_load, url_params)
+    results = _fetch_elia_data(elia_dataset_grid_load, date_str, url_params)
     if results is None:
         return None
 
@@ -166,6 +167,19 @@ def fetch_grid_load_forecast(target_day_local: datetime) -> Optional[List[Dict[s
             logger.warning(f"Elia Load: Error processing record {item}: {e}")
             GLOBAL_APP_STATE.set("app_state", c.AppStatus.WARNING)
     return processed_records
+
+
+def _load_global_var(app_config: dict) -> None:
+    global elia_api_base_url, elia_timezone, elia_dataset_solar, elia_dataset_wind, elia_dataset_grid_load
+
+    elia_config = app_config.get('elia')
+    elia_api_base_url = elia_config.get('api_base_url')
+    elia_timezone = elia_config.get('timezone')
+
+    # --- Dataset IDs for Elia Open Data ---
+    elia_dataset_solar = elia_config.get('dataset_solar')
+    elia_dataset_wind = elia_config.get('dataset_wind')
+    elia_dataset_grid_load = elia_config.get('dataset_grid_load')
 
 
 # --- For testing this module directly ---

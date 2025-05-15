@@ -23,9 +23,9 @@ def populate_app_state(db_handler: DatabaseHandler, app_config: dict):
         local_now = datetime.now().astimezone()  # Get timezone-aware current time
         local_tomorrow = local_now + timedelta(days=1)
 
-        populate_price_data_in_appstate(db_handler, local_now, "electricity_prices_today",
+        populate_price_data_in_appstate(db_handler, app_config, local_now, "electricity_prices_today",
                                         force_api_fetch_if_missing=True)
-        populate_price_data_in_appstate(db_handler, local_tomorrow, "electricity_prices_tomorrow",
+        populate_price_data_in_appstate(db_handler, app_config, local_tomorrow, "electricity_prices_tomorrow",
                                         force_api_fetch_if_missing=True)
 
         if not GLOBAL_APP_STATE.get("electricity_prices_today"):
@@ -77,7 +77,7 @@ def initialize_p1_meter_client(app_config: dict):
     return p1_client_instance
 
 
-def populate_price_data_in_appstate(db_handler: DatabaseHandler, target_day_local: datetime,
+def populate_price_data_in_appstate(db_handler: DatabaseHandler, target_day_local: datetime, app_config: dict,
                                     app_state_key: str, force_api_fetch_if_missing: bool = False):
     """
     Ensures price data for target_day_local is in AppState.
@@ -104,7 +104,7 @@ def populate_price_data_in_appstate(db_handler: DatabaseHandler, target_day_loca
     if force_api_fetch_if_missing:
         logger.info(f"Attempting API fetch for {target_day_local_aware.date()} for AppState key '{app_state_key}'.")
 
-        price_points = day_ahead_price_api.fetch_entsoe_prices(target_day_local_aware)
+        price_points = day_ahead_price_api.fetch_entsoe_prices(target_day_local_aware, app_config)
 
         if price_points:  # API returned some data (could be empty list if not published)
             logger.debug(f"API fetch returned {len(price_points)} price points for {target_day_local_aware.date()}.")

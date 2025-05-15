@@ -39,7 +39,7 @@ def task_fetch_and_store_day_ahead_prices(scheduler: BaseScheduler, db_handler: 
     local_now = datetime.now().astimezone()  # Get current local time with timezone
     target_day = local_now + timedelta(days=1)
 
-    price_points = day_ahead_price_api.fetch_entsoe_prices(target_day)
+    price_points = day_ahead_price_api.fetch_entsoe_prices(target_day, app_config)
 
     if price_points is None:
         logger.error(
@@ -131,7 +131,7 @@ def task_poll_p1_meter(db_handler: DatabaseHandler, p1_client: Optional[P1MeterH
         GLOBAL_APP_STATE.set("p1_meter_data", None)  # Clear stale data
 
 
-def task_fetch_elia_forecasts(db_handler: DatabaseHandler):
+def task_fetch_elia_forecasts(db_handler: DatabaseHandler, app_config: dict):
     """
     Scheduled task to fetch various forecasts from Elia Open Data,
     and store them in the database. Fetches for the next 5 days (D+1 to D+5).
@@ -151,14 +151,14 @@ def task_fetch_elia_forecasts(db_handler: DatabaseHandler):
         logger.info(f"Fetching Elia forecasts for day: {target_day_utc.strftime('%Y-%m-%d')}")
 
         # Solar Forecast
-        solar_data = elia_forecast_api.fetch_solar_production_forecast(target_day_utc)
+        solar_data = elia_forecast_api.fetch_solar_production_forecast(target_day_utc, app_config)
         if solar_data is not None:  # None means critical error, [] means no data for day
             all_fetched_records.extend(solar_data)
         else:
             logger.error(f"Failed to fetch solar forecast for {target_day_utc.date()}. Critical error.")
 
         # Wind Forecast
-        wind_data = elia_forecast_api.fetch_wind_production_forecast(target_day_utc)
+        wind_data = elia_forecast_api.fetch_wind_production_forecast(target_day_utc, app_config)
         if wind_data is not None:
             all_fetched_records.extend(wind_data)
         else:
@@ -166,7 +166,7 @@ def task_fetch_elia_forecasts(db_handler: DatabaseHandler):
 
         # Grid Load Forecast (Elia API provides up to 4 days)
         if i <= 4:  # Check if within 4-day limit for load forecast
-            load_data = elia_forecast_api.fetch_grid_load_forecast(target_day_utc)
+            load_data = elia_forecast_api.fetch_grid_load_forecast(target_day_utc, app_config)
             if load_data is not None:
                 all_fetched_records.extend(load_data)
             else:
@@ -262,7 +262,7 @@ def register_all_jobs(scheduler: BaseScheduler, db_handler: DatabaseHandler,
                 hour=hour,
                 minute=minute,
                 id=FETCH_ELIA_FORECAST_JOB_ID,
-                args=[db_handler],
+                args=[db_handler, app_config],
                 name="Fetch Elia Forecasts",
                 replace_existing=True
             )
