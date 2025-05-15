@@ -14,11 +14,11 @@ class AppState:
 
     def __init__(self):
         self.current_values = {
-            "app_state": c.AppStatus.STARTING,
+            "app_state": c.AppStatus.STARTING,                                            # DONE
             "app_operating_mode": c.OperatingMode.MODE_AUTO,
             "app_manual_state": None,
-            "p1_meter_data": None,  # Latest raw P1 data dict
-            "p1_meter_last_stored_boundary_slot_utc_iso": None,
+            "p1_meter_data": None,  # Latest raw P1 data dict                               DONE
+            "p1_meter_last_stored_boundary_slot_utc_iso": None,                           # DONE
             "inverter_data": None,  # Latest raw inverter data dict
             "inverter_status": c.InverterStatus.OFFLINE,
             "inverter_operating_mode": c.OperatingMode.MODE_AUTO,  # auto, manual
@@ -26,11 +26,11 @@ class AppState:
             "ev_charge_status": c.EVChargeStatus.OFFLINE,
             "ev_soc_percent": None,  # EV State of Charge (%)
             "ev_charge_power_watts": 0,
-            "electricity_prices_today": None,
-            "electricity_prices_tomorrow": None,
-            "solar_forecast_watts": None,  # Forecasted PV for current period
-            "wind_forecast_pct": None,
-            "electricity_grid_load_forecast_pct": None,
+            "electricity_prices_today": None,                                             # PARSE DATA
+            "electricity_prices_tomorrow": None,                                          # PARSE DATA
+            "solar_forecast_watts": None,  # Forecasted PV for current period             # API OK
+            "wind_forecast_pct": None,                                                    # API OK
+            "electricity_grid_load_forecast_pct": None,                                   # API OK
             "evcc_operating_mode": c.OperatingMode.MODE_AUTO,  # auto, manual
             "evcc_manual_state": None,
             "evcc_limit_amp": None,

@@ -10,7 +10,7 @@ from hec.core.app_state import GLOBAL_APP_STATE
 from hec.data_sources import day_ahead_price_api, elia_forecast_api
 from hec.data_sources.p1_meter_homewizard import P1MeterHomeWizard
 from hec.database_ops.db_handler import DatabaseHandler
-from hec.logic_engine.utils import convert_utc_price_points_to_local, parse_hh_mm_time_string, process_price_points
+from hec.logic_engine.utils import convert_utc_price_points_to_local, parse_hh_mm_time_string, process_price_points_to_app_state
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +42,7 @@ def task_fetch_and_store_day_ahead_prices(scheduler: BaseScheduler, db_handler: 
 
     price_points = day_ahead_price_api.fetch_entsoe_prices(target_day, app_config)
 
-    if process_price_points(price_points, db_handler, target_day, "electricity_prices_tomorrow"):
+    if process_price_points_to_app_state(price_points, db_handler, target_day, "electricity_prices_tomorrow"):
         fetch_prices_attempt_count = 0
         return
 
@@ -286,4 +286,4 @@ def populate_price_data_in_appstate(db_handler: DatabaseHandler, target_day_loca
         price_points = day_ahead_price_api.fetch_entsoe_prices(target_day_local, app_config)
 
     # Process the price points if available
-    return process_price_points(price_points, db_handler, target_day_local, app_state_key)
+    return process_price_points_to_app_state(price_points, db_handler, target_day_local, app_state_key)

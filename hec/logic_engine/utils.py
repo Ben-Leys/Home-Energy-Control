@@ -109,9 +109,10 @@ def parse_hh_mm_time_string(time_str: str) -> Optional[Tuple[int, int]]:
         return None
 
 
-def process_price_points(price_points: list, db_handler: DatabaseHandler, target_day: datetime, app_state_key: str):
+def process_price_points_to_app_state(price_points: list, db_handler: DatabaseHandler,
+                                      target_day: datetime, app_state_key: str):
     """
-    Processes price points by storing them in the database and updating the AppState.
+    Processes price points by storing them in the database in raw format and updating the AppState with net prices.
 
     Args:
         price_points (list): List of price points retrieved from the API.
