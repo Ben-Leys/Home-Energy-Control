@@ -5,9 +5,6 @@ from datetime import datetime, timedelta
 from typing import Optional, List, Dict, Any, Tuple
 
 import hec.models.models
-from hec.core import constants as c
-from hec.data_sources import day_ahead_price_api
-from hec.core.app_state import GLOBAL_APP_STATE
 
 
 logger = logging.getLogger(__name__)
@@ -67,7 +64,6 @@ def get_current_interval_price_data(now_local: datetime, daily_intervals: Option
                 return interval_data
         except Exception as e:
             logger.error(f"Error processing interval data: {interval_data}. Error: {e}", exc_info=True)
-            GLOBAL_APP_STATE.set("app_state", c.AppStatus.ALARM)
             pass  # Continue to next interval if current one is malformed
 
     logger.warning(f"No current interval found for {now_local.isoformat()} in provided list.")

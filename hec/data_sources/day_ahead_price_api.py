@@ -209,8 +209,8 @@ def _parse_resolution_to_minutes(resolution_str: str) -> int:
 
 # --- Example for testing ---
 if __name__ == '__main__':
-    from hec.core.config_loader import load_app_config
-    APP_CONFIG = load_app_config()
+    # from hec.core.config_loader import load_app_config
+    # APP_CONFIG = load_app_config()
     # Test for today's prices
     # test_target_day = (datetime.now()).replace(hour=0, minute=0, second=0, microsecond=0)
     # Test for tomorrow
@@ -223,7 +223,7 @@ if __name__ == '__main__':
     # Configure basic logging for standalone test
     logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 
-    prices = fetch_entsoe_prices(test_target_day, APP_CONFIG)
+    prices = fetch_entsoe_prices(test_target_day, {"entsoe": {"auction_opening_hour": 13}})
 
     if prices is None:
         print("API call failed critically or bad API key.")

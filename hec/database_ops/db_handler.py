@@ -413,14 +413,12 @@ class DatabaseHandler:
 
 
 if __name__ == '__main__':
-    from hec.core.config_loader import load_app_config
-
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
     logger_main = logging.getLogger(__name__)
 
     # Initialize
-    APP_CONFIG = load_app_config()
-    db_handler = DatabaseHandler(APP_CONFIG['database'])
+    app_config = {"database": {"type": "sqlite", "path": "home_energy.db"}}
+    db_handler = DatabaseHandler(app_config['database'])
     db_handler.initialize_database()
 
     today_local = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
