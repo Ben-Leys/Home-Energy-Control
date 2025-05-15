@@ -16,6 +16,7 @@ elia_config = APP_CONFIG.get('elia')
 
 elia_api_base_url = elia_config.get('api_base_url')
 elia_timezone = elia_config.get('timezone')
+
 # --- Dataset IDs for Elia Open Data ---
 elia_dataset_solar = elia_config.get('dataset_solar')
 elia_dataset_wind = elia_config.get('dataset_wind')

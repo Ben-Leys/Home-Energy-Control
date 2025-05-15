@@ -4,6 +4,7 @@ import logging
 from datetime import datetime, timedelta
 from typing import Optional, List, Dict, Any, Tuple
 
+import hec.models.models
 from hec.core import constants as c
 from hec.data_sources import day_ahead_price_api
 from hec.core.app_state import GLOBAL_APP_STATE
@@ -13,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 
 def convert_utc_price_points_to_local(
-        utc_price_points: list[day_ahead_price_api.PricePoint], local_tz) -> list[dict]:
+        utc_price_points: list[hec.models.models.PricePoint], local_tz) -> list[dict]:
     """
     Converts a list of UTC PricePoint objects to a list of dictionaries,
     each representing a price interval with its local start time and other details.
@@ -31,7 +32,6 @@ def convert_utc_price_points_to_local(
         local_interval_prices.append({
             "interval_start_local": interval_start_local.isoformat(),  # ISO format string with TZ offset
             "price_eur_per_mwh": pp.price_eur_per_mwh,
-            "price_eur_per_kwh": pp.price_eur_per_mwh / 1000.0 if pp.price_eur_per_mwh is not None else None,
             "resolution_minutes": pp.resolution_minutes,
         })
 

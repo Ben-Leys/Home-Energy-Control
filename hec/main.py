@@ -12,7 +12,6 @@ from hec.core.logging_setup import start_logger
 from hec.core.scheduler_setup import setup_scheduler
 from hec.logic_engine import scheduled_tasks
 
-
 try:
     APP_CONFIG = load_app_config()
 except FileNotFoundError as e:
@@ -59,7 +58,7 @@ def run_application():
         return
 
     # --- SET UP SCHEDULER ---
-    run_scheduler_in_background = APP_CONFIG.get('scheduler', {}).get('run_in_background', False)
+    run_scheduler_in_background = APP_CONFIG.get('scheduler', {}).get('run_in_background', True)
     scheduler = setup_scheduler(APP_CONFIG, run_in_background=run_scheduler_in_background)
     scheduled_tasks.register_all_jobs(scheduler, db_handler, APP_CONFIG, p1_meter_client)
 

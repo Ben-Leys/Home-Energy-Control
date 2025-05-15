@@ -4,7 +4,7 @@ import logging
 from datetime import datetime, timezone, timedelta
 from typing import List, Optional, Dict, Any
 from pathlib import Path
-from hec.data_sources.day_ahead_price_api import PricePoint
+from hec.models.models import PricePoint
 
 logger = logging.getLogger(__name__)
 
@@ -230,7 +230,6 @@ class DatabaseHandler:
     def store_p1_meter_data(self, p1_data: Dict[str, Any], app_state, boundary: int = 5) -> bool:
         """
         Stores a single P1 meter data record into the database within n-minute boundary.
-        Assumes p1_data dictionary contains all necessary fields including 'timestamp_utc_iso'.
 
         Args:
             p1_data (Dict[str, Any]): The P1 data including 'timestamp_utc_iso'.
@@ -244,18 +243,18 @@ class DatabaseHandler:
             logger.warning("P1 Meter: Missing key field for DB storage.")
             return False
 
-        # Check if data needs to be stored
+        # Check if data needs to be stored in current boundary
         p1_data_ts_utc = datetime.fromisoformat(p1_data['timestamp_utc_iso'])
         if p1_data_ts_utc.minute % boundary != 0:
             logger.debug(f"P1 Meter: Current minute ({p1_data_ts_utc.minute}) is not a {boundary}-min boundary. "
                          f"Skipping DB store.")
             return False
-        last_boundary_minute = (p1_data_ts_utc.minute // boundary) * boundary
-        boundary_slot = p1_data_ts_utc.replace(minute=last_boundary_minute, second=0, microsecond=0)
-        boundary_slot_iso = boundary_slot.isoformat()
+        p1_data_boundary_minute = (p1_data_ts_utc.minute // boundary) * boundary
+        p1_data_boundary_slot = p1_data_ts_utc.replace(minute=p1_data_boundary_minute, second=0, microsecond=0)
+        p1_data_boundary_slot_iso = p1_data_boundary_slot.isoformat()
         last_db_slot_iso = app_state.get("p1_meter_last_stored_boundary_slot_utc_iso")
-        if boundary_slot_iso == last_db_slot_iso:
-            logger.debug(f"P1 Meter: Already stored data for boundary slot {boundary_slot_iso}. Skipping DB store.")
+        if p1_data_boundary_slot_iso == last_db_slot_iso:
+            logger.debug(f"P1 Meter: Already stored data for boundary slot {p1_data_boundary_slot_iso}. Skipping DB store.")
             return False
 
         # Map API keys to DB columns
@@ -305,7 +304,7 @@ class DatabaseHandler:
             if cursor.rowcount > 0:
                 logger.debug(f"P1 Meter: Successfully stored data for timestamp {p1_data['timestamp_utc_iso']} in DB.")
                 # Update AppState with the boundary slot that was just successfully written
-                app_state.set("p1_meter_last_stored_boundary_slot_utc_iso", boundary_slot_iso)
+                app_state.set("p1_meter_last_stored_boundary_slot_utc_iso", p1_data_boundary_slot_iso)
                 return True
             else:
                 logger.warning(
@@ -387,7 +386,7 @@ class DatabaseHandler:
             sql = """
                 SELECT timestamp_utc, forecast_type, resolution_minutes,
                        most_recent_forecast_mwh, monitored_capacity_mw, fetched_at_utc
-                FROM elia_renewables_forecasts
+                FROM elia_open_data
                 WHERE forecast_type = ?
                   AND timestamp_utc >= ?
                   AND timestamp_utc < ?
@@ -416,7 +415,7 @@ class DatabaseHandler:
 if __name__ == '__main__':
     from hec.core.config_loader import load_app_config
 
-    logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
     logger_main = logging.getLogger(__name__)
 
     # Initialize
@@ -424,7 +423,12 @@ if __name__ == '__main__':
     db_handler = DatabaseHandler(APP_CONFIG['database'])
     db_handler.initialize_database()
 
-    # Retrieve electricity prices
     today_local = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+    tomorrow_local = today_local + timedelta(days=1)
+    # Retrieve electricity prices
     prices_today_from_db = db_handler.get_da_prices(today_local)
     print(prices_today_from_db)
+
+    # Retrieve solar forecast
+    solar_forecast = db_handler.get_elia_forecasts("solar", today_local, tomorrow_local)
+    print(solar_forecast)

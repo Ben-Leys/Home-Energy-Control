@@ -5,13 +5,12 @@ from typing import Optional, List, Dict, Any
 from apscheduler.schedulers.base import BaseScheduler
 
 from hec.core import constants as c
-from hec.core.app_state import GLOBAL_APP_STATE
 from hec.core.app_initializer import populate_price_data_in_appstate
+from hec.core.app_state import GLOBAL_APP_STATE
 from hec.data_sources import day_ahead_price_api, elia_forecast_api
 from hec.data_sources.p1_meter_homewizard import P1MeterHomeWizard
 from hec.database_ops.db_handler import DatabaseHandler
 from hec.logic_engine.utils import convert_utc_price_points_to_local, parse_hh_mm_time_string
-
 
 logger = logging.getLogger(__name__)
 
@@ -36,27 +35,27 @@ def task_fetch_and_store_day_ahead_prices(scheduler: BaseScheduler, db_handler: 
 
     logger.info(f"Running task: Fetch and Store Day-Ahead Prices (Attempt: {fetch_prices_attempt_count + 1})")
 
-    # Determine target date: ENTSO-E auction is for D+1 (tomorrow)
+    # Determine target date: ENTSO-E auction is for D+1
     local_now = datetime.now().astimezone()  # Get current local time with timezone
-    target_day_for_prices = local_now + timedelta(days=1)
+    target_day = local_now + timedelta(days=1)
 
-    price_points = day_ahead_price_api.fetch_entsoe_prices(target_day_for_prices)
+    price_points = day_ahead_price_api.fetch_entsoe_prices(target_day)
 
     if price_points is None:
         logger.error(
-            f"Error fetching prices for {target_day_for_prices.strftime('%Y-%m-%d')}. Check API key or ENTSO-E status.")
+            f"Error fetching prices for {target_day.strftime('%Y-%m-%d')}. Check API key or ENTSO-E status.")
         fetch_prices_attempt_count += 1
     elif not price_points:  # Empty list, data likely not published yet
         if fetch_prices_attempt_count < max_retries:
-            logger.info(f"Prices for {target_day_for_prices.strftime('%Y-%m-%d')} not yet available from ENTSO-E.")
+            logger.info(f"Prices for {target_day.strftime('%Y-%m-%d')} not yet available from ENTSO-E.")
         fetch_prices_attempt_count += 1
     else:
         logger.info(
-            f"Successfully fetched {len(price_points)} price points for {target_day_for_prices.strftime('%Y-%m-%d')}.")
+            f"Successfully fetched {len(price_points)} price points for {target_day.strftime('%Y-%m-%d')}.")
         db_handler.store_da_prices(price_points)  # Store raw PricePoint data
 
         # Process for AppState (tomorrow's prices)
-        local_tz = target_day_for_prices.tzinfo if target_day_for_prices.tzinfo else datetime.now().astimezone().tzinfo
+        local_tz = target_day.tzinfo if target_day.tzinfo else datetime.now().astimezone().tzinfo
 
         processed_prices_for_appstate = convert_utc_price_points_to_local(price_points, local_tz)
         GLOBAL_APP_STATE.set("electricity_prices_tomorrow", processed_prices_for_appstate)
@@ -78,12 +77,12 @@ def task_fetch_and_store_day_ahead_prices(scheduler: BaseScheduler, db_handler: 
             logger.error(f"Could not reschedule price fetch job: {e}", exc_info=True)
     else:
         logger.error(f"Max retry attempts ({max_retries}) reached for fetching prices for "
-                     f"{target_day_for_prices.strftime('%Y-%m-%d')}. Giving up.")
+                     f"{target_day.strftime('%Y-%m-%d')}. Giving up.")
         GLOBAL_APP_STATE.set("app_state", c.AppStatus.ALARM)
         fetch_prices_attempt_count = 0  # Reset for the next day's attempt
 
 
-def task_midnight_rollover(db_handler: DatabaseHandler, app_config: dict):
+def task_midnight_rollover(db_handler: DatabaseHandler):
     logger.info("Running task: Midnight Rollover")
 
     if GLOBAL_APP_STATE.get("electricity_prices_tomorrow", []):
@@ -97,7 +96,7 @@ def task_midnight_rollover(db_handler: DatabaseHandler, app_config: dict):
         populate_price_data_in_appstate(db_handler, local_now, "electricity_prices_today",
                                         force_api_fetch_if_missing=True)
 
-    # TODO: Similar logic for renew forecasts etc.
+    # TODO: Similar logic for forecasts etc.
 
 
 def task_poll_p1_meter(db_handler: DatabaseHandler, p1_client: Optional[P1MeterHomeWizard]):
@@ -132,15 +131,13 @@ def task_poll_p1_meter(db_handler: DatabaseHandler, p1_client: Optional[P1MeterH
         GLOBAL_APP_STATE.set("p1_meter_data", None)  # Clear stale data
 
 
-def task_fetch_elia_forecasts(db_handler: DatabaseHandler, app_config: dict):
+def task_fetch_elia_forecasts(db_handler: DatabaseHandler):
     """
     Scheduled task to fetch various forecasts from Elia Open Data,
     and store them in the database. Fetches for the next 5 days (D+1 to D+5).
     Grid load forecast only available until D+4.
     """
     logger.info("Running task: Fetch Elia Renewables Forecasts.")
-
-    local_tz = datetime.now().astimezone().tzinfo
 
     # Define the range of days to fetch (e.g., today + 1 to today + 5)
     # Forecasts are for D+1, D+2, ..., D+5
@@ -213,7 +210,7 @@ def register_all_jobs(scheduler: BaseScheduler, db_handler: DatabaseHandler,
             )
             logger.info(f"Job '{FETCH_PRICES_JOB_ID}' scheduled: CRON Daily at {scheduled_time}.")
         else:
-            logger.warning(f"Could not parse time {scheduled_time}. Skipping job {FETCH_PRICES_JOB_ID}.")
+            logger.warning(f"Could not parse time {scheduled_time}. Skipping job '{FETCH_PRICES_JOB_ID}'.")
 
         # Job to make midnight rollover
         rollover_schedule = tasks_config.get(MIDNIGHT_ROLLOVER_JOB_ID, {})
@@ -227,14 +224,14 @@ def register_all_jobs(scheduler: BaseScheduler, db_handler: DatabaseHandler,
                 hour=hour,
                 minute=minute,
                 id=MIDNIGHT_ROLLOVER_JOB_ID,
-                args=[db_handler, app_config],
+                args=[db_handler],
                 name="Midnight rollover",
                 misfire_grace_time=50400,  # 13 hours later tomorrow's prices will be overwritten by day ahead fetch
                 replace_existing=True  # If re-registering jobs on app restart
             )
             logger.info(f"Job '{MIDNIGHT_ROLLOVER_JOB_ID}' scheduled: CRON Daily at {scheduled_time}.")
         else:
-            logger.warning(f"Could not parse time {scheduled_time}. Skipping job {MIDNIGHT_ROLLOVER_JOB_ID}.")
+            logger.warning(f"Could not parse time {scheduled_time}. Skipping job '{MIDNIGHT_ROLLOVER_JOB_ID}'.")
 
         # P1 meter data update
         if p1_client:
@@ -252,7 +249,7 @@ def register_all_jobs(scheduler: BaseScheduler, db_handler: DatabaseHandler,
             )
             logger.info(f"Job '{P1_METER_JOB_ID}' scheduled: interval {p1_poll_interval_sec} seconds.")
         else:
-            logger.warning("P1 Meter client not initialized. P1 polling job not scheduled.")
+            logger.warning(f"P1 Meter client not initialized. '{P1_METER_JOB_ID}' job not scheduled.")
 
         elia_forecast_schedule = tasks_config.get(FETCH_ELIA_FORECAST_JOB_ID, {})
         scheduled_time = elia_forecast_schedule.get('time')
@@ -265,14 +262,13 @@ def register_all_jobs(scheduler: BaseScheduler, db_handler: DatabaseHandler,
                 hour=hour,
                 minute=minute,
                 id=FETCH_ELIA_FORECAST_JOB_ID,
-                args=[db_handler, app_config],
+                args=[db_handler],
                 name="Fetch Elia Forecasts",
                 replace_existing=True
             )
-            logger.info(
-                f"Job 'fetch_elia_renewables_forecasts' scheduled: CRON Daily at {scheduled_time}.")
+            logger.info(f"Job '{FETCH_ELIA_FORECAST_JOB_ID}' scheduled: CRON Daily at {scheduled_time}.")
         else:
-            logger.warning(f"Could not parse time {scheduled_time}. Skipping job {FETCH_PRICES_JOB_ID}.")
+            logger.warning(f"Could not parse time {scheduled_time}. Skipping job '{FETCH_PRICES_JOB_ID}'.")
 
     except Exception as e:
         logger.critical(f"Failed to register scheduled jobs: {e}", exc_info=True)

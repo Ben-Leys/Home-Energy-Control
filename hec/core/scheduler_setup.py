@@ -13,15 +13,14 @@ def setup_scheduler(config: dict, run_in_background: bool = False):
 
     Args:
         config (dict): Application configuration.
-        run_in_background (bool): If True, use BackgroundScheduler, otherwise BlockingScheduler.
+        run_in_background (bool): If True use BackgroundScheduler, otherwise BlockingScheduler.
 
     Returns:
         APScheduler instance (BlockingScheduler or BackgroundScheduler).
     """
-    scheduler_config = config.get('scheduler', {})  # Get scheduler specific config if any
+    scheduler_config = config.get('scheduler', {})  # Get scheduler specific config
 
     # Define executors
-    # Default executor is ThreadPoolExecutor(10)
     executors = {
         'default': ThreadPoolExecutor(scheduler_config.get('thread_pool_max_workers', 10)),
     }
