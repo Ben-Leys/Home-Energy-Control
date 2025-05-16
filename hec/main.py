@@ -6,7 +6,7 @@ from hec.core.api_server import run_api_server
 from hec.core.app_initializer import (populate_app_state, initialize_database_handler,
                                       initialize_p1_meter_client, setup_scheduler, load_app_config)
 from hec.core.app_state import GLOBAL_APP_STATE
-from hec.core.logging import start_logger
+from hec.core.app_logging import start_logger
 from hec.core.tariff_manager import initialize_tariff_manager
 from hec.logic_engine import scheduled_tasks
 

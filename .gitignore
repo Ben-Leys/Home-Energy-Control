@@ -26,3 +26,5 @@ config.yaml
 data/
 /packages.dot
 /packages.html
+/classes.html
+/sql_dump/

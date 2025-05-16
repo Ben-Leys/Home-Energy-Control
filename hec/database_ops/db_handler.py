@@ -1,10 +1,11 @@
 # database_ops/db_handler.py
-import sqlite3
 import logging
-from datetime import datetime, timezone, timedelta
-from typing import List, Optional, Dict, Any
+import sqlite3
+from datetime import datetime, timezone, timedelta, time, date
 from pathlib import Path
-from hec.models.models import PricePoint
+from typing import List, Optional, Dict, Any
+
+from hec.models.models import PricePoint, NetElectricityPriceInterval
 
 logger = logging.getLogger(__name__)
 
@@ -188,10 +189,10 @@ class DatabaseHandler:
         Returns a list of PricePoint objects.
         """
         results = []
-        local_tz = target_day_local.tzinfo if target_day_local.tzinfo else datetime.now().astimezone().tzinfo
+        local_tz = target_day_local.tzinfo or datetime.now().astimezone().tzinfo
 
-        day_start_local = target_day_local.replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=local_tz)
-        day_end_local = (day_start_local + timedelta(days=1))
+        day_start_local = datetime.combine(target_day_local.date(), time.min, local_tz)
+        day_end_local = day_start_local + timedelta(days=1)
 
         # Convert local day boundaries to UTC strings for querying
         day_start_utc_str = day_start_local.astimezone(timezone.utc).isoformat()
@@ -254,7 +255,7 @@ class DatabaseHandler:
         p1_data_boundary_slot_iso = p1_data_boundary_slot.isoformat()
         last_db_slot_iso = app_state.get("p1_meter_last_stored_boundary_slot_utc_iso")
         if p1_data_boundary_slot_iso == last_db_slot_iso:
-            logger.debug(f"P1 Meter: Already stored data for boundary slot {p1_data_boundary_slot_iso}. Skipping DB store.")
+            logger.debug(f"P1 Meter: Already stored data for boundary slot {p1_data_boundary_slot_iso}.")
             return False
 
         # Map API keys to DB columns
@@ -313,6 +314,298 @@ class DatabaseHandler:
         except sqlite3.Error as e:
             logger.error(f"P1 Meter: Error storing data in database: {e}", exc_info=True)
             return False
+
+    def get_energy_deltas_for_period(self, start_date: date, end_date: date) -> Optional[Dict[str, Any]]:
+        """
+        Calculate total power imported and exported between the start_date_str
+        and the end of end_date_str (local time).
+
+        It finds the closest P1 meter reading on or before the start of the period,
+        and the closest reading on or after the end of the period, then calculates the delta.
+
+        Args:
+            start_date (date): Start date for calculation (local).
+            end_date (date): End date for calculation (local, inclusive).
+
+        Returns:
+            Optional[Dict[str, Any]]: A dictionary with 'total_power_imported_kwh',
+                                      'total_power_exported_kwh', 'actual_start_timestamp_utc',
+                                      'actual_end_timestamp_utc', and 'duration_seconds',
+                                      or None if data is insufficient.
+        """
+        # Define the period in local time, then convert to UTC. Add 150 seconds as 300 seconds between meter readings.
+        local_tz = datetime.now().astimezone().tzinfo
+        period_start_local = datetime.combine(start_date, datetime.min.time(), tzinfo=local_tz) + timedelta(seconds=150)
+        period_end_local = datetime.combine(end_date, datetime.max.time(), tzinfo=local_tz) + timedelta(seconds=150)
+
+        period_start_utc_iso = period_start_local.astimezone(timezone.utc).isoformat()
+        period_end_utc_iso = period_end_local.astimezone(timezone.utc).isoformat()
+
+        logger.debug(f"Calculating P1 deltas for local period: {start_date} to {end_date}")
+        logger.debug(f"Corresponds to UTC range for query: {period_start_utc_iso} to {period_end_utc_iso}")
+
+        try:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+
+            # Get the last reading on or before the start of the period_start_local
+            cursor.execute(
+                """
+                SELECT total_power_import_kwh, total_power_export_kwh, timestamp_utc
+                FROM p1_meter_log
+                WHERE timestamp_utc <= ?
+                ORDER BY timestamp_utc DESC 
+                LIMIT 1
+                """,
+                (period_start_utc_iso,)
+            )
+            start_boundary_row = cursor.fetchone()
+
+            if not start_boundary_row:
+                logger.warning(f"P1 Meter deltas: No data found on or before {period_start_utc_iso}.")
+                return None
+
+            start_import_val, start_export_val, actual_start_ts_str = start_boundary_row
+            logger.debug(f"Start boundary record: Import={start_import_val}, "
+                         f"Export={start_export_val}, TS_UTC={actual_start_ts_str}")
+
+            # Get the first reading on or after the end of period_end_local
+            cursor.execute(
+                """
+                SELECT total_power_import_kwh, total_power_export_kwh, timestamp_utc
+                FROM p1_meter_log
+                WHERE timestamp_utc <= ? 
+                ORDER BY timestamp_utc DESC
+                LIMIT 1
+                """,
+                (period_end_utc_iso,)
+            )
+            end_boundary_row = cursor.fetchone()
+
+            # If no reading found by the end of the period, try to find the very next one available after.
+            if not end_boundary_row:
+                logger.info(
+                    f"No P1 reading found by end of period ({period_end_utc_iso}). Looking for next available after.")
+                cursor.execute(
+                    """
+                    SELECT total_power_import_kwh, total_power_export_kwh, timestamp_utc
+                    FROM p1_meter_log
+                    WHERE timestamp_utc > ? 
+                    ORDER BY timestamp_utc 
+                    LIMIT 1
+                    """,
+                    (period_end_utc_iso,)
+                )
+                end_boundary_row = cursor.fetchone()
+
+            if not end_boundary_row:
+                logger.warning(f"P1 Meter deltas: No data found on or after {period_end_utc_iso}.")
+                return None
+
+            end_import_val, end_export_val, actual_end_ts_str = end_boundary_row
+            logger.debug(f"End boundary record: Import={end_import_val}, "
+                         f"Export={end_export_val}, TS_UTC={actual_end_ts_str}")
+
+            # Ensure valid numbers
+            if start_import_val is None or start_export_val is None or \
+                    end_import_val is None or end_export_val is None:
+                logger.error("P1 Meter deltas: Null values found for import/export totals in boundary records.")
+                return None
+
+            # Ensure the end timestamp is actually after the start timestamp
+            actual_start_dt = datetime.fromisoformat(actual_start_ts_str)
+            actual_end_dt = datetime.fromisoformat(actual_end_ts_str)
+
+            if actual_end_dt <= actual_start_dt:
+                logger.warning(
+                    f"P1 Meter deltas: End time ({actual_end_ts_str}) is not after start time ({actual_start_ts_str}). "
+                    "This might happen if query range is too small for available data. No delta calculated.")
+                return None
+
+            total_power_imported_kwh = round(end_import_val - start_import_val, 3)
+            total_power_exported_kwh = round(end_export_val - start_export_val, 3)
+
+            duration_seconds = int((actual_end_dt - actual_start_dt).total_seconds())
+
+            # Sanity check: if import/export decreased, it means meter reset or bad data.
+            if total_power_imported_kwh < 0:
+                logger.warning(f"P1 Meter deltas: Calculated negative import ({total_power_imported_kwh} kWh). "
+                               f"Start Import: {start_import_val} @ {actual_start_ts_str}, "
+                               f"End Import: {end_import_val} @ {actual_end_ts_str}. "
+                               "This might indicate a meter reset or data issue. Reporting as 0 for this period.")
+                total_power_imported_kwh = 0.0
+
+            if total_power_exported_kwh < 0:
+                logger.warning(f"P1 Meter deltas: Calculated negative export ({total_power_exported_kwh} kWh). "
+                               f"Start Export: {start_export_val} @ {actual_start_ts_str}, "
+                               f"End Export: {end_export_val} @ {actual_end_ts_str}. "
+                               "This might indicate a meter reset or data issue. Reporting as 0 for this period.")
+                total_power_exported_kwh = 0.0
+
+            return {
+                "total_power_imported_kwh": total_power_imported_kwh,
+                "total_power_exported_kwh": total_power_exported_kwh,
+                "actual_start_timestamp_utc": actual_start_ts_str,
+                "actual_end_timestamp_utc": actual_end_ts_str,
+                "duration_seconds": duration_seconds
+            }
+
+        except sqlite3.Error as e:
+            logger.error(f"P1 Meter deltas: DB error for range {start_date}-{end_date}: {e}", exc_info=True)
+            return None
+        except Exception as e:
+            logger.error(f"P1 Meter deltas: Unexpected error for range {start_date}-{end_date}: {e}",
+                         exc_info=True)
+            return None
+
+    def get_energy_deltas_for_intervals(self, ivs: List[NetElectricityPriceInterval]) -> Dict[str, Dict[str, float]]:
+        """
+        For each NetElectricityPriceInterval, compute how many kWh were imported
+        and exported during that interval.
+
+        Returns a mapping from interval_start_local.isoformat() to
+        {"imported_kwh": float, "exported_kwh": float}.
+        """
+        if not ivs:
+            return {}
+
+        # Determine overall UTC window (with 150-second buffer)
+        # Sort intervals by start just in case
+        ivs = sorted(ivs, key=lambda i: i.interval_start_local)
+        first_start = ivs[0].interval_start_local
+        last_end = ivs[-1].interval_start_local + timedelta(minutes=ivs[-1].resolution_minutes)
+
+        buf = timedelta(seconds=150)
+        window_start_utc = (first_start - buf).astimezone(timezone.utc).isoformat()
+        window_end_utc = (last_end + buf).astimezone(timezone.utc).isoformat()
+
+        # Fetch all readings
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+               SELECT timestamp_utc, total_power_import_kwh, total_power_export_kwh
+               FROM p1_meter_log
+               WHERE timestamp_utc >= ? AND timestamp_utc <= ?
+               ORDER BY timestamp_utc
+           """, (window_start_utc, window_end_utc))
+        rows = cursor.fetchall()
+        if not rows:
+            return {}
+
+        # Convert to list of (dt, import, export)
+        readings = [
+            (datetime.fromisoformat(ts_str), imp, exp)
+            for ts_str, imp, exp in rows
+        ]
+
+        # For each interval, find start/end readings
+        result: Dict[str, Dict[str, float]] = {}
+        read_idx = 0
+        n = len(readings)
+
+        for iv in ivs:
+            iv_start_utc = iv.interval_start_local.astimezone(timezone.utc)
+            iv_end_utc = (iv.interval_start_local + timedelta(minutes=iv.resolution_minutes)).astimezone(timezone.utc)
+
+            # Find start reading: last reading <= iv_start_utc
+            start_imp = start_exp = None
+            while read_idx < n and readings[read_idx][0] <= iv_start_utc:
+                start_ts, start_imp, start_exp = readings[read_idx]
+                read_idx += 1
+            # If we never found a ≤ start, use the first reading
+            if start_imp is None:
+                start_ts, start_imp, start_exp = readings[0]
+
+            # Find end reading: first reading ≥ iv_end_utc
+            end_idx = read_idx
+            while end_idx < n and readings[end_idx][0] < iv_end_utc:
+                end_idx += 1
+            if end_idx < n:
+                _, end_imp, end_exp = readings[end_idx]
+            else:
+                # No reading ≥ end—use last available
+                _, end_imp, end_exp = readings[-1]
+
+            # Compute deltas (clamped at 0)
+            imported = max(0.0, end_imp - start_imp)
+            exported = max(0.0, end_exp - start_exp)
+
+            result[iv.interval_start_local.isoformat()] = {
+                "imported_kwh": round(imported, 3),
+                "exported_kwh": round(exported, 3)
+            }
+
+            # Prepare for next interval:
+            # rewind read_idx one if end_idx < n so next start can use this same point
+            if end_idx < n:
+                read_idx = max(0, end_idx - 1)
+
+        return result
+
+    def get_avg_monthly_peak_w_last_12m(self, reference_date: date, minimum_peak_W: int) -> Optional[float]:
+        """
+        Returns the average monthly peak power (in W) for the 12 months ending
+        with the month of `reference_date`. If the latest month is not complete,
+        it still uses the last logged peak of that month.
+
+        Relies on p1_meter_log.monthly_power_peak_w being updated only when
+        a new higher peak occurs, and reset shortly after month rollover.
+
+        Args:
+            reference_date (date): any day in the last month to include.
+            minimum_peak_W: the minimum peak for tariff calculation
+
+        Returns:
+            Optional[float]: average peak in kW, or None if no data.
+        """
+        conn = self._get_connection()
+        cursor = conn.cursor()
+
+        peaks_kw = []
+
+        # Helper to roll back months
+        yr, m = reference_date.year, reference_date.month
+        for i in range(12):
+            # compute year/month for this offset
+            mon = m - i
+            year = yr + (mon - 1) // 12
+            month = (mon - 1) % 12 + 1
+
+            # start and end of that month in localtime
+            start_local = datetime(year, month, 1)
+            if month == 12:
+                next_start_local = datetime(year + 1, 1, 1)
+            else:
+                next_start_local = datetime(year, month + 1, 1)
+
+            # convert bounds to UTC‐iso
+            start_utc = start_local.astimezone(tz=datetime.now().astimezone().tzinfo) \
+                .astimezone(tz=timezone.utc).isoformat()
+            end_utc = next_start_local.astimezone(tz=datetime.now().astimezone().tzinfo) \
+                .astimezone(tz=timezone.utc).isoformat()
+
+            # grab the last reading in that month
+            cursor.execute("""
+                SELECT monthly_power_peak_w
+                FROM p1_meter_log
+                WHERE timestamp_utc >= ? AND timestamp_utc < ?
+                ORDER BY timestamp_utc DESC
+                LIMIT 1
+            """, (start_utc, end_utc))
+
+            row = cursor.fetchone()
+            if not row:
+                continue
+
+            peak_w, = row
+            logger.debug(f"Peak w: {max(peak_w, minimum_peak_W)} for {mon}/{year}")
+            if peak_w is not None:
+                peaks_kw.append(max(peak_w, minimum_peak_W))
+
+        if not peaks_kw:
+            return None
+
+        return sum(peaks_kw) / len(peaks_kw)
 
     def store_elia_forecasts(self, forecasts: List[Dict[str, Any]]) -> int:
         """
@@ -373,7 +666,6 @@ class DatabaseHandler:
         """
 
         results = []
-        local_tz = start_date_local.tzinfo if start_date_local.tzinfo else datetime.now().astimezone().tzinfo
 
         start_utc_str = start_date_local.astimezone(timezone.utc).isoformat()
         end_utc_str = end_date_local.astimezone(timezone.utc).isoformat()
@@ -412,21 +704,31 @@ class DatabaseHandler:
         return results
 
 
-if __name__ == '__main__':
-    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-    logger_main = logging.getLogger(__name__)
-
-    # Initialize
-    app_config = {"database": {"type": "sqlite", "path": "home_energy.db"}}
-    db_handler = DatabaseHandler(app_config['database'])
-    db_handler.initialize_database()
-
-    today_local = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
-    tomorrow_local = today_local + timedelta(days=1)
-    # Retrieve electricity prices
-    prices_today_from_db = db_handler.get_da_prices(today_local)
-    print(prices_today_from_db)
-
-    # Retrieve solar forecast
-    solar_forecast = db_handler.get_elia_forecasts("solar", today_local, tomorrow_local)
-    print(solar_forecast)
+# if __name__ == '__main__':
+#     logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+#     logger_main = logging.getLogger(__name__)
+#
+#     # Initialize
+#     app_config = {"database": {"type": "sqlite", "path": "home_energy.db"}}
+#     db_handler = DatabaseHandler(app_config['database'])
+#     db_handler.initialize_database()
+#
+#     # Power peak avg
+#     print(db_handler.get_avg_monthly_peak_w_last_12m(date(2025, 5, 1), 2500))
+#     # Energy deltas
+#     nepis: List[NetElectricityPriceInterval] = \
+#         [NetElectricityPriceInterval(datetime(2025, 5, 14, 9, 0), 60, "dynamic", {}),
+#          NetElectricityPriceInterval(datetime(2025, 5, 14, 10, 0), 60, "dynamic", {})]
+#     print(db_handler.get_energy_deltas_for_intervals(nepis))
+#
+#     print(db_handler.get_energy_deltas_for_period(date(2025, 5, 1), date(2025, 5, 10)))
+#
+#     today_local = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+#     tomorrow_local = today_local + timedelta(days=1)
+#     # Retrieve electricity prices
+#     prices_today_from_db = db_handler.get_da_prices(today_local)
+#     print(prices_today_from_db)
+#
+#     # Retrieve solar forecast
+#     solar_forecast = db_handler.get_elia_forecasts("solar", today_local, tomorrow_local)
+#     print(solar_forecast)

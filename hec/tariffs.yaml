@@ -26,20 +26,42 @@ energy_supplier:
         value: 0.1411
       - start_date: '2024-10-01'
         value: 0.1259
+      - start_date: '2024-09-01'
+        value: 0.1193
+      - start_date: '2024-08-01'
+        value: 0.1184
+      - start_date: '2024-07-01'
+        value: 0.1126
+      - start_date: '2024-06-01'
+        value: 0.1151
+      - start_date: '2024-05-01'
+        value: 0.1124
+      - start_date: '2024-04-01'
+        value: 0.1094
+      - start_date: '2024-03-01'
+        value: 0.1166
+      - start_date: '2024-02-01'
+        value: 0.1166
+      - start_date: '2024-01-01'
+        value: 0.1254
     sell_price_per_kwh:
       - start_date: '2025-01-01'
         value: 0.02
       - start_date: '2024-01-01'
         value: 0.075
     green_certificate_fee_per_kwh:
-      - start_date: '2024-01-01'
+      - start_date: '2024-06-01'
         value: 0.011
-    chp_certificate_fee_per_kwh:
       - start_date: '2024-01-01'
+        value: 0.01581
+    chp_certificate_fee_per_kwh:
+      - start_date: '2024-06-01'
         value: 0.00392
+      - start_date: '2024-01-01'
+        value: 0.002576
   dynamic:
     subscription_cost:
-      - start_date: '2025-01-01'
+      - start_date: '2024-01-01'
         value: 5
     spot_sell_multiplier:
       - start_date: '2025-01-01'
@@ -58,11 +80,15 @@ energy_supplier:
       - start_date: '2024-01-01'
         value: 0.004
     green_certificate_fee_per_kwh:
-      - start_date: '2024-01-01'
+      - start_date: '2024-06-01'
         value: 0.011
-    chp_certificate_fee_per_kwh:
       - start_date: '2024-01-01'
+        value: 0.01581
+    chp_certificate_fee_per_kwh:
+      - start_date: '2024-06-01'
         value: 0.00392
+      - start_date: '2024-01-01'
+        value: 0.002576
 
 grid_operator:
   data_management:
@@ -80,6 +106,9 @@ grid_operator:
       value: 55.80
     - start_date: '2024-01-01'
       value: 37.9640234
+  capacity_tariff_minimum_kw:
+    - start_date: '2024-01-01'
+      value: 2.5
 
 government:
   energy_contribution_per_kwh:
@@ -88,10 +117,10 @@ government:
   excise_duty_tiers:
     - start_date: '2024-01-01'
       value: 3000
-  rate_eur_per_kwh_below:
+  rate_per_kwh_below:
     - start_date: '2024-01-01'
       value: 0.04748
-  rate_eur_per_kwh_above:
+  rate_per_kwh_above:
     - start_date: '2024-01-01'
       value: 0.04748
   vat:

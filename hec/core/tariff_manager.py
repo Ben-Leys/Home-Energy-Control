@@ -116,3 +116,15 @@ class TariffManager:
 
 def initialize_tariff_manager(app_config: Dict) -> TariffManager:
     return TariffManager(app_config)
+
+
+# Only for testing
+if __name__ == "__main__":
+    # from hec.core.app_initializer import load_app_config
+    config = {}
+    # config = load_app_config()
+    tm = initialize_tariff_manager(config)
+    print("Tariffs for 01/01/2024")
+    print(tm.get_all_tariffs(date(2024, 1, 1)))
+    print("\nTariffs for 01/01/2025")
+    print(tm.get_all_tariffs(date(2025, 1, 1)))
