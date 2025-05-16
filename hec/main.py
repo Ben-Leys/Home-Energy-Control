@@ -1,6 +1,5 @@
 import logging
 import time
-from threading import Thread
 
 from hec.core import constants as c
 from hec.core.api_server import run_api_server
@@ -44,18 +43,11 @@ def run_application():
     populate_app_state(db_handler, APP_CONFIG)
 
     # --- START API SERVER ---
-    api_thread = None
-    if APP_CONFIG.get('api_server', {}).get('enabled', True):
-        api_thread = Thread(target=run_api_server, args=(APP_CONFIG,), daemon=True)
-        api_thread.start()
-    else:
-        logger.info("API server is disabled in configuration.")
+    api_thread = run_api_server(APP_CONFIG)
 
     # Continue if no ALARM
     if GLOBAL_APP_STATE.get("app_state") == c.AppStatus.ALARM:
         logger.critical("Application initialization failed. Exiting.")
-        if db_handler:
-            db_handler.close_connection()
         return
 
     # --- SET UP SCHEDULER ---
