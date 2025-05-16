@@ -3,13 +3,27 @@ import logging
 import sys
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
+from hec.core import constants as c
 
 
-def start_logger(config):
+class GlobalStateHandler(logging.Handler):
+    """Custom logging handler to update global application state."""
+    def __init__(self, global_app_state):
+        super().__init__()
+        self.global_app_state = global_app_state
+
+    def emit(self, record):
+        if record.levelno == logging.WARNING:
+            self.global_app_state.set("app_state", c.AppStatus.WARNING)
+        elif record.levelno >= logging.ERROR:
+            self.global_app_state.set("app_state", c.AppStatus.ALARM)
+
+
+def start_logger(config, global_app_state=None):
     """Configures logging for the application based on the config."""
-    log_level_str = config.get('application', {}).get('log_level', 'INFO').upper()
+    log_level_app = config.get('application', {}).get('log_level', 'INFO').upper()
     log_level_file = config.get('application', {}).get('log_level_file', 'DEBUG').upper()
-    log_level = getattr(logging, log_level_str, logging.INFO)
+    log_level = getattr(logging, log_level_app, logging.INFO)
 
     log_format = '%(asctime)s - %(levelname)s - %(name)s - %(message)s'
     date_format = '%Y-%m-%d %H:%M:%S'
@@ -56,4 +70,10 @@ def start_logger(config):
     else:
         root_logger.info("File logging is disabled in config.")
 
-    root_logger.info(f"Logger started. Level: {log_level_str}")
+    # Add GlobalStateHandler
+    if global_app_state is not None:
+        global_state_handler = GlobalStateHandler(global_app_state)
+        global_state_handler.setLevel(logging.WARNING)  # Only WARNING and ERROR
+        root_logger.addHandler(global_state_handler)
+
+    root_logger.info(f"Logger started. Level: {log_level_app}")

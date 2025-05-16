@@ -29,7 +29,6 @@ def populate_app_state(db_handler: DatabaseHandler, app_config: dict):
         if not GLOBAL_APP_STATE.get("electricity_prices_today"):
             logger.warning("AppState 'electricity_prices_today' is empty after initial population attempt. "
                            "Price-based decisions will fail.")
-            GLOBAL_APP_STATE.set("app_state", c.AppStatus.ALARM)
     except Exception as e:
         logger.error(f"Error during initial AppState population for prices: {e}", exc_info=True)
 
@@ -41,11 +40,9 @@ def initialize_database_handler(app_config: dict) -> Optional[DatabaseHandler]:
         return db_handler
     except KeyError:
         logger.critical("Database configuration missing in config.yaml. Exiting.")
-        GLOBAL_APP_STATE.set("app_state", c.AppStatus.ALARM)
         return None
     except Exception as e:
         logger.critical(f"Failed to initialize database: {e}", exc_info=True)
-        GLOBAL_APP_STATE.set("app_state", c.AppStatus.ALARM)
         return None
 
 
@@ -64,8 +61,7 @@ def initialize_p1_meter_client(app_config: dict):
             p1_client_instance = None
 
         if p1_client_instance and not p1_client_instance.is_initialized:
-            logger.error("P1 meter client failed to initialize properly.")
-            GLOBAL_APP_STATE.set("app_state", c.AppStatus.WARNING)
+            logger.warning("P1 meter client failed to initialize properly.")
             p1_client_instance = None
 
     except Exception as e:

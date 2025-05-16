@@ -5,31 +5,25 @@ import json
 from datetime import datetime, timedelta, timezone
 from typing import List, Dict, Any, Optional
 
-from hec.core import constants as c
-from hec.core.app_state import GLOBAL_APP_STATE
-
 logger = logging.getLogger(__name__)
-
-elia_api_base_url = ""
-elia_timezone = ""
-elia_dataset_solar = ""
-elia_dataset_wind = ""
-elia_dataset_grid_load = ""
 
 
 # --- Common Helper for API Requests ---
-def _fetch_elia_data(dataset_id: str, date_str: str, url_params: str) -> Optional[List[Dict[str, Any]]]:
+def _fetch_elia_data(base_url: str, dataset_id: str, date_str: str, url_params: str) -> Optional[List[Dict[str, Any]]]:
     """
     Generic function to fetch data from Elia Open Data API.
 
     Args:
+        base_url (str): Elia Open Data API base URL.
         dataset_id (str): The Elia dataset ID
+        date_str (str): The Elia date string
         url_params (str): params to pass to Elia Open Data API
 
     Returns:
         Optional[List[Dict[str, Any]]]: List of result dictionaries, or None on critical error.
     """
-    url = f"{elia_api_base_url}/{dataset_id}/records{url_params}"
+
+    url = f"{base_url}/{dataset_id}/records{url_params}"
     logger.debug(f"Elia API: Fetching from {url}")
 
     response = ''
@@ -45,171 +39,105 @@ def _fetch_elia_data(dataset_id: str, date_str: str, url_params: str) -> Optiona
 
         # Check for API specific errors in the results structure
         if 'message' in data and isinstance(data['message'], dict) and data['message'].get('type') == 'error':
-            logger.error(
-                f"Elia API ({dataset_id}): API returned error: {data['message']['text']} for date {date_str}.")
-            GLOBAL_APP_STATE.set("app_state", c.AppStatus.WARNING)
+            logger.warning(f"Elia API ({dataset_id}): returned error: {data['message']['text']} for date {date_str}.")
             return None  # Critical API error
 
         return results
 
     except requests.exceptions.RequestException as e:
-        logger.error(f"Elia API ({dataset_id}): Request failed for date {date_str}: {e}", exc_info=True)
-        GLOBAL_APP_STATE.set("app_state", c.AppStatus.WARNING)
+        logger.warning(f"Elia API ({dataset_id}): Request failed for date {date_str}: {e}", exc_info=True)
         return None
     except json.JSONDecodeError as e:
-        logger.error(f"Elia API ({dataset_id}): Failed to decode JSON for {date_str}: {e}", exc_info=True)
+        logger.warning(f"Elia API ({dataset_id}): Failed to decode JSON for {date_str}: {e}", exc_info=True)
         logger.debug(f"Elia API ({dataset_id}): Raw response: {response.text if response else 'N/A'}")
-        GLOBAL_APP_STATE.set("app_state", c.AppStatus.WARNING)
         return None
     except Exception as e:
-        logger.error(f"Elia API ({dataset_id}): Error fetching data for {date_str}: {e}", exc_info=True)
-        GLOBAL_APP_STATE.set("app_state", c.AppStatus.WARNING)
+        logger.warning(f"Elia API ({dataset_id}): Error fetching data for {date_str}: {e}", exc_info=True)
         return None
 
 
 # --- Specific Forecast Fetchers ---
-def fetch_solar_production_forecast(target_day_local: datetime, app_config: dict) -> Optional[List[Dict[str, Any]]]:
-    """Fetches solar production forecast data for a single day from Elia Open Data."""
-    global elia_api_base_url, elia_timezone, elia_dataset_solar
+def fetch_forecast(target_day_local: datetime, app_config: dict, forecast_type: str) -> Optional[List[Dict[str, Any]]]:
+    """Fetches forecast data for a specific type (solar, wind, grid_load)."""
+    config = _load_config(app_config)
 
-    date_str = target_day_local.strftime('%Y/%m/%d')
-    select_params = "datetime,mostrecentforecast,monitoredcapacity"
-    url_params = (
-        f"?select={select_params}"
-        f"&order_by=datetime"
-        f"&limit=100"  # Max limit for a single call
-        f"&timezone={elia_timezone}"
-        f"&refine=region%3A%22Flemish-Brabant%22"
-        f"&refine=datetime%3A{date_str}"
-    )
-    results = _fetch_elia_data(elia_dataset_solar, date_str, url_params)
-    if results is None:
+    dataset_map = {
+        "solar": config['dataset_solar'],
+        "wind": config['dataset_wind'],
+        "grid_load": config['dataset_grid_load'],
+    }
+
+    dataset_id = dataset_map.get(forecast_type)
+    if not dataset_id:
+        logger.warning(f"Invalid forecast type: {forecast_type}")
         return None
 
-    processed_records = []
-    for item in results:
-        try:
-            processed_records.append({
-                "timestamp_utc": item.get('datetime'),
-                "forecast_type": "solar",
-                "resolution_minutes": 15,
-                "most_recent_forecast_mwh": round(item.get('mostrecentforecast'), 3),
-                "monitored_capacity_mw": round(item.get('monitoredcapacity'), 3),
-            })
-        except Exception as e:
-            logger.warning(f"Elia Solar: Error processing record {item}: {e}")
-            GLOBAL_APP_STATE.set("app_state", c.AppStatus.WARNING)
-    return processed_records
-
-
-def fetch_wind_production_forecast(target_day_local: datetime, app_config: dict) -> Optional[List[Dict[str, Any]]]:
-    """Fetches wind production forecast data for a single day from Elia Open Data."""
-    global elia_api_base_url, elia_timezone, elia_dataset_wind
-
     date_str = target_day_local.strftime('%Y/%m/%d')
-    select_params = "datetime,sum(mostrecentforecast),sum(monitoredcapacity)"
+    select_params_map = {
+        "solar": "datetime,mostrecentforecast,monitoredcapacity",
+        "wind": "datetime,sum(mostrecentforecast),sum(monitoredcapacity)",
+        "grid_load": "datetime,mostrecentforecast"
+    }
     url_params = (
-        f"?select={select_params}"
-        f"&group_by=datetime"
+        f"?select={select_params_map[forecast_type]}"
+        f"{'&group_by=datetime' if forecast_type == 'wind' else ''}"
         f"&order_by=datetime"
         f"&limit=100"
-        f"&timezone={elia_timezone}"
+        f"&timezone={config['timezone']}"
+        f"{'&refine=region%3A%22Flemish-Brabant%22' if forecast_type == 'solar' else ''}"
         f"&refine=datetime%3A{date_str}"
     )
-    results = _fetch_elia_data(elia_dataset_wind, date_str, url_params)
+
+    results = _fetch_elia_data(config['api_base_url'], dataset_id, date_str, url_params)
     if results is None:
         return None
 
     processed_records = []
     for item in results:
         try:
-            processed_records.append({
+            record = {
                 "timestamp_utc": item.get('datetime'),
-                "forecast_type": "wind",
+                "forecast_type": forecast_type,
                 "resolution_minutes": 15,
-                "most_recent_forecast_mwh": round(item.get('sum(mostrecentforecast)'), 2),
-                "monitored_capacity_mw": round(item.get('sum(monitoredcapacity)'), 2)
-            })
+                "most_recent_forecast_mwh": round(item.get('mostrecentforecast', 0), 3),
+                "monitored_capacity_mw": round(item.get('monitoredcapacity', 0),
+                                               3) if 'monitoredcapacity' in item else None,
+            }
+            if forecast_type == "wind":
+                record["most_recent_forecast_mwh"] = round(item.get('sum(mostrecentforecast)', 0), 3)
+                record["monitored_capacity_mw"] = round(item.get('sum(monitoredcapacity)', 0), 3)
+            processed_records.append(record)
         except Exception as e:
-            logger.warning(f"Elia Wind: Error processing record {item}: {e}")
-            GLOBAL_APP_STATE.set("app_state", c.AppStatus.WARNING)
+            logger.warning(f"Elia {forecast_type.capitalize()}: Error processing record {item}: {e}")
     return processed_records
 
 
-def fetch_grid_load_forecast(target_day_local: datetime, app_config: dict) -> Optional[List[Dict[str, Any]]]:
-    """Fetches grid load forecast data for a single day from Elia Open Data."""
-    global elia_api_base_url, elia_timezone, elia_dataset_grid_load
-
-    date_str = target_day_local.strftime('%Y/%m/%d')
-    select_params = "datetime,mostrecentforecast"
-    url_params = (
-        f"?select={select_params}"
-        f"&order_by=datetime"
-        f"&limit=100"
-        f"&timezone={elia_timezone}"
-        f"&refine=datetime%3A{date_str}"
-    )
-    results = _fetch_elia_data(elia_dataset_grid_load, date_str, url_params)
-    if results is None:
-        return None
-
-    processed_records = []
-    for item in results:
-        try:
-            processed_records.append({
-                "timestamp_utc": item.get('datetime'),
-                "forecast_type": "grid_load",
-                "resolution_minutes": 15,  # Assuming 15 min resolution
-                "most_recent_forecast_mwh": round(item.get('mostrecentforecast'), 2),
-                "monitored_capacity_mw": None
-            })
-        except Exception as e:
-            logger.warning(f"Elia Load: Error processing record {item}: {e}")
-            GLOBAL_APP_STATE.set("app_state", c.AppStatus.WARNING)
-    return processed_records
-
-
-def _load_global_var(app_config: dict) -> None:
-    global elia_api_base_url, elia_timezone, elia_dataset_solar, elia_dataset_wind, elia_dataset_grid_load
-
-    elia_config = app_config.get('elia')
-    elia_api_base_url = elia_config.get('api_base_url')
-    elia_timezone = elia_config.get('timezone')
-
-    # --- Dataset IDs for Elia Open Data ---
-    elia_dataset_solar = elia_config.get('dataset_solar')
-    elia_dataset_wind = elia_config.get('dataset_wind')
-    elia_dataset_grid_load = elia_config.get('dataset_grid_load')
+def _load_config(app_config: dict) -> dict:
+    """Loads and returns the Elia API configuration."""
+    elia_config = app_config.get('elia', {})
+    return {
+        "api_base_url": elia_config.get('api_base_url', ''),
+        "timezone": elia_config.get('timezone', ''),
+        "dataset_solar": elia_config.get('dataset_solar', ''),
+        "dataset_wind": elia_config.get('dataset_wind', ''),
+        "dataset_grid_load": elia_config.get('dataset_grid_load', ''),
+    }
 
 
 # --- For testing this module directly ---
 if __name__ == '__main__':
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(name)s - %(message)s')
+    test_config = {"elia": {"api_base_url": "https://opendata.elia.be/api/explore/v2.1/catalog/datasets",
+                            "timezone": "UTC", "dataset_solar": "ods087", "dataset_wind": "ods086",
+                            "dataset_grid_load": "ods002"}}
 
-    print("--- Testing Elia Forecast API ---")
+    test_target_day = (datetime.now(timezone.utc) + timedelta(days=1)).replace(hour=0, minute=0, second=0,
+                                                                               microsecond=0)
 
-    # Test for tomorrow's data
-    test_target_day = (datetime.now(timezone.utc) + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
-
-    print(f"\nFetching Solar Forecast for {test_target_day.strftime('%Y-%m-%d')}:")
-    solar_data = fetch_solar_production_forecast(test_target_day)
-    if solar_data:
-        print(f"  Fetched {len(solar_data)} records. Example: {solar_data[0]}")
-    else:
-        print("  Failed or no solar data.")
-
-    print(f"\nFetching Wind Forecast for {test_target_day.strftime('%Y-%m-%d')}:")
-    wind_data = fetch_wind_production_forecast(test_target_day)
-    if wind_data:
-        print(f"  Fetched {len(wind_data)} records. Example: {wind_data[0]}")
-    else:
-        print("  Failed or no wind data.")
-
-    print(f"\nFetching Grid Load Forecast for {test_target_day.strftime('%Y-%m-%d')}:")
-    load_data = fetch_grid_load_forecast(test_target_day)
-    if load_data:
-        print(f"  Fetched {len(load_data)} records. Example: {load_data[0]}")
-    else:
-        print("  Failed or no load data.")
-
-    print("\n--- Elia Forecast API Testing Complete ---")
+    for f_type in ["solar", "wind", "grid_load"]:
+        print(f"\nFetching {f_type.capitalize()} Forecast for {test_target_day.strftime('%Y-%m-%d')}:")
+        result = fetch_forecast(test_target_day, test_config, f_type)
+        if result:
+            print(f"  Fetched {len(result)} records. Example: {result[0]}")
+        else:
+            print(f"  Failed or no {f_type} data.")

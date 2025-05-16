@@ -6,10 +6,6 @@ import time
 from datetime import datetime, timezone
 from typing import Optional, Dict, Any
 
-from hec.core import constants as c
-from hec.core.app_state import GLOBAL_APP_STATE
-
-
 logger = logging.getLogger(__name__)
 
 
@@ -43,8 +39,7 @@ class P1MeterHomeWizard:
                     self.is_initialized = True
                     return
                 else:
-                    logger.error(f"Failed to connect. HTTP Status: {response.status_code}")
-                    GLOBAL_APP_STATE.set("app_state", c.AppStatus.ALARM)
+                    logger.warning(f"Failed to connect. HTTP Status: {response.status_code}")
             except requests.RequestException as e:
                 print(f"Connection attempt failed: {e}")
 

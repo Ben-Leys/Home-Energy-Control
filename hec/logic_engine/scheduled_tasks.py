@@ -5,12 +5,12 @@ from typing import Optional, List, Dict, Any
 
 from apscheduler.schedulers.base import BaseScheduler
 
-from hec.core import constants as c
 from hec.core.app_state import GLOBAL_APP_STATE
 from hec.data_sources import day_ahead_price_api, elia_forecast_api
+from hec.data_sources.elia_forecast_api import fetch_forecast
 from hec.data_sources.p1_meter_homewizard import P1MeterHomeWizard
 from hec.database_ops.db_handler import DatabaseHandler
-from hec.logic_engine.utils import convert_utc_price_points_to_local, parse_hh_mm_time_string, process_price_points_to_app_state
+from hec.logic_engine.utils import parse_hh_mm_time_string, process_price_points_to_app_state
 
 logger = logging.getLogger(__name__)
 
@@ -55,11 +55,10 @@ def task_fetch_and_store_day_ahead_prices(scheduler: BaseScheduler, db_handler: 
             logger.info(f"Price fetch job rescheduled to run at {next_run_time.astimezone().isoformat()} "
                         f"(in {retry_interval_minutes} min).")
         except Exception as e:  # Catch JobLookupError if job was removed
-            logger.error(f"Could not reschedule price fetch job: {e}", exc_info=True)
+            logger.warning(f"Could not reschedule price fetch job: {e}", exc_info=True)
     else:
-        logger.error(f"Max retry attempts ({max_retries}) reached for fetching prices for "
+        logger.warning(f"Max retry attempts ({max_retries}) reached for fetching prices for "
                      f"{target_day.strftime('%Y-%m-%d')}. Giving up.")
-        GLOBAL_APP_STATE.set("app_state", c.AppStatus.ALARM)
         fetch_prices_attempt_count = 0  # Reset for the next day's attempt
 
 
@@ -108,7 +107,6 @@ def task_poll_p1_meter(db_handler: DatabaseHandler, p1_client: Optional[P1MeterH
         db_handler.store_p1_meter_data(p1_data, GLOBAL_APP_STATE)
     else:
         logger.warning("P1 Meter polling task: Failed to fetch data from P1 meter.")
-        GLOBAL_APP_STATE.set("app_state", c.AppStatus.WARNING)
         GLOBAL_APP_STATE.set("p1_meter_data", None)  # Clear stale data
 
 
@@ -129,39 +127,25 @@ def task_fetch_elia_forecasts(db_handler: DatabaseHandler, app_config: dict):
     for i in range(1, days_to_fetch + 1):  # From D+1 to D+5
         target_day_utc = (datetime.now(timezone.utc) + timedelta(days=i)).replace(hour=0, minute=0, second=0,
                                                                                   microsecond=0)
-        logger.info(f"Fetching Elia forecasts for day: {target_day_utc.strftime('%Y-%m-%d')}")
+        target_day_utc_str = target_day_utc.strftime("%Y-%m-%d")
+        logger.info(f"Fetching Elia forecasts for day: {target_day_utc_str}")
 
-        # Solar Forecast
-        solar_data = elia_forecast_api.fetch_solar_production_forecast(target_day_utc, app_config)
-        if solar_data is not None:  # None means critical error, [] means no data for day
-            all_fetched_records.extend(solar_data)
-        else:
-            logger.error(f"Failed to fetch solar forecast for {target_day_utc.date()}. Critical error.")
-
-        # Wind Forecast
-        wind_data = elia_forecast_api.fetch_wind_production_forecast(target_day_utc, app_config)
-        if wind_data is not None:
-            all_fetched_records.extend(wind_data)
-        else:
-            logger.error(f"Failed to fetch wind forecast for {target_day_utc.date()}. Critical error.")
-
-        # Grid Load Forecast (Elia API provides up to 4 days)
-        if i <= 4:  # Check if within 4-day limit for load forecast
-            load_data = elia_forecast_api.fetch_grid_load_forecast(target_day_utc, app_config)
-            if load_data is not None:
-                all_fetched_records.extend(load_data)
+        for forecast_type in ["solar", "wind", "grid_load"]:
+            if i > 4 and forecast_type == "grid_load":
+                logger.debug(f"Skipping grid load forecast for {target_day_utc_str} beyond Elia's 4-day limit.")
+                continue  # Grid Load Forecast (Elia API provides up to 4 days)
+            logger.debug(f"Fetching {forecast_type.capitalize()} forecast for {target_day_utc_str}.")
+            data = fetch_forecast(target_day_utc, app_config, forecast_type)
+            if data:
+                all_fetched_records.extend(data)
             else:
-                logger.error(f"Failed to fetch grid load forecast for {target_day_utc.date()}. Critical error.")
-        else:
-            logger.debug(
-                f"Skipping grid load forecast for {target_day_utc.date()} as it's beyond Elia's 4-day limit.")
+                logger.error(f"Failed to fetch {forecast_type} forecast for {target_day_utc_str}.")
 
     if all_fetched_records:
         logger.info(f"Finished fetching Elia forecasts. Total days: {days_to_fetch} rec: {len(all_fetched_records)}.")
         db_handler.store_elia_forecasts(all_fetched_records)
     else:
         logger.warning(f"No Elia forecast data fetched for {days_to_fetch} days. Check API.")
-        GLOBAL_APP_STATE.set("app_state", c.AppStatus.WARNING)
 
 
 def register_all_jobs(scheduler: BaseScheduler, db_handler: DatabaseHandler,
@@ -242,7 +226,6 @@ def register_all_jobs(scheduler: BaseScheduler, db_handler: DatabaseHandler,
 
     except Exception as e:
         logger.critical(f"Failed to register scheduled jobs: {e}", exc_info=True)
-        GLOBAL_APP_STATE.set("app_state", c.AppStatus.ALARM)
         db_handler.close_connection()  # Clean up
         return
 
@@ -262,8 +245,7 @@ def register_job(scheduler, job_id, func, trigger, trigger_args, job_args, name,
         )
         logger.info(f"Job '{job_id}' scheduled: {trigger.upper()} with args {trigger_args}.")
     except Exception as e:
-        logger.error(f"Failed to schedule job '{job_id}': {e}", exc_info=True)
-        GLOBAL_APP_STATE.set("app_state", c.AppStatus.WARNING)
+        logger.warning(f"Failed to schedule job '{job_id}': {e}", exc_info=True)
 
 
 def populate_price_data_in_appstate(db_handler: DatabaseHandler, target_day_local: datetime, app_config: dict,

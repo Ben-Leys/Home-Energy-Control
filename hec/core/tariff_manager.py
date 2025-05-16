@@ -8,21 +8,22 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 # Default path to the tariffs file, relative to project root
-DEFAULT_TARIFFS_FILE_PATH = "tariffs.yaml"
+DEFAULT_TARIFFS_FILE_NAME = "tariffs.yaml"
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 
 class TariffManager:
-    def __init__(self, tariffs_file_path: Optional[str] = None) -> Optional[None]:
-        self.tariffs_file_path = Path(tariffs_file_path) if tariffs_file_path is not None \
-            else PROJECT_ROOT / DEFAULT_TARIFFS_FILE_PATH
+    def __init__(self, app_config: Dict):
+        self.tariffs_file_path = PROJECT_ROOT / app_config.get('application').get('tariffs_file_name',
+                                                                                  DEFAULT_TARIFFS_FILE_NAME)
         self.all_tariffs: Dict[str, Dict[str, Any | Dict[str, Any]]] = {}
         self._load_tariffs()
 
     def _load_tariffs(self):
         """Loads tariffs from YAML and processes"""
+
         if not self.tariffs_file_path.exists():
-            logger.error(f"Tariff file '{self.tariffs_file_path}' not found. Pricing will be incomplete.")
+            logger.error(f"Tariff file '{self.tariffs_file_path}' not found.")
             return
 
         try:
@@ -33,7 +34,7 @@ class TariffManager:
                 logger.warning(f"Tariff file '{self.tariffs_file_path}' is empty.")
                 return
 
-            # Parse energy supplier section
+            # Process energy supplier section
             energy_supplier_tariffs = {}
             for contract_type, tariffs in raw_tariffs.get("energy_supplier", {}).items():
                 energy_supplier_tariffs[contract_type] = self.process_section(tariffs)
@@ -57,7 +58,6 @@ class TariffManager:
     def process_section(section: Dict[str, List[Dict[str, Any]]]) -> Dict[str, List[Dict[str, Any]]]:
         """Process and sort a section by start_date for each key."""
         processed_section = {}
-        print(section)
         for key, value_list in section.items():
             processed_section[key] = sorted(value_list, key=lambda x: x["start_date"], reverse=True)
         return processed_section
@@ -114,5 +114,5 @@ class TariffManager:
         return active_tariffs
 
 
-def initialize_tariff_manager(tariff_file_path: Optional[str] = None) -> TariffManager:
-    return TariffManager(tariff_file_path)
+def initialize_tariff_manager(app_config: Dict) -> TariffManager:
+    return TariffManager(app_config)

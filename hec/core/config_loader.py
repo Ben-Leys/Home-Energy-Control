@@ -1,7 +1,9 @@
-import yaml
 import logging
-from dotenv import load_dotenv
 from pathlib import Path
+from typing import Dict
+
+import yaml
+from dotenv import load_dotenv
 
 CONFIG_FILE_NAME = "config.yaml"
 BASE_DIR = Path(__file__).resolve().parent.parent  # Assumes config_loader.py is in core/
@@ -27,7 +29,7 @@ def load_app_config():
     with open(config_path, 'r') as f:
         try:
             logger.debug(f"Loading configuration from {config_path}")
-            config = yaml.safe_load(f)
+            config: Dict = yaml.safe_load(f)
         except yaml.YAMLError as e:
             raise ValueError(f"Error parsing YAML configuration file: {e}")
 

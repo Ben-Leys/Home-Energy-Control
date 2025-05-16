@@ -45,8 +45,7 @@ def fetch_entsoe_prices(target_day_local: datetime, app_config: dict) -> Optiona
 
     entsoe_api_key = os.getenv("ENTSOE_API_KEY")
     if not entsoe_api_key:
-        logger.error("ENTSO-E API key not found in environment variable ENTSOE_API_KEY.")
-        GLOBAL_APP_STATE.set("app_state", c.AppStatus.ALARM)
+        logger.warning("ENTSO-E API key not found in environment variable ENTSOE_API_KEY.")
         return None
 
     # ENTSO-E API expects periodStart and periodEnd in UTC

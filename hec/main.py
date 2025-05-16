@@ -10,6 +10,7 @@ from hec.core.app_state import GLOBAL_APP_STATE
 from hec.core.config_loader import load_app_config
 from hec.core.logging_setup import start_logger
 from hec.core.scheduler_setup import setup_scheduler
+from hec.core.tariff_manager import initialize_tariff_manager
 from hec.logic_engine import scheduled_tasks
 
 try:
@@ -21,7 +22,7 @@ except ValueError as e:
     print(f"CRITICAL: Error parsing configuration file. {e}. Exiting.")
     exit(1)
 
-start_logger(APP_CONFIG)
+start_logger(APP_CONFIG, GLOBAL_APP_STATE)
 logger = logging.getLogger(__name__)
 logger.info("*************************************************")
 logger.info("*** Starting Home Energy Control Application  ***")
@@ -29,9 +30,11 @@ logger.info("*************************************************")
 
 
 def run_application():
-    logger.debug("Application run_application() sequence started.")
     logger.debug(f"Initial AppState: {GLOBAL_APP_STATE.get_all()}")
     GLOBAL_APP_STATE.set("app_state", c.AppStatus.STARTING)
+
+    # --- LOAD DATA ---
+    tariff_manager = initialize_tariff_manager(APP_CONFIG)
 
     # --- SETUP DATABASE ---
     db_handler = initialize_database_handler(APP_CONFIG)
@@ -79,7 +82,6 @@ def run_application():
         GLOBAL_APP_STATE.set("app_state", c.AppStatus.SHUTDOWN)
     except Exception as e:
         logger.critical(f"A critical error occurred with the scheduler or main loop: {e}", exc_info=True)
-        GLOBAL_APP_STATE.set("app_state", c.AppStatus.ALARM)
     finally:
         if scheduler and scheduler.running:
             logger.info("Shutting down scheduler...")
