@@ -1,4 +1,4 @@
-# hec/data_sources/elia_forecast_api.py
+# hec/data_sources/api_elia_forecast.py
 import logging
 import requests
 import json
@@ -9,7 +9,7 @@ logger = logging.getLogger(__name__)
 
 
 # --- Common Helper for API Requests ---
-def _fetch_elia_data(base_url: str, dataset_id: str, date_str: str, url_params: str) -> Optional[List[Dict[str, Any]]]:
+def _fetch_raw_data(base_url: str, dataset_id: str, date_str: str, url_params: str) -> Optional[List[Dict[str, Any]]]:
     """
     Generic function to fetch data from Elia Open Data API.
 
@@ -57,7 +57,7 @@ def _fetch_elia_data(base_url: str, dataset_id: str, date_str: str, url_params: 
 
 
 # --- Specific Forecast Fetchers ---
-def fetch_forecast(target_day_local: datetime, app_config: dict, forecast_type: str) -> Optional[List[Dict[str, Any]]]:
+def fetch_and_process_forecast(target_day_local: datetime, app_config: dict, forecast_type: str) -> Optional[List[Dict[str, Any]]]:
     """Fetches forecast data for a specific type (solar, wind, grid_load)."""
     config = _load_config(app_config)
 
@@ -88,7 +88,7 @@ def fetch_forecast(target_day_local: datetime, app_config: dict, forecast_type: 
         f"&refine=datetime%3A{date_str}"
     )
 
-    results = _fetch_elia_data(config['api_base_url'], dataset_id, date_str, url_params)
+    results = _fetch_raw_data(config['api_base_url'], dataset_id, date_str, url_params)
     if results is None:
         return None
 
@@ -136,7 +136,7 @@ if __name__ == '__main__':
 
     for f_type in ["solar", "wind", "grid_load"]:
         print(f"\nFetching {f_type.capitalize()} Forecast for {test_target_day.strftime('%Y-%m-%d')}:")
-        result = fetch_forecast(test_target_day, test_config, f_type)
+        result = fetch_and_process_forecast(test_target_day, test_config, f_type)
         if result:
             print(f"  Fetched {len(result)} records. Example: {result[0]}")
         else:

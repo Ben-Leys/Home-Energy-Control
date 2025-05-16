@@ -1,4 +1,4 @@
-# hec/data_sources/p1_meter_homewizard.py
+# hec/data_sources/api_homewizard_p1_meter.py
 import json
 import logging
 import requests

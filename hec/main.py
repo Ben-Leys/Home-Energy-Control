@@ -3,13 +3,11 @@ import time
 from threading import Thread
 
 from hec.core import constants as c
-from hec.core.api_setup import run_api_server
+from hec.core.api_server import run_api_server
 from hec.core.app_initializer import (populate_app_state, initialize_database_handler,
-                                      initialize_p1_meter_client)
+                                      initialize_p1_meter_client, setup_scheduler, load_app_config)
 from hec.core.app_state import GLOBAL_APP_STATE
-from hec.core.config_loader import load_app_config
-from hec.core.logging_setup import start_logger
-from hec.core.scheduler_setup import setup_scheduler
+from hec.core.logging import start_logger
 from hec.core.tariff_manager import initialize_tariff_manager
 from hec.logic_engine import scheduled_tasks
 

@@ -1,15 +1,24 @@
 # hec/core/app_initializer.py
 import logging
-from typing import Optional
 from datetime import datetime, timedelta
+from pathlib import Path
+from typing import Optional, Dict
 
-from hec.core import constants as c
+import yaml
+from apscheduler.executors.pool import ThreadPoolExecutor
+from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.schedulers.blocking import BlockingScheduler
+from dotenv import load_dotenv
+
 from hec.core.app_state import GLOBAL_APP_STATE
-from hec.logic_engine.scheduled_tasks import populate_price_data_in_appstate
-from hec.data_sources.p1_meter_homewizard import P1MeterHomeWizard
+from hec.data_sources.api_homewizard_p1_meter import P1MeterHomeWizard
 from hec.database_ops.db_handler import DatabaseHandler
+from hec.logic_engine.scheduled_tasks import populate_price_data_in_appstate
 
 logger = logging.getLogger(__name__)
+
+CONFIG_FILE_NAME = "config.yaml"
+BASE_DIR = Path(__file__).resolve().parent.parent
 
 
 def populate_app_state(db_handler: DatabaseHandler, app_config: dict):
@@ -69,3 +78,66 @@ def initialize_p1_meter_client(app_config: dict):
         p1_client_instance = None
 
     return p1_client_instance
+
+
+def setup_scheduler(config: dict, run_in_background: bool = False):
+    """
+    Initializes and configures the APScheduler.
+
+    Args:
+        config (dict): Application configuration.
+        run_in_background (bool): If True use BackgroundScheduler, otherwise BlockingScheduler.
+
+    Returns:
+        APScheduler instance (BlockingScheduler or BackgroundScheduler).
+    """
+    scheduler_config = config.get('scheduler', {})  # Get scheduler specific config
+
+    # Define executors
+    executors = {
+        'default': ThreadPoolExecutor(scheduler_config.get('thread_pool_max_workers', 10)),
+    }
+
+    job_defaults = {
+        'coalesce': scheduler_config.get('coalesce_jobs', True),
+        'max_instances': scheduler_config.get('max_instances_per_job', 3),
+        'misfire_grace_time': scheduler_config.get('misfire_grace_time_seconds', 60)
+    }
+
+    if run_in_background:
+        logger.info("Initializing BackgroundScheduler.")
+        scheduler = BackgroundScheduler(executors=executors, job_defaults=job_defaults,
+                                        timezone=scheduler_config.get('timezone', 'Europe/Brussels'))
+    else:
+        logger.info("Initializing BlockingScheduler.")
+        scheduler = BlockingScheduler(executors=executors, job_defaults=job_defaults,
+                                      timezone=scheduler_config.get('timezone', 'Europe/Brussels'))
+
+    logger.info(f"APScheduler initialized with timezone: {scheduler.timezone}")
+    return scheduler
+
+
+def load_app_config():
+    """Loads application configuration from YAML and .env files."""
+    # Load .env file
+    env_path = BASE_DIR / ".env"
+    if env_path.exists():
+        logger.debug(f"Loading .env from {env_path}")
+        load_dotenv(dotenv_path=env_path)
+    else:
+        print(f"Warning: .env file not found at {env_path}")
+
+    # Load YAML configuration
+    config_path = BASE_DIR / CONFIG_FILE_NAME
+    if not config_path.exists():
+        raise FileNotFoundError(f"Configuration file '{CONFIG_FILE_NAME}' not found at {config_path}")
+
+    with open(config_path, 'r') as f:
+        try:
+            logger.debug(f"Loading configuration from {config_path}")
+            config: Dict = yaml.safe_load(f)
+        except yaml.YAMLError as e:
+            raise ValueError(f"Error parsing YAML configuration file: {e}")
+
+    logging.info(f"Loaded files .env and {CONFIG_FILE_NAME}")
+    return config

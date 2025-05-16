@@ -1,4 +1,4 @@
-# data_sources/day_ahead_price_api.py
+# data_sources/api_entsoe_day_ahead_price.py
 import logging
 import os
 from datetime import datetime, timedelta, timezone
@@ -7,8 +7,6 @@ from xml.etree import ElementTree as ElTree
 
 import requests
 
-from hec.core import constants as c
-from hec.core.app_state import GLOBAL_APP_STATE
 from hec.models.models import PricePoint
 
 logger = logging.getLogger(__name__)

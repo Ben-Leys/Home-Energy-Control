@@ -8,7 +8,7 @@ from datetime import datetime
 # streamlit run hec/ui/hec_dashboard.py
 try:
     from hec.core import constants as c
-    from hec.core.config_loader import load_app_config
+    from hec.core.app_initializer import load_app_config
 except ImportError:
     st.error("Could not import from 'hec.core'. Make sure you run Streamlit from the project root "
              "and 'hec' package is in PYTHONPATH.")

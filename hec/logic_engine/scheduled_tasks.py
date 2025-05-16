@@ -6,9 +6,9 @@ from typing import Optional, List, Dict, Any
 from apscheduler.schedulers.base import BaseScheduler
 
 from hec.core.app_state import GLOBAL_APP_STATE
-from hec.data_sources import day_ahead_price_api, elia_forecast_api
-from hec.data_sources.elia_forecast_api import fetch_forecast
-from hec.data_sources.p1_meter_homewizard import P1MeterHomeWizard
+from hec.data_sources import api_entsoe_day_ahead_price
+from hec.data_sources.api_elia_forecast import fetch_and_process_forecast
+from hec.data_sources.api_homewizard_p1_meter import P1MeterHomeWizard
 from hec.database_ops.db_handler import DatabaseHandler
 from hec.logic_engine.utils import parse_hh_mm_time_string, process_price_points_to_app_state
 
@@ -40,7 +40,7 @@ def task_fetch_and_store_day_ahead_prices(scheduler: BaseScheduler, db_handler: 
     # Determine target date: ENTSO-E auction is for D+1
     target_day = (datetime.now().astimezone() + timedelta(days=1))
 
-    price_points = day_ahead_price_api.fetch_entsoe_prices(target_day, app_config)
+    price_points = api_entsoe_day_ahead_price.fetch_entsoe_prices(target_day, app_config)
 
     if process_price_points_to_app_state(price_points, db_handler, target_day, "electricity_prices_tomorrow"):
         fetch_prices_attempt_count = 0
@@ -135,7 +135,7 @@ def task_fetch_elia_forecasts(db_handler: DatabaseHandler, app_config: dict):
                 logger.debug(f"Skipping grid load forecast for {target_day_utc_str} beyond Elia's 4-day limit.")
                 continue  # Grid Load Forecast (Elia API provides up to 4 days)
             logger.debug(f"Fetching {forecast_type.capitalize()} forecast for {target_day_utc_str}.")
-            data = fetch_forecast(target_day_utc, app_config, forecast_type)
+            data = fetch_and_process_forecast(target_day_utc, app_config, forecast_type)
             if data:
                 all_fetched_records.extend(data)
             else:
@@ -265,7 +265,7 @@ def populate_price_data_in_appstate(db_handler: DatabaseHandler, target_day_loca
 
     if not price_points and force_api_fetch_if_missing:
         logger.info(f"No DB data for '{app_state_key}' on {target_day_local.date()}, attempting API fetch.")
-        price_points = day_ahead_price_api.fetch_entsoe_prices(target_day_local, app_config)
+        price_points = api_entsoe_day_ahead_price.fetch_entsoe_prices(target_day_local, app_config)
 
     # Process the price points if available
     return process_price_points_to_app_state(price_points, db_handler, target_day_local, app_state_key)
