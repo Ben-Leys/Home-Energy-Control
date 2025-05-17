@@ -9,7 +9,7 @@ from hec.database_ops.db_handler import DatabaseHandler
 from hec.models.models import NetElectricityPriceInterval, PricePoint
 
 logger = logging.getLogger(__name__)
-debug_logger = logging.getLogger('Only Debug')
+debug_logger = logging.getLogger('Calc Debug')
 debug_logger.setLevel(logging.INFO)
 
 
@@ -258,8 +258,11 @@ def calculate_total_costs_for_period(start_date: date, end_date: date, app_confi
 
         # 7. Capacity tariff based on 12m peaks
         avg_peak_w = db.get_avg_monthly_peak_w_last_12m(day, grid_cfg['capacity_tariff_minimum_kw'] * 1000)
-        cap_tariff_yr_per_kw = grid_cfg.get("capacity_tariff_per_kw_per_year", 0.0) * vat
-        debug_logger.debug(f"Capacity tariff: {(avg_peak_w / 1000 * cap_tariff_yr_per_kw) / days_in_year}")
+        daily_cap_costs = 0
+        if avg_peak_w:
+            cap_tariff_yr_per_kw = grid_cfg.get("capacity_tariff_per_kw_per_year", 0.0) * vat
+            debug_logger.debug(f"Capacity tariff: {(avg_peak_w / 1000 * cap_tariff_yr_per_kw) / days_in_year}")
+            daily_cap_costs = (avg_peak_w / 1000 * cap_tariff_yr_per_kw) / days_in_year
 
         # 8. Accumulate into results
         results["total_kwh_imported"] += day_imported
@@ -267,11 +270,11 @@ def calculate_total_costs_for_period(start_date: date, end_date: date, app_confi
         results["fixed"]["energy_cost_import"] += fix_cost + excise_tax
         results["fixed"]["energy_revenue_export"] += fix_rev
         results["fixed"]["time_based_costs"] += daily_data_mgmt
-        results["fixed"]["capacity_costs_eur"] += (avg_peak_w / 1000 * cap_tariff_yr_per_kw) / days_in_year
+        results["fixed"]["capacity_costs_eur"] += daily_cap_costs
         results["dynamic"]["energy_cost_import"] += dyn_cost + excise_tax
         results["dynamic"]["energy_revenue_export"] += dyn_rev
         results["dynamic"]["time_based_costs"] += daily_data_mgmt + daily_sub
-        results["dynamic"]["capacity_costs_eur"] += (avg_peak_w / 1000 * cap_tariff_yr_per_kw) / days_in_year
+        results["dynamic"]["capacity_costs_eur"] += daily_cap_costs
 
         # 9. Store per-day breakdown
         results["details_by_day"].append({
@@ -284,7 +287,7 @@ def calculate_total_costs_for_period(start_date: date, end_date: date, app_confi
             "rev_dynamic": round(dyn_rev, 3),
             "time_costs_fixed": round(daily_data_mgmt, 3),
             "time_costs_dynamic": round(daily_data_mgmt + daily_sub, 3),
-            "capacity_costs_eur": round((avg_peak_w / 1000 * cap_tariff_yr_per_kw) / days_in_year, 3),
+            "capacity_costs_eur": round(daily_cap_costs, 3),
         })
 
         day += timedelta(days=1)
@@ -314,26 +317,26 @@ def calculate_total_costs_for_period(start_date: date, end_date: date, app_confi
 
 
 # For testing only
-# if __name__ == "__main__":
-#     from hec.core.tariff_manager import initialize_tariff_manager
-#     from hec.core.app_initializer import load_app_config, initialize_database_handler
-#
-#     logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-#     debug_logger = logging.getLogger('debug')
-#
-#     prepare_time = datetime.now()
-#     app_config = load_app_config()
-#     db = initialize_database_handler(app_config)
-#     tm = initialize_tariff_manager(app_config)
-#
-#     print(calculate_total_costs_for_period(date(2025, 5, 15), date(2025, 5, 15), app_config, db, tm))
-#     exit(0)
-#     start_time = datetime.now()
-#     net_prices = []
-#     t_date = datetime.now()
-#     for i in range(365):
-#         net_prices += calculate_net_intervals_for_day(db, tm, t_date - timedelta(days=365 - i))
-#     end_time = datetime.now()
-#     for nepi in net_prices:
-#         print(nepi)
-#     print(f"Calc time: {end_time - start_time}")
+if __name__ == "__main__":
+    from hec.core.tariff_manager import initialize_tariff_manager
+    from hec.core.app_initializer import load_app_config, initialize_database_handler
+
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    debug_logger = logging.getLogger('Calc Debug')
+
+    prepare_time = datetime.now()
+    app_config = load_app_config()
+    db = initialize_database_handler(app_config)
+    tm = initialize_tariff_manager(app_config)
+
+    print(calculate_total_costs_for_period(date(2025, 1, 15), date(2025, 5, 15), app_config, db, tm))
+    exit(0)
+    start_time = datetime.now()
+    net_prices = []
+    t_date = datetime.now()
+    for i in range(365):
+        net_prices += calculate_net_intervals_for_day(db, tm, t_date - timedelta(days=365 - i))
+    end_time = datetime.now()
+    for nepi in net_prices:
+        print(nepi)
+    print(f"Calc time: {end_time - start_time}")

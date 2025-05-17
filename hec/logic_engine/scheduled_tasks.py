@@ -78,35 +78,58 @@ def task_midnight_rollover(db_handler: DatabaseHandler, app_config: dict):
     # TODO: Similar logic for forecasts etc.
 
 
-def task_poll_p1_meter(db_handler: DatabaseHandler, p1_client: Optional[P1MeterHomeWizard]):
-    """Scheduled task to poll the P1 meter, update AppState, and log to DB."""
+def task_poll_p1_meter(db_handler: DatabaseHandler, p1_client: Optional[P1MeterHomeWizard], boundary: int = 5):
+    """
+    Polls the P1 meter, updates AppState, and conditionally stores into the DB
+    once per 'boundary'-minute slot.
+    """
 
     if not p1_client or not p1_client.is_initialized:
-        logger.warning("P1 Meter polling task: Client not available or not initialized. Skipping.")
+        logger.warning("P1 Meter task: client unavailable. Skipping.")
         return
 
     logger.debug("P1 Meter polling task: Fetching data...")
     p1_data = p1_client.refresh_data()
 
-    if p1_data:
-        # 1. Update AppState
-        live_p1_for_appstate = {
-            "timestamp_utc_iso": p1_data.get("timestamp_utc_iso"),
-            "active_power_w": p1_data.get("active_power_w"),
-            "active_power_average_w": p1_data.get("active_power_average_w"),
-            "total_power_import_kwh": p1_data.get("total_power_import_kwh"),
-            "total_power_export_kwh": p1_data.get("total_power_export_kwh"),
-            "monthly_power_peak_w": p1_data.get("montly_power_peak_w"),
-            "monthly_power_peak_timestamp": p1_data.get("montly_power_peak_timestamp"),
-        }
-        GLOBAL_APP_STATE.set("p1_meter_data", live_p1_for_appstate)
-        logger.debug(f"AppState updated with P1 meter live data: {live_p1_for_appstate.get("timestamp_utc_iso)")}")
+    if not p1_data or "timestamp_utc_iso" not in p1_data:
+        logger.warning("P1 Meter task: no valid data fetched.")
+        GLOBAL_APP_STATE.set("p1_meter_data", None)
+        return
 
-        # 2. Store full data to Database
-        db_handler.store_p1_meter_data(p1_data, GLOBAL_APP_STATE)
+    ts = datetime.fromisoformat(p1_data["timestamp_utc_iso"])
+    # 1. Update live data in AppState
+    live = {
+        "timestamp_utc_iso": p1_data["timestamp_utc_iso"],
+        "active_power_w": p1_data.get("active_power_w"),
+        "active_power_average_w": p1_data.get("active_power_average_w"),
+        "total_power_import_kwh": p1_data.get("total_power_import_kwh"),
+        "total_power_export_kwh": p1_data.get("total_power_export_kwh"),
+        "monthly_power_peak_w": p1_data.get("monthly_power_peak_w"),
+        "monthly_power_peak_timestamp": p1_data.get("monthly_power_peak_timestamp"),
+    }
+    GLOBAL_APP_STATE.set("p1_meter_data", live)
+    logger.debug(f"P1 Meter live data set: {live['timestamp_utc_iso']}")
+
+    # 2. Boundary‐slot determination
+    minute = ts.minute
+    if minute % boundary != 0:
+        logger.debug(f"P1 Meter: {minute=} not on {boundary}-min boundary; skipping DB store.")
+        return
+
+    slot = ts.replace(minute=(minute // boundary * boundary), second=0, microsecond=0)
+    slot_iso = slot.isoformat()
+
+    last_slot = GLOBAL_APP_STATE.get("p1_meter_last_stored_boundary_slot_utc_iso")
+    if slot_iso == last_slot:
+        logger.debug(f"P1 Meter: boundary slot {slot_iso} already stored; skipping.")
+        return
+
+    # 3. Store to DB & update AppState
+    if db_handler.store_p1_meter_data(p1_data):
+        GLOBAL_APP_STATE.set("p1_meter_last_stored_boundary_slot_utc_iso", slot_iso)
+        logger.info(f"P1 Meter: data stored for slot {slot_iso}.")
     else:
-        logger.warning("P1 Meter polling task: Failed to fetch data from P1 meter.")
-        GLOBAL_APP_STATE.set("p1_meter_data", None)  # Clear stale data
+        logger.error(f"P1 Meter: failed to store data for slot {slot_iso}.")
 
 
 def task_fetch_elia_forecasts(db_handler: DatabaseHandler, app_config: dict):
@@ -209,16 +232,16 @@ def register_all_jobs(scheduler: BaseScheduler, db_handler: DatabaseHandler,
         # Register P1 Meter job if applicable
         if p1_client:
             p1_meter_schedule = tasks_config.get(P1_METER_JOB_ID, {})
-            poll_interval_sec = p1_meter_schedule.get('poll_interval_seconds', 60)
+            second = p1_meter_schedule.get('second', 60)
             register_job(
                 scheduler,
                 job_id=P1_METER_JOB_ID,
                 func=task_poll_p1_meter,
-                trigger="interval",
-                trigger_args={"seconds": poll_interval_sec},
+                trigger="cron",
+                trigger_args={"second": second},
                 job_args=[db_handler, p1_client],
                 name="Poll P1 Smart Meter",
-                grace_time=max(1, poll_interval_sec // 2),
+                grace_time=10,
             )
         else:
             logger.warning(f"P1 Meter client not initialized. '{P1_METER_JOB_ID}' job not scheduled.")
@@ -262,10 +285,19 @@ def populate_price_data_in_appstate(db_handler: DatabaseHandler, target_day_loca
     price_points = db_handler.get_da_prices(target_day_local)
 
     # If DB is empty and API fetching is allowed, fetch from API
+    fetched = False
     if not price_points and force_api_fetch_if_missing:
+        fetched = True
         logger.info(f"No DB data for '{app_state_key}' on {target_day_local.date()}, attempting API fetch.")
         price_points = api_entsoe_day_ahead_price.fetch_entsoe_prices(target_day_local, app_config)
 
     # Process the price points (if any)
     process_price_points_to_app_state(price_points, target_day_local, app_state_key, app_config,
-                                      db_handler if not price_points else None)
+                                      db_handler if fetched else None)
+
+
+def populate_forecast_data_in_appstate(db_handler: DatabaseHandler, target_day_local: datetime, app_config: dict):
+    """
+    Loads forecast data for target_day_local.
+    :return:
+    """

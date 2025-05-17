@@ -228,34 +228,13 @@ class DatabaseHandler:
 
         return results
 
-    def store_p1_meter_data(self, p1_data: Dict[str, Any], app_state, boundary: int = 5) -> bool:
+    def store_p1_meter_data(self, p1_data: Dict[str, Any]) -> bool:
         """
-        Stores a single P1 meter data record into the database within n-minute boundary.
-
-        Args:
-            p1_data (Dict[str, Any]): The P1 data including 'timestamp_utc_iso'.
-            app_state (AppState): The global application state instance.
-            boundary (int): The minute interval for storing (example: every 5 min).
-
-        Returns:
-            bool: True if data was stored, False otherwise.
+        Stores a single P1 meter data record unconditionally.
+        Returns True if the DB insert/update affected rows, False on failure.
         """
-        if not p1_data or 'timestamp_utc_iso' not in p1_data:
-            logger.warning("P1 Meter: Missing key field for DB storage.")
-            return False
-
-        # Check if data needs to be stored in current boundary
-        p1_data_ts_utc = datetime.fromisoformat(p1_data['timestamp_utc_iso'])
-        if p1_data_ts_utc.minute % boundary != 0:
-            logger.debug(f"P1 Meter: Current minute ({p1_data_ts_utc.minute}) is not a {boundary}-min boundary. "
-                         f"Skipping DB store.")
-            return False
-        p1_data_boundary_minute = (p1_data_ts_utc.minute // boundary) * boundary
-        p1_data_boundary_slot = p1_data_ts_utc.replace(minute=p1_data_boundary_minute, second=0, microsecond=0)
-        p1_data_boundary_slot_iso = p1_data_boundary_slot.isoformat()
-        last_db_slot_iso = app_state.get("p1_meter_last_stored_boundary_slot_utc_iso")
-        if p1_data_boundary_slot_iso == last_db_slot_iso:
-            logger.debug(f"P1 Meter: Already stored data for boundary slot {p1_data_boundary_slot_iso}.")
+        if not p1_data or "timestamp_utc_iso" not in p1_data:
+            logger.warning("P1 Meter: Missing timestamp_utc_iso for DB storage.")
             return False
 
         # Map API keys to DB columns
@@ -304,12 +283,9 @@ class DatabaseHandler:
             conn.commit()
             if cursor.rowcount > 0:
                 logger.debug(f"P1 Meter: Successfully stored data for timestamp {p1_data['timestamp_utc_iso']} in DB.")
-                # Update AppState with the boundary slot that was just successfully written
-                app_state.set("p1_meter_last_stored_boundary_slot_utc_iso", p1_data_boundary_slot_iso)
                 return True
             else:
-                logger.warning(
-                    f"P1 Meter: Data for timestamp {p1_data['timestamp_utc_iso']} was not stored (no rows affected).")
+                logger.warning(f"P1 Meter: Data for timestamp {p1_data['timestamp_utc_iso']} was not stored.")
                 return False
         except sqlite3.Error as e:
             logger.error(f"P1 Meter: Error storing data in database: {e}", exc_info=True)

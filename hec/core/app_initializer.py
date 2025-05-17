@@ -22,24 +22,36 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 
 
 def populate_app_state(db_handler: DatabaseHandler, app_config: dict):
-    """Populate app state with necessary data from data sources"""
-
-    # Price data from DB or api
-    logger.info("Attempting to populate initial AppState with price data...")
+    """Populate app state with necessary data from data sources."""
     try:
-        local_now = datetime.now().astimezone()  # Get timezone-aware current time
+        # Validate configuration
+        if not isinstance(app_config, dict):
+            raise ValueError("Invalid app_config: Expected a dictionary.")
+
+        local_now = datetime.now().astimezone()
         local_tomorrow = local_now + timedelta(days=1)
 
-        populate_price_data_in_appstate(db_handler, local_now, app_config, "electricity_prices_today",
-                                        force_api_fetch_if_missing=True)
-        populate_price_data_in_appstate(db_handler, local_tomorrow, app_config, "electricity_prices_tomorrow",
-                                        force_api_fetch_if_missing=True)
-
+        # Populate price data
+        logger.info("Populating AppState with price data...")
+        for day, key in [(local_now, "electricity_prices_today"),
+                         (local_tomorrow, "electricity_prices_tomorrow")]:
+            populate_price_data_in_appstate(
+                db_handler, day, app_config, key, force_api_fetch_if_missing=True
+            )
         if not GLOBAL_APP_STATE.get("electricity_prices_today"):
-            logger.warning("AppState 'electricity_prices_today' is empty after initial population attempt. "
-                           "Price-based decisions will fail.")
+            logger.warning("No 'electricity_prices_today' found in AppState. Price-based decisions may fail.")
+
+        # Populate forecast data
+        logger.info("Populating AppState with forecast data...")
+        forecast_days = {"wind": 5, "solar": 5, "grid_load": 4}
+        forecasts = {
+            f_type: db_handler.get_elia_forecasts(f_type, local_now, local_now + timedelta(days=days))
+            for f_type, days in forecast_days.items()
+        }
+        GLOBAL_APP_STATE.set("forecasts", forecasts)
+
     except Exception as e:
-        logger.error(f"Error during initial AppState population for prices: {e}", exc_info=True)
+        logger.error(f"Error during AppState population: {e}", exc_info=True)
 
 
 def initialize_database_handler(app_config: dict) -> Optional[DatabaseHandler]:
