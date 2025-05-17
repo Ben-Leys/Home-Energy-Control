@@ -1,6 +1,5 @@
 # hec/core/app_initializer.py
 import logging
-from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional, Dict
 
@@ -10,10 +9,10 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.schedulers.blocking import BlockingScheduler
 from dotenv import load_dotenv
 
-from hec.core.app_state import GLOBAL_APP_STATE
-from hec.data_sources.api_homewizard_p1_meter import P1MeterHomeWizard
+from hec.core import constants as c
+from hec.data_sources import api_p1_meter_homewizard, modbus_sma_inverter
 from hec.database_ops.db_handler import DatabaseHandler
-from hec.logic_engine.scheduled_tasks import populate_price_data_in_appstate, populate_forecast_data_in_appstate
+from hec.logic_engine.data_processors import populate_appstate_with_price_data, populate_appstate_with_forecast_data
 
 logger = logging.getLogger(__name__)
 
@@ -25,10 +24,10 @@ def populate_app_state(db_handler: DatabaseHandler, app_config: dict):
     """Populate app state with necessary data from data sources."""
     try:
         # Populate price data
-        populate_price_data_in_appstate(db_handler, app_config, True)
+        populate_appstate_with_price_data(db_handler, app_config, True)
 
         # Populate forecast data
-        populate_forecast_data_in_appstate(db_handler)
+        populate_appstate_with_forecast_data(db_handler)
 
     except Exception as e:
         logger.error(f"Error during AppState population: {e}", exc_info=True)
@@ -47,29 +46,56 @@ def initialize_database_handler(app_config: dict) -> Optional[DatabaseHandler]:
         return None
 
 
-def initialize_p1_meter_client(app_config: dict):
-    """Initializes and *returns* the P1MeterHomeWizard client instance."""
+def initialize_data_sources(app_config: dict):
+    """Initializes and *returns* the data sources client instance."""
 
     logger.info("Initializing data source clients...")
+    p1_client = None
+    inverter_client = None
+
+    # --- P1 Meter ---
     try:
-        p1_config = app_config.get('p1_meter', {})
-        p1_host = p1_config.get('host')
-
-        if p1_host:
-            p1_client_instance = P1MeterHomeWizard(host=p1_host)
-        else:
+        p1_conf = app_config.get("p1_meter", {})
+        host = p1_conf.get("host")
+        if not host:
             logger.warning("P1 meter host not configured. P1 data source will be disabled.")
-            p1_client_instance = None
-
-        if p1_client_instance and not p1_client_instance.is_initialized:
-            logger.warning("P1 meter client failed to initialize properly.")
-            p1_client_instance = None
-
+        else:
+            client = api_p1_meter_homewizard.P1MeterHomewizardClient(host=host)
+            if client.is_initialized:
+                p1_client = client
+                logger.info("P1 meter client initialized successfully.")
+            else:
+                logger.warning("P1 meter client failed to initialize.")
     except Exception as e:
-        logger.error(f"Error initializing P1 meter client: {e}", exc_info=True)
-        p1_client_instance = None
+        logger.error(f"Error initializing P1 meter client. {e}", exc_info=True)
 
-    return p1_client_instance
+    # --- SMA Inverter ---
+    try:
+        inv_config = app_config.get('inverter', {})
+        host = inv_config.get('host')
+
+        if not host:
+            logger.warning("Inverter host not configured. Inverter client will be disabled.")
+        else:
+            kwargs = {
+                "host": host,
+                "port": inv_config.get("port"),
+                "modbus_unit_id": inv_config.get("modbus_unit_id"),
+                "grid_guard_code": inv_config.get("grid_guard_code"),
+                "standard_power_limit": inv_config.get("standard_power_limit"),
+                "timeout_sec": inv_config.get("timeout_sec"),
+            }
+            client = modbus_sma_inverter.InverterSmaModbusClient(**kwargs)
+            status = client.get_operational_status()
+            if status != c.InverterStatus.UNKNOWN:
+                inverter_client = client
+                logger.info(f"Inverter client status: {status.value.lower()}")
+            else:
+                logger.warning(f"Inverter client unknown at startup.")
+    except Exception as e:
+        logger.error(f"Error initializing Inverter SMA Modbus client: {e}", exc_info=True)
+
+    return p1_client, inverter_client
 
 
 def setup_scheduler(config: dict, run_in_background: bool = False):

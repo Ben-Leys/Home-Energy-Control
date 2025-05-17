@@ -60,8 +60,6 @@ class DatabaseHandler:
             cursor = conn.cursor()
 
             # --- Day-Ahead Price Forecasts Table ---
-            # Timestamps as TEXT in UTC
-            # Prices in EUR/MWh as fetched
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS belpex_da_prices (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -84,7 +82,7 @@ class DatabaseHandler:
             # --- P1 Meter Log Table ---
             cursor.execute("""
                             CREATE TABLE IF NOT EXISTS p1_meter_log (
-                                timestamp_utc TEXT PRIMARY KEY,    -- UTC string from the data dict
+                                timestamp_utc TEXT PRIMARY KEY,
                                 wifi_strength INTEGER,
                                 smr_version TEXT,
                                 active_tariff INTEGER,
@@ -110,11 +108,8 @@ class DatabaseHandler:
                             );
                         """)
             logger.info("Table p1_meter_log checked/created.")
-            # No separate index needed for timestamp_utc as it's PRIMARY KEY
 
             # --- Elia Open Data Table ---
-            # Data_type: 'solar', 'wind', 'grid_load'
-            # All times are UTC for consistency.
             cursor.execute("""
                             CREATE TABLE IF NOT EXISTS elia_open_data (
                                 timestamp_utc TEXT NOT NULL,
@@ -133,6 +128,19 @@ class DatabaseHandler:
                             ON elia_open_data (forecast_type, timestamp_utc);
                         """)
             logger.info("Index idx_elia_forecast_type_ts checked/created.")
+
+            # --- Inverter Log table ---
+            cursor.execute("""
+                            CREATE TABLE IF NOT EXISTS inverter_log (
+                                timestamp_utc TEXT PRIMARY KEY,
+                                operational_status TEXT NOT NULL,
+                                pv_power_watts REAL,
+                                daily_yield_wh REAL,
+                                total_yield_wh REAL,
+                                active_power_limit_watts REAL
+                            );
+                        """)
+            logger.info("Table 'inverter_log' checked/created.")
 
             conn.commit()
         except sqlite3.Error as e:
@@ -679,6 +687,93 @@ class DatabaseHandler:
 
         return results
 
+    def store_inverter_data(self, inverter_data: Dict[str, Any]) -> bool:
+        """Stores a single inverter data record into the database."""
+        if not inverter_data or 'timestamp_utc_iso' not in inverter_data:
+            logger.warning("Inverter Log: Invalid or missing data provided for DB storage.")
+            return False
+
+        values = (
+            inverter_data.get('timestamp_utc_iso'),
+            inverter_data.get('operational_status'),
+            inverter_data.get('pv_power_watts'),
+            inverter_data.get('daily_yield_wh'),
+            inverter_data.get('total_yield_wh'),
+            inverter_data.get('active_power_limit_watts')
+        )
+
+        sql = """
+            INSERT OR REPLACE INTO inverter_log (
+                timestamp_utc, operational_status, pv_power_watts, 
+                daily_yield_wh, total_yield_wh, active_power_limit_watts
+            ) VALUES (?, ?, ?, ?, ?, ?); 
+        """
+
+        try:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            cursor.execute(sql, values)
+            conn.commit()
+            if cursor.rowcount > 0:
+                logger.debug(
+                    f"Inverter Log: Successfully stored data for timestamp {inverter_data['timestamp_utc_iso']} in DB.")
+                return True
+            else:
+                logger.warning(f"Inverter Log: Data for timestamp {inverter_data['timestamp_utc_iso']} was not stored.")
+                return False
+        except sqlite3.Error as e:
+            logger.error(f"Inverter Log: Error storing data in database: {e}", exc_info=True)
+            return False
+        except KeyError as e:
+            logger.error(f"Inverter Log: Missing key '{e}' in inverter_data: {inverter_data}", exc_info=True)
+            return False
+
+    def get_inverter__data(self, start_date_local: datetime, end_date_local: datetime) -> List[Dict[str, Any]]:
+        """
+        Retrieves inverter log data for a given UTC ISO datetime period (inclusive start, exclusive end).
+
+        Args:
+            start_date_local (datetime): local datetime start date.
+            end_date_local (datetime): local datetime end date (exclusive)
+
+        Returns:
+            List[Dict[str, Any]]: A list of dictionaries, each representing a logged inverter record.
+                                  Returns empty list on error or if no data.
+        """
+        results = []
+        start_utc_str = start_date_local.astimezone(timezone.utc).isoformat()
+        end_utc_str = end_date_local.astimezone(timezone.utc).isoformat()
+
+        logger.debug(f"Querying Inverter Log DB for data between {start_utc_str} and {end_utc_str}")
+
+        try:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            sql = """
+                SELECT timestamp_utc, operational_status, pv_power_watts, 
+                       daily_yield_wh, total_yield_wh, active_power_limit_watts
+                FROM inverter_log
+                WHERE timestamp_utc >= ? 
+                  AND timestamp_utc < ? 
+                ORDER BY timestamp_utc ASC;
+            """
+            cursor.execute(sql, (start_utc_str, end_utc_str))
+            rows = cursor.fetchall()
+
+            for row_obj in rows:
+                results.append(dict(row_obj))
+
+            if results:
+                logger.info(f"Retrieved {len(results)} inverter log records from DB for the period.")
+            else:
+                logger.info("No inverter log records found in DB for the specified period.")
+        except sqlite3.Error as e:
+            logger.error(f"Error retrieving inverter log data from database: {e}", exc_info=True)
+        except Exception as e:
+            logger.error(f"Unexpected error retrieving inverter log data: {e}", exc_info=True)
+
+        return results
+
 
 # if __name__ == '__main__':
 #     logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -688,9 +783,16 @@ class DatabaseHandler:
 #     app_config = {"database": {"type": "sqlite", "path": "home_energy.db"}}
 #     db_handler = DatabaseHandler(app_config['database'])
 #     db_handler.initialize_database()
+#     today_local = datetime.combine(datetime.now(), time.min)
+#     tomorrow_local = today_local + timedelta(days=1)
+#
+#     # Inverter data
+#     print(db_handler.get_inverter__data(start_date_local=today_local,
+#                                         end_date_local=datetime.combine(today_local, time.max)))
 #
 #     # Power peak avg
 #     print(db_handler.get_avg_monthly_peak_w_last_12m(date(2025, 5, 1), 2500))
+#
 #     # Energy deltas
 #     nepis: List[NetElectricityPriceInterval] = \
 #         [NetElectricityPriceInterval(datetime(2025, 5, 14, 9, 0), 60, "dynamic", {}),
@@ -699,12 +801,10 @@ class DatabaseHandler:
 #
 #     print(db_handler.get_energy_deltas_for_period(date(2025, 5, 1), date(2025, 5, 10)))
 #
-#     today_local = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
-#     tomorrow_local = today_local + timedelta(days=1)
 #     # Retrieve electricity prices
 #     prices_today_from_db = db_handler.get_da_prices(today_local)
 #     print(prices_today_from_db)
 #
 #     # Retrieve solar forecast
-#     solar_forecast = db_handler.get_elia_forecasts("solar", today_local, tomorrow_local)
+#     solar_forecast = db_handler.get_elia_forecasts("solar", today_local, tomorrow_local + timedelta(days=6))
 #     print(solar_forecast)

@@ -21,9 +21,8 @@ class GlobalStateHandler(logging.Handler):
 
 def start_logger(config, global_app_state=None):
     """Configures logging for the application based on the config."""
-    log_level_app = config.get('application', {}).get('log_level', 'INFO').upper()
-    log_level_file = config.get('application', {}).get('log_level_file', 'DEBUG').upper()
-    log_level = getattr(logging, log_level_app, logging.INFO)
+    log_level = config.get('application', {}).get('log_level', 'INFO').upper()
+    log_level = getattr(logging, log_level, logging.INFO)
 
     log_format = '%(asctime)s - %(levelname)s - %(name)s - %(message)s'
     date_format = '%Y-%m-%d %H:%M:%S'
@@ -61,7 +60,7 @@ def start_logger(config, global_app_state=None):
             backupCount=backup_count,
             encoding='utf-8'
         )
-        file_handler.setLevel(log_level_file)
+        file_handler.setLevel(log_level)
         file_formatter = logging.Formatter(log_format, datefmt=date_format)
         file_handler.setFormatter(file_formatter)
         root_logger.addHandler(file_handler)
@@ -76,4 +75,4 @@ def start_logger(config, global_app_state=None):
         global_state_handler.setLevel(logging.WARNING)  # Only WARNING and ERROR
         root_logger.addHandler(global_state_handler)
 
-    root_logger.info(f"Logger started. Level: {log_level_app}")
+    root_logger.info(f"Logger started. Level: {log_level}")

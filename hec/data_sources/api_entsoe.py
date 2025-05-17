@@ -1,4 +1,4 @@
-# data_sources/api_entsoe_day_ahead_price.py
+# data_sources/api_entsoe.py
 import logging
 import os
 from datetime import datetime, timedelta, timezone

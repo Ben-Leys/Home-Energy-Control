@@ -5,12 +5,15 @@ from typing import Optional, List, Dict, Any
 
 from apscheduler.schedulers.base import BaseScheduler
 
+from hec.core import constants as c
 from hec.core.app_state import GLOBAL_APP_STATE
-from hec.data_sources import api_entsoe_day_ahead_price
-from hec.data_sources.api_elia_forecast import fetch_and_process_forecast
-from hec.data_sources.api_homewizard_p1_meter import P1MeterHomeWizard
+from hec.data_sources import api_entsoe
+from hec.data_sources.api_elia import fetch_and_process_forecast
+from hec.data_sources.api_p1_meter_homewizard import P1MeterHomewizardClient
+from hec.data_sources.modbus_sma_inverter import InverterSmaModbusClient
 from hec.database_ops.db_handler import DatabaseHandler
-from hec.logic_engine.utils import parse_hh_mm_time_string, process_price_points_to_app_state
+from hec.logic_engine.data_processors import populate_appstate_with_price_data, populate_appstate_with_forecast_data
+from hec.logic_engine.utils import parse_hh_mm_time_string, process_price_points_to_app_state, is_daylight
 
 logger = logging.getLogger(__name__)
 
@@ -20,6 +23,7 @@ fetch_prices_attempt_count = 0
 MIDNIGHT_ROLLOVER_JOB_ID = "midnight_rollover"
 P1_METER_JOB_ID = "p1_meter_update"
 FETCH_ELIA_FORECAST_JOB_ID = "fetch_elia_forecast"
+INVERTER_JOB_ID = "inverter_update"
 
 
 def task_fetch_and_store_day_ahead_prices(scheduler: BaseScheduler, db_handler: DatabaseHandler, app_config: dict):
@@ -39,7 +43,7 @@ def task_fetch_and_store_day_ahead_prices(scheduler: BaseScheduler, db_handler: 
     # Determine target date: ENTSO-E auction is for D+1
     target_day = (datetime.now().astimezone() + timedelta(days=1))
 
-    price_points = api_entsoe_day_ahead_price.fetch_entsoe_prices(target_day, app_config)
+    price_points = api_entsoe.fetch_entsoe_prices(target_day, app_config)
 
     if process_price_points_to_app_state(price_points, target_day, "electricity_prices_tomorrow", db_handler):
         fetch_prices_attempt_count = 0
@@ -71,12 +75,12 @@ def task_midnight_rollover(db_handler: DatabaseHandler, app_config: dict):
         GLOBAL_APP_STATE.set("electricity_prices_tomorrow", [])  # Clear tomorrow
         logger.info("Shifted 'tomorrow' prices to 'today'.")
     else:  # No prices for tomorrow, try fetch from API
-        populate_price_data_in_appstate(db_handler, app_config, True)
+        populate_appstate_with_price_data(db_handler, app_config, True)
 
-    populate_forecast_data_in_appstate(db_handler)
+    populate_appstate_with_forecast_data(db_handler)
 
 
-def task_poll_p1_meter(db_handler: DatabaseHandler, p1_client: Optional[P1MeterHomeWizard], boundary: int = 5):
+def task_poll_p1_meter(db_handler: DatabaseHandler, p1_client: Optional[P1MeterHomewizardClient], boundary: int = 5):
     """
     Polls the P1 meter, updates AppState, and conditionally stores into the DB
     once per 'boundary'-minute slot.
@@ -130,6 +134,54 @@ def task_poll_p1_meter(db_handler: DatabaseHandler, p1_client: Optional[P1MeterH
         logger.error(f"P1 Meter: failed to store data for slot {slot_iso}.")
 
 
+def task_poll_inverter(db_handler: DatabaseHandler, inv_client: InverterSmaModbusClient, app_config: dict,
+                       log_to_db: bool) -> Optional[Dict[str, Any]]:
+    """Common logic for polling inverter, updating AppState, and optionally logging to DB."""
+    if not inv_client:
+        logger.debug("Inverter poll: Client not available.")
+        GLOBAL_APP_STATE.set("inverter_data", None)
+        return None
+
+    if not is_daylight(app_config):
+        logger.debug("Inverter poll: Not daylight. Setting PV to 0 and status to STANDBY.")
+        current_inverter_data = GLOBAL_APP_STATE.get("inverter_data")
+
+        current_inverter_data.update({
+            "pv_power_watts": 0,
+            "operational_status": c.InverterStatus.STANDBY,
+            "timestamp_utc_iso": datetime.now(timezone.utc).isoformat()
+        })
+        GLOBAL_APP_STATE.set("inverter_data", current_inverter_data)
+        return current_inverter_data
+
+    logger.debug(f"Inverter poll: Fetching data (log_to_db={log_to_db})...")
+    live_data = inv_client.get_live_data()
+
+    if live_data:
+        GLOBAL_APP_STATE.set("inverter_data", live_data)
+
+        if log_to_db:
+            # TODO: Implement db_handler.store_inverter_data(live_data)
+            logger.info(f"Inverter DB log: Storing data for {live_data.get('timestamp_utc_iso')}")
+            # db_handler.store_inverter_data(live_data) # Call your new DB store function
+
+        return live_data
+    else:
+        logger.warning("Inverter poll: Failed to fetch data from inverter.")
+        GLOBAL_APP_STATE.set("inverter_data", None)
+        return None
+
+
+def task_poll_inverter_for_db_logging(db_handler: DatabaseHandler, inv_client: InverterSmaModbusClient, app_config):
+    logger.debug("Running task: Poll inverter for DB logging")
+    task_poll_inverter(db_handler, inv_client, app_config, log_to_db=True)
+
+
+def task_poll_inverter_for_live_update(db_handler: DatabaseHandler, inv_client: InverterSmaModbusClient, app_config):
+    logger.debug("Running task: Poll inverter for AppState Update")
+    task_poll_inverter(db_handler, inv_client, app_config, log_to_db=False)
+
+
 def task_fetch_elia_forecasts(db_handler: DatabaseHandler, app_config: dict):
     """
     Scheduled task to fetch various forecasts from Elia Open Data,
@@ -169,7 +221,7 @@ def task_fetch_elia_forecasts(db_handler: DatabaseHandler, app_config: dict):
 
 
 def register_all_jobs(scheduler: BaseScheduler, db_handler: DatabaseHandler,
-                      app_config: dict, p1_client: Optional[P1MeterHomeWizard]):
+                      app_config: dict, p1_client: Optional[P1MeterHomewizardClient], inv_client: InverterSmaModbusClient):
     """Registers all defined scheduled jobs with the provided scheduler instance."""
 
     logger.info("Registering scheduled jobs...")
@@ -227,10 +279,10 @@ def register_all_jobs(scheduler: BaseScheduler, db_handler: DatabaseHandler,
             else:
                 logger.warning(f"Could not parse time for job '{job['job_id']}'. Skipping.")
 
-        # Register P1 Meter job if applicable
+        # Register P1 Meter job if available
         if p1_client:
             p1_meter_schedule = tasks_config.get(P1_METER_JOB_ID, {})
-            second = p1_meter_schedule.get('second', 60)
+            second = p1_meter_schedule.get('second', '*/15')
             register_job(
                 scheduler,
                 job_id=P1_METER_JOB_ID,
@@ -243,6 +295,21 @@ def register_all_jobs(scheduler: BaseScheduler, db_handler: DatabaseHandler,
             )
         else:
             logger.warning(f"P1 Meter client not initialized. '{P1_METER_JOB_ID}' job not scheduled.")
+
+        # Register inverter job if available
+        if inv_client:
+            inverter_schedule = tasks_config.get(INVERTER_JOB_ID, {})
+            minute = inverter_schedule.get('minute', '*/15')
+            register_job(
+                scheduler,
+                job_id=INVERTER_JOB_ID,
+                func=task_poll_inverter_for_db_logging,
+                trigger="cron",
+                trigger_args={"minute": minute},
+                job_args=[db_handler, inv_client, app_config],
+                name="Poll inverter for DB Logging",
+                grace_time=600,
+            )
 
     except Exception as e:
         logger.critical(f"Failed to register scheduled jobs: {e}", exc_info=True)
@@ -266,49 +333,3 @@ def register_job(scheduler, job_id, func, trigger, trigger_args, job_args, name,
         logger.info(f"Job '{job_id}' scheduled: {trigger.upper()} with args {trigger_args}.")
     except Exception as e:
         logger.warning(f"Failed to schedule job '{job_id}': {e}", exc_info=True)
-
-
-def populate_price_data_in_appstate(db_handler: DatabaseHandler, app_config: dict,
-                                    force_api_fetch_if_missing: bool = False):
-    """
-    Ensures price data for today and tomorrow is in AppState.
-    Tries DB first. If missing and force_api_fetch_if_missing is True, tries API.
-    """
-    logger.info(f"Populating price data for AppState")
-
-    # Target day is timezone-aware
-    local_now = datetime.now().astimezone()
-    local_tomorrow = local_now + timedelta(days=1)
-
-    for day, key in [(local_now, "electricity_prices_today"),
-                     (local_tomorrow, "electricity_prices_tomorrow")]:
-        # Try to get from database
-        price_points = db_handler.get_da_prices(day)
-
-        # If DB is empty and API fetching is allowed, fetch from API
-        store_to_db = False
-        if not price_points and force_api_fetch_if_missing:
-            logger.info(f"No DB data for '{key}' on {day.date()}, attempting API fetch.")
-            price_points = api_entsoe_day_ahead_price.fetch_entsoe_prices(day, app_config)
-            store_to_db = True if price_points else False
-
-        # Process the price points (if any)
-        process_price_points_to_app_state(price_points, day, key, app_config,
-                                          db_handler if store_to_db else None)
-
-    if not GLOBAL_APP_STATE.get("electricity_prices_today"):
-        logger.warning("No 'electricity_prices_today' found in AppState. Price-based decisions will fail.")
-
-
-def populate_forecast_data_in_appstate(db_handler: DatabaseHandler):
-    """Loads forecast data for target_day_local."""
-
-    local_now = datetime.now().astimezone()
-
-    logger.info("Populating AppState with forecast data...")
-    forecast_days = {"wind": 5, "solar": 5, "grid_load": 4}
-    forecasts = {
-        f_type: db_handler.get_elia_forecasts(f_type, local_now, local_now + timedelta(days=days))
-        for f_type, days in forecast_days.items()
-    }
-    GLOBAL_APP_STATE.set("forecasts", forecasts)

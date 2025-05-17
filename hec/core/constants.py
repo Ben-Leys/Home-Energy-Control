@@ -1,14 +1,14 @@
 # constants.py
-from enum import Enum, auto
+from enum import Enum
 
 
 class AppStatus(Enum):
-    STARTING = "starting"   # Application is in its startup sequence
-    NORMAL = "normal"       # Everything is running as expected
-    WARNING = "warning"     # A condition that might lead to an error or degraded state if not addressed
-    DEGRADED = "degraded"   # Some non-critical functionality might be impaired
-    ALARM = "alarm"         # A significant error has occurred, critical functions might be affected
-    SHUTDOWN = "shutdown"   # Application is in the process of shutting down
+    STARTING = "Starting"   # Application is in its startup sequence
+    NORMAL = "Normal"       # Everything is running as expected
+    WARNING = "Warning"     # A condition that might lead to an error or degraded state if not addressed
+    DEGRADED = "Degraded"   # Some non-critical functionality might be impaired
+    ALARM = "Alarm"         # A significant error has occurred, critical functions might be affected
+    SHUTDOWN = "Shutdown"   # Application is in the process of shutting down
 
 
 class AppManualState(Enum):
@@ -22,30 +22,33 @@ class AppManualState(Enum):
 
 
 class OperatingMode(Enum):
-    MODE_AUTO = "auto"      # System makes decisions
-    MODE_MANUAL = "manual"  # User manually picks state
+    MODE_AUTO = "Auto"      # System makes decisions
+    MODE_MANUAL = "Manual"  # User manually picks state
 
 
 class InverterStatus(Enum):
-    UNKNOWN = "unknown"
-    OFFLINE = "offline"
-    NORMAL = "normal"
-    LIMITED_PRODUCTION = "limited production"
+    UNKNOWN = "Unknown"
+    OFFLINE = "Offline"
+    NORMAL = "Normal"
+    WARNING = "Warning"
+    OFF = "Off"
+    FAULT = "Fault"
+    STANDBY = "Standby"
 
 
 class InverterManualState(Enum):
-    INV_CMD_LIMIT_STANDARD = "limit standard"
-    INV_CMD_LIMIT_ZERO = "limit zero"
-    INV_CMD_LIMIT_FIXED = "limit fixed watts"
-    INV_CMD_LIMIT_TO_USE = "limit to home consumption"
+    INV_CMD_LIMIT_STANDARD = "Standard power limit"
+    INV_CMD_LIMIT_ZERO = "Power limit zero"
+    INV_CMD_LIMIT_MANUAL = "Manual power limit"
+    INV_CMD_LIMIT_TO_USE = "Power limited to home consumption"
 
 
 class EVChargeStatus(Enum):
-    UNKNOWN = "unknown"
-    OFFLINE = "offline"
-    DISCONNECTED = "disconnected"
-    CONNECTED_NOT_CHARGING = "connected not charging"
-    CHARGING = "charging"
+    UNKNOWN = "Unknown"
+    OFFLINE = "Offline"
+    DISCONNECTED = "Disconnected"
+    CONNECTED_NOT_CHARGING = "Connected not charging"
+    CHARGING = "Charging"
 
 
 class EVCCManualState(Enum):

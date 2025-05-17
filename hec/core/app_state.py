@@ -19,11 +19,10 @@ class AppState:
             "app_manual_state": None,
             "p1_meter_data": None,  # Latest raw P1 data dict                             # DONE
             "p1_meter_last_stored_boundary_slot_utc_iso": None,                           # DONE
-            "inverter_data": None,  # Latest raw inverter data dict
-            "inverter_status": c.InverterStatus.OFFLINE,
+            "inverter_data": {"operational_status": c.InverterStatus.UNKNOWN},            # DONE
             "inverter_operating_mode": c.OperatingMode.MODE_AUTO,  # auto, manual
             "inverter_manual_state": None,
-            "ev_charge_status": c.EVChargeStatus.OFFLINE,
+            "ev_charge_status": c.EVChargeStatus.UNKNOWN,
             "ev_soc_percent": None,  # EV State of Charge (%)
             "ev_charge_power_watts": 0,
             "electricity_prices_today": None,                                             # DONE

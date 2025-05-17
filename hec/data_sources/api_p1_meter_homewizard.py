@@ -1,4 +1,4 @@
-# hec/data_sources/api_homewizard_p1_meter.py
+# hec/data_sources/api_p1_meter_homewizard.py
 import json
 import logging
 import requests
@@ -9,7 +9,7 @@ from typing import Optional, Dict, Any
 logger = logging.getLogger(__name__)
 
 
-class P1MeterHomeWizard:
+class P1MeterHomewizardClient:
     def __init__(self, host: str = None, request_timeout: int = 10):
         """
         Initializes the HomeWizard P1 Meter client.
@@ -98,7 +98,7 @@ if __name__ == '__main__':
 
     if test_p1_host:
         print(f"--- Testing P1MeterHomeWizard with host: {test_p1_host} ---")
-        p1_meter = P1MeterHomeWizard(host=test_p1_host)
+        p1_meter = P1MeterHomewizardClient(host=test_p1_host)
 
         if p1_meter.is_initialized:
             for _ in range(20):

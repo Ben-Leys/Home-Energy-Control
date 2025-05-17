@@ -5,11 +5,12 @@ from threading import Thread
 from hec.core import constants as c
 from hec.core.api_server import run_api_server
 from hec.core.app_initializer import (populate_app_state, initialize_database_handler,
-                                      initialize_p1_meter_client, setup_scheduler, load_app_config)
+                                      initialize_data_sources, setup_scheduler, load_app_config)
 from hec.core.app_state import GLOBAL_APP_STATE
 from hec.core.app_logging import start_logger
 from hec.core.tariff_manager import initialize_tariff_manager
 from hec.logic_engine import scheduled_tasks
+from hec.logic_engine.scheduled_tasks import task_poll_inverter_for_live_update
 
 try:
     APP_CONFIG = load_app_config()
@@ -38,8 +39,8 @@ def run_application():
     db_handler = initialize_database_handler(APP_CONFIG)
 
     # --- INITIALIZE DATA SOURCES ---
-    p1_meter_client = initialize_p1_meter_client(APP_CONFIG)
-
+    p1_meter_client, inverter_client = initialize_data_sources(APP_CONFIG)
+    task_poll_inverter_for_live_update(db_handler, inverter_client, APP_CONFIG)
     # --- POPULATE APP STATE ---
     populate_app_state(db_handler, APP_CONFIG)
 
@@ -59,7 +60,7 @@ def run_application():
     # --- SET UP SCHEDULER ---
     run_scheduler_in_background = APP_CONFIG.get('scheduler', {}).get('run_in_background', True)
     scheduler = setup_scheduler(APP_CONFIG, run_in_background=run_scheduler_in_background)
-    scheduled_tasks.register_all_jobs(scheduler, db_handler, APP_CONFIG, p1_meter_client)
+    scheduled_tasks.register_all_jobs(scheduler, db_handler, APP_CONFIG, p1_meter_client, inverter_client)
 
     logger.info("Starting scheduler...")
     try:

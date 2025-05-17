@@ -8,6 +8,8 @@ from hec.core.app_state import GLOBAL_APP_STATE
 from hec.database_ops.db_handler import DatabaseHandler
 from hec.logic_engine.cost_calculator import calculate_net_intervals_for_day
 from hec.models.models import NetElectricityPriceInterval
+from astral import LocationInfo
+from astral.sun import sun
 
 logger = logging.getLogger(__name__)
 
@@ -121,3 +123,33 @@ def process_price_points_to_app_state(price_points: list, target_day: datetime,
     logger.info(f"Updated AppState with {len(nepis)} price points for '{app_state_key}'.")
 
     return True
+
+
+def is_daylight(app_config: dict) -> bool:
+    """Checks if it's currently daylight hours based on configured location."""
+    location_config = app_config.get('inverter').get('location')
+    if not location_config or not all(k in location_config for k in ['latitude', 'longitude', 'timezone']):
+        logger.warning("Location for sunrise/sunset calculation not fully configured. Assuming daylight.")
+        return True
+
+    now_dt_aware = datetime.now().astimezone()
+    city = LocationInfo("MyCity", location_config['region_name_for_astral_optional'],
+                        location_config['timezone'],
+                        location_config['latitude'],
+                        location_config['longitude'])
+    s = sun(city.observer, date=now_dt_aware.date(), tzinfo=city.timezone)
+
+    sunrise_local = s["sunrise"]
+    sunset_local = s["sunset"]
+
+    is_light = sunrise_local <= now_dt_aware <= sunset_local
+    logger.debug(f"Daylight check: Now={now_dt_aware.strftime('%H:%M')}, Sunrise={sunrise_local.strftime('%H:%M')}, "
+                 f"Sunset={sunset_local.strftime('%H:%M')} -> Is Daylight: {is_light}")
+    return is_light
+
+
+if __name__ == '__main__':
+    logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    test_config = {'location': {'latitude': 51.05483, 'longitude': 4.62877, 'timezone': 'Europe/Brussels',
+                                'region_name_for_astral_optional': 'Belgium'}}
+    print(is_daylight(test_config))
