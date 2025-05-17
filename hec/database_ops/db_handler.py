@@ -542,7 +542,7 @@ class DatabaseHandler:
 
         return result
 
-    def get_avg_monthly_peak_w_last_12m(self, reference_date: date, minimum_peak_W: int) -> Optional[float]:
+    def get_avg_monthly_peak_w_last_12m(self, reference_date: date, minimum_peak_w: int) -> Optional[float]:
         """
         Returns the average monthly peak power (in W) for the 12 months ending
         with the month of `reference_date`. If the latest month is not complete,
@@ -553,7 +553,7 @@ class DatabaseHandler:
 
         Args:
             reference_date (date): any day in the last month to include.
-            minimum_peak_W: the minimum peak for tariff calculation
+            minimum_peak_w: the minimum peak for tariff calculation
 
         Returns:
             Optional[float]: average peak in kW, or None if no data.
@@ -598,9 +598,9 @@ class DatabaseHandler:
                 continue
 
             peak_w, = row
-            logger.debug(f"Peak w: {max(peak_w, minimum_peak_W)} for {mon}/{year}")
+            logger.debug(f"Peak w: {max(peak_w, minimum_peak_w)} for {mon}/{year}")
             if peak_w is not None:
-                peaks_kw.append(max(peak_w, minimum_peak_W))
+                peaks_kw.append(max(peak_w, minimum_peak_w))
 
         if not peaks_kw:
             return None

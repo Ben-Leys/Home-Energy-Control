@@ -14,7 +14,6 @@ from hec.logic_engine.utils import parse_hh_mm_time_string, process_price_points
 
 logger = logging.getLogger(__name__)
 
-
 # --- Scheduled Tasks ---
 FETCH_PRICES_JOB_ID = "fetch_day_ahead_prices"
 fetch_prices_attempt_count = 0
@@ -58,7 +57,7 @@ def task_fetch_and_store_day_ahead_prices(scheduler: BaseScheduler, db_handler: 
             logger.warning(f"Could not reschedule price fetch job: {e}", exc_info=True)
     else:
         logger.warning(f"Max retry attempts ({max_retries}) reached for fetching prices for "
-                     f"{target_day.strftime('%Y-%m-%d')}. Giving up.")
+                       f"{target_day.strftime('%Y-%m-%d')}. Giving up.")
         fetch_prices_attempt_count = 0  # Reset for the next day's attempt
 
 
@@ -257,16 +256,16 @@ def populate_price_data_in_appstate(db_handler: DatabaseHandler, target_day_loca
     logger.info(f"Populating price data for AppState key '{app_state_key}' (date: {target_day_local.date()})")
 
     # Target_day_local is timezone-aware
-    local_tz = target_day_local.tzinfo or datetime.now().astimezone().tzinfo
-    target_day_local = target_day_local.replace(tzinfo=local_tz)
+    target_day_local = target_day_local.astimezone() if target_day_local.tzinfo is None else target_day_local
 
     # Try to get from database
     price_points = db_handler.get_da_prices(target_day_local)
 
+    # If DB is empty and API fetching is allowed, fetch from API
     if not price_points and force_api_fetch_if_missing:
         logger.info(f"No DB data for '{app_state_key}' on {target_day_local.date()}, attempting API fetch.")
         price_points = api_entsoe_day_ahead_price.fetch_entsoe_prices(target_day_local, app_config)
-        return process_price_points_to_app_state(price_points, target_day_local, app_state_key, db_handler)
 
-    # Process the price points if available
-    return process_price_points_to_app_state(price_points, target_day_local, app_state_key)
+    # Process the price points (if any)
+    process_price_points_to_app_state(price_points, target_day_local, app_state_key, app_config,
+                                      db_handler if not price_points else None)

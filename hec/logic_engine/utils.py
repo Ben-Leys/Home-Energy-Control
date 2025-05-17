@@ -4,70 +4,42 @@ import logging
 from datetime import datetime, timedelta
 from typing import Optional, List, Dict, Any, Tuple
 
-import hec.models.models
 from hec.core.app_state import GLOBAL_APP_STATE
 from hec.database_ops.db_handler import DatabaseHandler
+from hec.logic_engine.cost_calculator import calculate_net_intervals_for_day
+from hec.models.models import NetElectricityPriceInterval
 
 logger = logging.getLogger(__name__)
 
 
-def convert_utc_price_points_to_local(
-        utc_price_points: list[hec.models.models.PricePoint], local_tz) -> list[dict]:
+def get_interval_from_list(target_local: datetime, intervals: List[NetElectricityPriceInterval]) \
+        -> Optional[NetElectricityPriceInterval]:
     """
-    Converts a list of UTC PricePoint objects to a list of dictionaries,
-    each representing a price interval with its local start time and other details.
-    Iterating through a list of dicts to find the current price should be less complex than truncating local time,
-    convert to a string, to find the key that could possibly be a changing resolution time in a dict.
+    Finds the active NetElectricityPriceInterval for the given 'target_local' datetime.
+
+    Args:
+        target_local: The datetime for which the active interval is being sought.
+        intervals: A list of NetElectricityPriceInterval objects.
+
+    Returns:
+        The active NetElectricityPriceInterval if found, otherwise None.
     """
-    if not utc_price_points:
-        return []
-
-    local_interval_prices = []
-    for pp in utc_price_points:
-        # Convert the UTC timestamp of the price point to local time
-        interval_start_local = pp.timestamp_utc.astimezone(local_tz)
-
-        local_interval_prices.append({
-            "interval_start_local": interval_start_local.isoformat(),  # ISO format string with TZ offset
-            "price_eur_per_mwh": pp.price_eur_per_mwh,
-            "resolution_minutes": pp.resolution_minutes,
-        })
-
-    logger.debug(f"Converted {len(utc_price_points)} UTC price points to {len(local_interval_prices)} local intervals.")
-    return local_interval_prices
-
-
-def get_current_interval_price_data(now_local: datetime, daily_intervals: Optional[List[Dict[str, Any]]]) \
-        -> Optional[Dict[str, Any]]:
-    """
-    Finds the price data for the interval that 'now_local' falls into.
-    'daily_intervals' is a list of dicts, each with 'interval_start_local' (ISO string)
-    and 'resolution_minutes'.
-    """
-    if not daily_intervals:
-        return None
-
-    for interval_data in daily_intervals:
+    for interval in intervals:
         try:
-            interval_start = datetime.fromisoformat(interval_data["interval_start_local"])
-            # Interval_start is timezone-aware because 'now_local' is too
-            if now_local.tzinfo and interval_start.tzinfo is None:
-                interval_start = interval_start.replace(tzinfo=now_local.tzinfo)
+            interval_start = interval.interval_start_local
 
-            resolution = interval_data.get("resolution_minutes")
-            if resolution is None:
-                logger.warning("Interval data missing 'resolution_minutes'. Skipping.")
-                continue
+            # Ensure timezone alignment between target_local and interval_start
+            if target_local.tzinfo and interval_start.tzinfo is None:
+                interval_start = interval_start.replace(tzinfo=target_local.tzinfo)
 
-            interval_end = interval_start + timedelta(minutes=resolution)
+            interval_end = interval_start + timedelta(minutes=interval.resolution_minutes)
 
-            if interval_start <= now_local < interval_end:
-                return interval_data
+            if interval_start <= target_local < interval_end:
+                return interval
         except Exception as e:
-            logger.error(f"Error processing interval data: {interval_data}. Error: {e}", exc_info=True)
-            pass  # Continue to next interval if current one is malformed
+            logger.error(f"Error processing interval: {interval}. Error: {e}", exc_info=True)
 
-    logger.warning(f"No current interval found for {now_local.isoformat()} in provided list.")
+    logger.warning(f"No active interval found for {target_local.isoformat()} in the provided list.")
     return None
 
 
@@ -110,7 +82,7 @@ def parse_hh_mm_time_string(time_str: str) -> Optional[Tuple[int, int]]:
 
 
 def process_price_points_to_app_state(price_points: list, target_day: datetime,
-                                      app_state_key: str, db_handler: DatabaseHandler = None):
+                                      app_state_key: str, app_config, db_handler: DatabaseHandler = None):
     """
     Processes price points by storing them in the database in raw format and updating the AppState with net prices.
 
@@ -118,6 +90,7 @@ def process_price_points_to_app_state(price_points: list, target_day: datetime,
         price_points (list): List of price points retrieved from the API.
         target_day (datetime): The target day for the price points (timezone-aware).
         app_state_key (str): The key under which to store the processed price points in the AppState.
+        app_config: Dict with application configuration data.
         db_handler (DatabaseHandler): Database handler for storing the price points if necessary.
 
     Returns:
@@ -141,11 +114,10 @@ def process_price_points_to_app_state(price_points: list, target_day: datetime,
         logger.debug(f"Stored {len(price_points)} price points in the database.")
 
     # Convert and process price points for the AppState
-    local_tz = target_day.tzinfo if target_day.tzinfo else datetime.now().astimezone().tzinfo
-    processed_prices = convert_utc_price_points_to_local(price_points, local_tz)
+    nepis = calculate_net_intervals_for_day(db_handler, app_config, target_day, price_points)
 
     # Update AppState
-    GLOBAL_APP_STATE.set(app_state_key, processed_prices)
-    logger.info(f"Updated AppState with {len(processed_prices)} price points for '{app_state_key}'.")
+    GLOBAL_APP_STATE.set(app_state_key, nepis)
+    logger.info(f"Updated AppState with {len(nepis)} price points for '{app_state_key}'.")
 
     return True

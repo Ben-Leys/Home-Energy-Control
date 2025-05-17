@@ -2,7 +2,6 @@
 import logging
 from datetime import datetime, timedelta
 from pathlib import Path
-from threading import Thread
 from typing import Optional, Dict
 
 import yaml
@@ -11,7 +10,6 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.schedulers.blocking import BlockingScheduler
 from dotenv import load_dotenv
 
-from hec.core.api_server import run_api_server
 from hec.core.app_state import GLOBAL_APP_STATE
 from hec.data_sources.api_homewizard_p1_meter import P1MeterHomeWizard
 from hec.database_ops.db_handler import DatabaseHandler
@@ -143,13 +141,3 @@ def load_app_config():
 
     logging.info(f"Loaded files .env and {CONFIG_FILE_NAME}")
     return config
-
-
-def start_api_server(app_config: dict):
-    api_thread = None
-    if app_config.get('api_server', {}).get('enabled', True):
-        api_thread = Thread(target=run_api_server, args=(app_config,), daemon=True)
-        api_thread.start()
-    else:
-        logger.info("API server is disabled in configuration.")
-    return api_thread

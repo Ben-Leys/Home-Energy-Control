@@ -70,7 +70,6 @@ def run_api_server(app_config: dict):
     logger.info(f"Starting API server on http://{host}:{port}")
     try:
         api_app.run(host=host, port=port, debug=debug_mode, use_reloader=False)
-        return
     except Exception as e:
         logger.error(f"API server failed to start or crashed: {e}", exc_info=True)
         GLOBAL_APP_STATE.set("app_state", c.AppStatus.DEGRADED)
