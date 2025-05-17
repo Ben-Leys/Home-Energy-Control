@@ -42,7 +42,7 @@ def task_fetch_and_store_day_ahead_prices(scheduler: BaseScheduler, db_handler: 
 
     price_points = api_entsoe_day_ahead_price.fetch_entsoe_prices(target_day, app_config)
 
-    if process_price_points_to_app_state(price_points, db_handler, target_day, "electricity_prices_tomorrow"):
+    if process_price_points_to_app_state(price_points, target_day, "electricity_prices_tomorrow", db_handler):
         fetch_prices_attempt_count = 0
         return
 
@@ -266,6 +266,7 @@ def populate_price_data_in_appstate(db_handler: DatabaseHandler, target_day_loca
     if not price_points and force_api_fetch_if_missing:
         logger.info(f"No DB data for '{app_state_key}' on {target_day_local.date()}, attempting API fetch.")
         price_points = api_entsoe_day_ahead_price.fetch_entsoe_prices(target_day_local, app_config)
+        return process_price_points_to_app_state(price_points, target_day_local, app_state_key, db_handler)
 
     # Process the price points if available
-    return process_price_points_to_app_state(price_points, db_handler, target_day_local, app_state_key)
+    return process_price_points_to_app_state(price_points, target_day_local, app_state_key)

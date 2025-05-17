@@ -109,16 +109,16 @@ def parse_hh_mm_time_string(time_str: str) -> Optional[Tuple[int, int]]:
         return None
 
 
-def process_price_points_to_app_state(price_points: list, db_handler: DatabaseHandler,
-                                      target_day: datetime, app_state_key: str):
+def process_price_points_to_app_state(price_points: list, target_day: datetime,
+                                      app_state_key: str, db_handler: DatabaseHandler = None):
     """
     Processes price points by storing them in the database in raw format and updating the AppState with net prices.
 
     Args:
         price_points (list): List of price points retrieved from the API.
-        db_handler (DatabaseHandler): Database handler for storing the price points.
         target_day (datetime): The target day for the price points (timezone-aware).
         app_state_key (str): The key under which to store the processed price points in the AppState.
+        db_handler (DatabaseHandler): Database handler for storing the price points if necessary.
 
     Returns:
         True in case of success, False in case of failure.
@@ -136,8 +136,9 @@ def process_price_points_to_app_state(price_points: list, db_handler: DatabaseHa
     logger.info(f"Processing {len(price_points)} price points for {target_day.date()}.")
 
     # Store raw price points in the database
-    db_handler.store_da_prices(price_points)
-    logger.debug(f"Stored {len(price_points)} price points in the database.")
+    if db_handler:
+        db_handler.store_da_prices(price_points)
+        logger.debug(f"Stored {len(price_points)} price points in the database.")
 
     # Convert and process price points for the AppState
     local_tz = target_day.tzinfo if target_day.tzinfo else datetime.now().astimezone().tzinfo
