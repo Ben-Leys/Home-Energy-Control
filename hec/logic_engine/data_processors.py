@@ -2,6 +2,7 @@ import logging
 from datetime import datetime, timedelta, time
 
 from hec.core.app_state import GLOBAL_APP_STATE
+from hec.data_sources.api_entsoe import fetch_entsoe_prices
 from hec.database_ops.db_handler import DatabaseHandler
 from hec.logic_engine.utils import process_price_points_to_app_state
 
@@ -29,7 +30,7 @@ def populate_appstate_with_price_data(db_handler: DatabaseHandler, app_config: d
         store_to_db = False
         if not price_points and force_api_fetch_if_missing:
             logger.info(f"No DB data for '{key}' on {day.date()}, attempting API fetch.")
-            price_points = api_entsoe_day_ahead_price.fetch_entsoe_prices(day, app_config)
+            price_points = fetch_entsoe_prices(day, app_config)
             store_to_db = True if price_points else False
 
         # Process the price points (if any)

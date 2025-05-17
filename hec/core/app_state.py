@@ -22,16 +22,14 @@ class AppState:
             "inverter_data": {"operational_status": c.InverterStatus.UNKNOWN},            # DONE
             "inverter_operating_mode": c.OperatingMode.MODE_AUTO,  # auto, manual
             "inverter_manual_state": None,
+            "ev_date": None,
             "ev_charge_status": c.EVChargeStatus.UNKNOWN,
-            "ev_soc_percent": None,  # EV State of Charge (%)
-            "ev_charge_power_watts": 0,
             "electricity_prices_today": None,                                             # DONE
             "electricity_prices_tomorrow": None,                                          # DONE
             "forecasts": None,                                                            # DONE
-            "evcc_operating_mode": c.OperatingMode.MODE_AUTO,  # auto, manual
+            "evcc_data": None,
+            "evcc_operating_mode": c.OperatingMode.MODE_AUTO,
             "evcc_manual_state": None,
-            "evcc_limit_amp": None,
-            "evcc_smart_cost_limit": None,
         }
 
     def get(self, key, default=None):

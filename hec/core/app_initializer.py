@@ -9,10 +9,13 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.schedulers.blocking import BlockingScheduler
 from dotenv import load_dotenv
 
+from hec.controllers import modbus_sma_inverter
+from hec.controllers.api_evcc import EvccApiClient
 from hec.core import constants as c
-from hec.data_sources import api_p1_meter_homewizard, modbus_sma_inverter
+from hec.data_sources import api_p1_meter_homewizard
 from hec.database_ops.db_handler import DatabaseHandler
 from hec.logic_engine.data_processors import populate_appstate_with_price_data, populate_appstate_with_forecast_data
+from hec.logic_engine.scheduled_tasks import task_poll_evcc_state
 
 logger = logging.getLogger(__name__)
 
@@ -20,7 +23,7 @@ CONFIG_FILE_NAME = "config.yaml"
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 
-def populate_app_state(db_handler: DatabaseHandler, app_config: dict):
+def populate_app_state(db_handler: DatabaseHandler, app_config: dict, evcc_client: EvccApiClient):
     """Populate app state with necessary data from data sources."""
     try:
         # Populate price data
@@ -28,6 +31,9 @@ def populate_app_state(db_handler: DatabaseHandler, app_config: dict):
 
         # Populate forecast data
         populate_appstate_with_forecast_data(db_handler)
+
+        # Populate evcc data
+        task_poll_evcc_state(evcc_client)
 
     except Exception as e:
         logger.error(f"Error during AppState population: {e}", exc_info=True)
@@ -46,12 +52,13 @@ def initialize_database_handler(app_config: dict) -> Optional[DatabaseHandler]:
         return None
 
 
-def initialize_data_sources(app_config: dict):
+def initialize_external_clients(app_config: dict):
     """Initializes and *returns* the data sources client instance."""
 
     logger.info("Initializing data source clients...")
     p1_client = None
     inverter_client = None
+    evcc_client = None
 
     # --- P1 Meter ---
     try:
@@ -95,7 +102,24 @@ def initialize_data_sources(app_config: dict):
     except Exception as e:
         logger.error(f"Error initializing Inverter SMA Modbus client: {e}", exc_info=True)
 
-    return p1_client, inverter_client
+    # --- EVCC client ---
+    try:
+        evcc_config = app_config.get('evcc', {})
+        api_url = evcc_config.get('api_url')
+        if api_url:
+            evcc_client = EvccApiClient(
+                base_api_url=api_url,
+                default_loadpoint_id=evcc_config.get('default_loadpoint_id'),
+                request_timeout=evcc_config.get('request_timeout_seconds')
+            )
+            if not evcc_client.is_available:
+                logger.warning("EVCC client initialized, but EVCC API seems unavailable at startup.")
+        else:
+            logger.warning("EVCC API URL not configured. EVCC client will be disabled.")
+    except Exception as e:
+        logger.error(f"Error initializing EVCC API client: {e}", exc_info=True)
+
+    return p1_client, inverter_client, evcc_client
 
 
 def setup_scheduler(config: dict, run_in_background: bool = False):

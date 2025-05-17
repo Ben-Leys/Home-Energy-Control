@@ -5,12 +5,13 @@ from typing import Optional, List, Dict, Any
 
 from apscheduler.schedulers.base import BaseScheduler
 
+from hec.controllers.api_evcc import EvccApiClient
 from hec.core import constants as c
 from hec.core.app_state import GLOBAL_APP_STATE
-from hec.data_sources import api_entsoe
 from hec.data_sources.api_elia import fetch_and_process_forecast
+from hec.data_sources.api_entsoe import fetch_entsoe_prices
 from hec.data_sources.api_p1_meter_homewizard import P1MeterHomewizardClient
-from hec.data_sources.modbus_sma_inverter import InverterSmaModbusClient
+from hec.controllers.modbus_sma_inverter import InverterSmaModbusClient
 from hec.database_ops.db_handler import DatabaseHandler
 from hec.logic_engine.data_processors import populate_appstate_with_price_data, populate_appstate_with_forecast_data
 from hec.logic_engine.utils import parse_hh_mm_time_string, process_price_points_to_app_state, is_daylight
@@ -24,6 +25,7 @@ MIDNIGHT_ROLLOVER_JOB_ID = "midnight_rollover"
 P1_METER_JOB_ID = "p1_meter_update"
 FETCH_ELIA_FORECAST_JOB_ID = "fetch_elia_forecast"
 INVERTER_JOB_ID = "inverter_update"
+POLL_EVCC_JOB_ID = "evcc_update"
 
 
 def task_fetch_and_store_day_ahead_prices(scheduler: BaseScheduler, db_handler: DatabaseHandler, app_config: dict):
@@ -43,7 +45,7 @@ def task_fetch_and_store_day_ahead_prices(scheduler: BaseScheduler, db_handler: 
     # Determine target date: ENTSO-E auction is for D+1
     target_day = (datetime.now().astimezone() + timedelta(days=1))
 
-    price_points = api_entsoe.fetch_entsoe_prices(target_day, app_config)
+    price_points = fetch_entsoe_prices(target_day, app_config)
 
     if process_price_points_to_app_state(price_points, target_day, "electricity_prices_tomorrow", db_handler):
         fetch_prices_attempt_count = 0
@@ -161,9 +163,8 @@ def task_poll_inverter(db_handler: DatabaseHandler, inv_client: InverterSmaModbu
         GLOBAL_APP_STATE.set("inverter_data", live_data)
 
         if log_to_db:
-            # TODO: Implement db_handler.store_inverter_data(live_data)
             logger.info(f"Inverter DB log: Storing data for {live_data.get('timestamp_utc_iso')}")
-            # db_handler.store_inverter_data(live_data) # Call your new DB store function
+            db_handler.store_inverter_data(live_data)
 
         return live_data
     else:
@@ -180,6 +181,25 @@ def task_poll_inverter_for_db_logging(db_handler: DatabaseHandler, inv_client: I
 def task_poll_inverter_for_live_update(db_handler: DatabaseHandler, inv_client: InverterSmaModbusClient, app_config):
     logger.debug("Running task: Poll inverter for AppState Update")
     task_poll_inverter(db_handler, inv_client, app_config, log_to_db=False)
+
+
+def task_poll_evcc_state(evcc_client: Optional[EvccApiClient]):
+    """Poll evcc for state dict and store in AppState"""
+    if not evcc_client or not evcc_client.is_available:
+        logger.debug("EVCC polling task: Client not available. Skipping.")
+        GLOBAL_APP_STATE.set("evcc_data", None)
+        return
+
+    logger.debug("EVCC polling task: Fetching state...")
+    evcc_state = evcc_client.get_current_state()
+
+    if evcc_state:
+        GLOBAL_APP_STATE.set("evcc_data", evcc_state)
+        logger.debug(f"EVCC: AppState updated. Mode: {evcc_state['loadpoints'][0].get('mode')}, "
+                     f"Charging: {evcc_state['loadpoints'][0].get('charging')}")
+    else:
+        logger.warning("EVCC polling task: Failed to fetch state from EVCC.")
+        GLOBAL_APP_STATE.set("evcc_data", None)
 
 
 def task_fetch_elia_forecasts(db_handler: DatabaseHandler, app_config: dict):
@@ -220,8 +240,10 @@ def task_fetch_elia_forecasts(db_handler: DatabaseHandler, app_config: dict):
         logger.warning(f"No Elia forecast data fetched for {days_to_fetch} days. Check API.")
 
 
-def register_all_jobs(scheduler: BaseScheduler, db_handler: DatabaseHandler,
-                      app_config: dict, p1_client: Optional[P1MeterHomewizardClient], inv_client: InverterSmaModbusClient):
+def register_all_jobs(scheduler: BaseScheduler, db_handler: DatabaseHandler, app_config: dict,
+                      p1_client: Optional[P1MeterHomewizardClient],
+                      inv_client: Optional[InverterSmaModbusClient],
+                      evcc_client: Optional[EvccApiClient]):
     """Registers all defined scheduled jobs with the provided scheduler instance."""
 
     logger.info("Registering scheduled jobs...")
@@ -310,6 +332,25 @@ def register_all_jobs(scheduler: BaseScheduler, db_handler: DatabaseHandler,
                 name="Poll inverter for DB Logging",
                 grace_time=600,
             )
+        else:
+            logger.warning(f"Inverter client not initialized. '{INVERTER_JOB_ID}' job not scheduled.")
+
+        # Register evcc job if available
+        if evcc_client:
+            evcc_schedule = tasks_config.get(POLL_EVCC_JOB_ID, {})
+            second = evcc_schedule.get('second', '*/15')
+            register_job(
+                scheduler,
+                job_id=POLL_EVCC_JOB_ID,
+                func=task_poll_evcc_state,
+                trigger="cron",
+                trigger_args={"second": second},
+                job_args=[evcc_client],
+                name="Poll EVCC",
+                grace_time=10,
+            )
+        else:
+            logger.warning(f"P1 Meter client not initialized. '{POLL_EVCC_JOB_ID}' job not scheduled.")
 
     except Exception as e:
         logger.critical(f"Failed to register scheduled jobs: {e}", exc_info=True)
