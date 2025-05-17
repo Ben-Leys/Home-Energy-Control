@@ -13,7 +13,7 @@ from dotenv import load_dotenv
 from hec.core.app_state import GLOBAL_APP_STATE
 from hec.data_sources.api_homewizard_p1_meter import P1MeterHomeWizard
 from hec.database_ops.db_handler import DatabaseHandler
-from hec.logic_engine.scheduled_tasks import populate_price_data_in_appstate
+from hec.logic_engine.scheduled_tasks import populate_price_data_in_appstate, populate_forecast_data_in_appstate
 
 logger = logging.getLogger(__name__)
 
@@ -24,31 +24,11 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 def populate_app_state(db_handler: DatabaseHandler, app_config: dict):
     """Populate app state with necessary data from data sources."""
     try:
-        # Validate configuration
-        if not isinstance(app_config, dict):
-            raise ValueError("Invalid app_config: Expected a dictionary.")
-
-        local_now = datetime.now().astimezone()
-        local_tomorrow = local_now + timedelta(days=1)
-
         # Populate price data
-        logger.info("Populating AppState with price data...")
-        for day, key in [(local_now, "electricity_prices_today"),
-                         (local_tomorrow, "electricity_prices_tomorrow")]:
-            populate_price_data_in_appstate(
-                db_handler, day, app_config, key, force_api_fetch_if_missing=True
-            )
-        if not GLOBAL_APP_STATE.get("electricity_prices_today"):
-            logger.warning("No 'electricity_prices_today' found in AppState. Price-based decisions may fail.")
+        populate_price_data_in_appstate(db_handler, app_config, True)
 
         # Populate forecast data
-        logger.info("Populating AppState with forecast data...")
-        forecast_days = {"wind": 5, "solar": 5, "grid_load": 4}
-        forecasts = {
-            f_type: db_handler.get_elia_forecasts(f_type, local_now, local_now + timedelta(days=days))
-            for f_type, days in forecast_days.items()
-        }
-        GLOBAL_APP_STATE.set("forecasts", forecasts)
+        populate_forecast_data_in_appstate(db_handler)
 
     except Exception as e:
         logger.error(f"Error during AppState population: {e}", exc_info=True)

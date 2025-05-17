@@ -69,13 +69,11 @@ def task_midnight_rollover(db_handler: DatabaseHandler, app_config: dict):
         prices_tomorrow = GLOBAL_APP_STATE.get("electricity_prices_tomorrow", [])
         GLOBAL_APP_STATE.set("electricity_prices_today", prices_tomorrow)
         GLOBAL_APP_STATE.set("electricity_prices_tomorrow", [])  # Clear tomorrow
-        logger.info("Shifted 'tomorrow' prices to 'today'. 'Tomorrow' prices are now empty in AppState.")
+        logger.info("Shifted 'tomorrow' prices to 'today'.")
     else:  # No prices for tomorrow, try fetch from API
-        local_now = datetime.now().astimezone()
-        populate_price_data_in_appstate(db_handler, local_now, app_config, "electricity_prices_today",
-                                        force_api_fetch_if_missing=True)
+        populate_price_data_in_appstate(db_handler, app_config, True)
 
-    # TODO: Similar logic for forecasts etc.
+    populate_forecast_data_in_appstate(db_handler)
 
 
 def task_poll_p1_meter(db_handler: DatabaseHandler, p1_client: Optional[P1MeterHomeWizard], boundary: int = 5):
@@ -270,34 +268,47 @@ def register_job(scheduler, job_id, func, trigger, trigger_args, job_args, name,
         logger.warning(f"Failed to schedule job '{job_id}': {e}", exc_info=True)
 
 
-def populate_price_data_in_appstate(db_handler: DatabaseHandler, target_day_local: datetime, app_config: dict,
-                                    app_state_key: str, force_api_fetch_if_missing: bool = False):
+def populate_price_data_in_appstate(db_handler: DatabaseHandler, app_config: dict,
+                                    force_api_fetch_if_missing: bool = False):
     """
-    Ensures price data for target_day_local is in AppState.
+    Ensures price data for today and tomorrow is in AppState.
     Tries DB first. If missing and force_api_fetch_if_missing is True, tries API.
     """
-    logger.info(f"Populating price data for AppState key '{app_state_key}' (date: {target_day_local.date()})")
+    logger.info(f"Populating price data for AppState")
 
-    # Target_day_local is timezone-aware
-    target_day_local = target_day_local.astimezone() if target_day_local.tzinfo is None else target_day_local
+    # Target day is timezone-aware
+    local_now = datetime.now().astimezone()
+    local_tomorrow = local_now + timedelta(days=1)
 
-    # Try to get from database
-    price_points = db_handler.get_da_prices(target_day_local)
+    for day, key in [(local_now, "electricity_prices_today"),
+                     (local_tomorrow, "electricity_prices_tomorrow")]:
+        # Try to get from database
+        price_points = db_handler.get_da_prices(day)
 
-    # If DB is empty and API fetching is allowed, fetch from API
-    fetched = False
-    if not price_points and force_api_fetch_if_missing:
-        fetched = True
-        logger.info(f"No DB data for '{app_state_key}' on {target_day_local.date()}, attempting API fetch.")
-        price_points = api_entsoe_day_ahead_price.fetch_entsoe_prices(target_day_local, app_config)
+        # If DB is empty and API fetching is allowed, fetch from API
+        store_to_db = False
+        if not price_points and force_api_fetch_if_missing:
+            logger.info(f"No DB data for '{key}' on {day.date()}, attempting API fetch.")
+            price_points = api_entsoe_day_ahead_price.fetch_entsoe_prices(day, app_config)
+            store_to_db = True if price_points else False
 
-    # Process the price points (if any)
-    process_price_points_to_app_state(price_points, target_day_local, app_state_key, app_config,
-                                      db_handler if fetched else None)
+        # Process the price points (if any)
+        process_price_points_to_app_state(price_points, day, key, app_config,
+                                          db_handler if store_to_db else None)
+
+    if not GLOBAL_APP_STATE.get("electricity_prices_today"):
+        logger.warning("No 'electricity_prices_today' found in AppState. Price-based decisions will fail.")
 
 
-def populate_forecast_data_in_appstate(db_handler: DatabaseHandler, target_day_local: datetime, app_config: dict):
-    """
-    Loads forecast data for target_day_local.
-    :return:
-    """
+def populate_forecast_data_in_appstate(db_handler: DatabaseHandler):
+    """Loads forecast data for target_day_local."""
+
+    local_now = datetime.now().astimezone()
+
+    logger.info("Populating AppState with forecast data...")
+    forecast_days = {"wind": 5, "solar": 5, "grid_load": 4}
+    forecasts = {
+        f_type: db_handler.get_elia_forecasts(f_type, local_now, local_now + timedelta(days=days))
+        for f_type, days in forecast_days.items()
+    }
+    GLOBAL_APP_STATE.set("forecasts", forecasts)
