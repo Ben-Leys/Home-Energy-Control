@@ -15,7 +15,7 @@ from hec.controllers.modbus_sma_inverter import InverterSmaModbusClient
 from hec.database_ops.db_handler import DatabaseHandler
 from hec.logic_engine.data_processors import populate_appstate_with_price_data, populate_appstate_with_forecast_data, \
     update_rolling_averages
-from hec.logic_engine.utils import process_price_points_to_app_state, is_daylight
+from hec.utils.utils import process_price_points_to_app_state, is_daylight
 
 logger = logging.getLogger(__name__)
 
