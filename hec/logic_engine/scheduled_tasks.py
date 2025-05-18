@@ -13,8 +13,9 @@ from hec.data_sources.api_entsoe import fetch_entsoe_prices
 from hec.data_sources.api_p1_meter_homewizard import P1MeterHomewizardClient
 from hec.controllers.modbus_sma_inverter import InverterSmaModbusClient
 from hec.database_ops.db_handler import DatabaseHandler
-from hec.logic_engine.data_processors import populate_appstate_with_price_data, populate_appstate_with_forecast_data
-from hec.logic_engine.utils import parse_hh_mm_time_string, process_price_points_to_app_state, is_daylight
+from hec.logic_engine.data_processors import populate_appstate_with_price_data, populate_appstate_with_forecast_data, \
+    update_rolling_averages
+from hec.logic_engine.utils import process_price_points_to_app_state, is_daylight
 
 logger = logging.getLogger(__name__)
 
@@ -24,8 +25,10 @@ fetch_prices_attempt_count = 0
 MIDNIGHT_ROLLOVER_JOB_ID = "midnight_rollover"
 P1_METER_JOB_ID = "p1_meter_update"
 FETCH_ELIA_FORECAST_JOB_ID = "fetch_elia_forecast"
-INVERTER_JOB_ID = "inverter_update"
+INVERTER_FOR_DB_JOB_ID = "inverter_update_for_db"
+INVERTER_FOR_CONTROLLER_JOB_ID = "inverter_update_for_controller"
 POLL_EVCC_JOB_ID = "evcc_update"
+UPDATE_ROLLING_AVERAGES_JOB_ID = "update_rolling_averages"
 
 
 def task_fetch_and_store_day_ahead_prices(scheduler: BaseScheduler, db_handler: DatabaseHandler, app_config: dict):
@@ -138,7 +141,7 @@ def task_poll_p1_meter(db_handler: DatabaseHandler, p1_client: Optional[P1MeterH
 
 def task_poll_inverter(db_handler: DatabaseHandler, inv_client: InverterSmaModbusClient, app_config: dict,
                        log_to_db: bool) -> Optional[Dict[str, Any]]:
-    """Common logic for polling inverter, updating AppState, and optionally logging to DB."""
+    """Polling inverter, updating AppState, and optionally logging to DB."""
     if not inv_client:
         logger.debug("Inverter poll: Client not available.")
         GLOBAL_APP_STATE.set("inverter_data", None)
@@ -174,13 +177,24 @@ def task_poll_inverter(db_handler: DatabaseHandler, inv_client: InverterSmaModbu
 
 
 def task_poll_inverter_for_db_logging(db_handler: DatabaseHandler, inv_client: InverterSmaModbusClient, app_config):
+    """Straightforward: poll for db storage and update AppState too"""
     logger.debug("Running task: Poll inverter for DB logging")
     task_poll_inverter(db_handler, inv_client, app_config, log_to_db=True)
 
 
 def task_poll_inverter_for_live_update(db_handler: DatabaseHandler, inv_client: InverterSmaModbusClient, app_config):
-    logger.debug("Running task: Poll inverter for AppState Update")
+    """Make an on-request update. Usually API request from dashboard."""
+    logger.debug("Running task: Poll inverter for Live Update (Example: dashboard)")
     task_poll_inverter(db_handler, inv_client, app_config, log_to_db=False)
+
+
+def task_poll_inverter_for_controller_update(db_handler: DatabaseHandler, inv_client: InverterSmaModbusClient,
+                                             app_config):
+    """Poll to update average values for controller calculations."""
+    # Avoid running together with standard db_logging task every 15 minutes ?
+    if GLOBAL_APP_STATE.get("inverter_manual_state") == c.InverterManualState.INV_CMD_LIMIT_TO_USE:
+        logger.debug("Running task: Poll inverter for Controller Update")
+        task_poll_inverter(db_handler, inv_client, app_config, log_to_db=False)
 
 
 def task_poll_evcc_state(evcc_client: Optional[EvccApiClient]):
@@ -248,14 +262,12 @@ def register_all_jobs(scheduler: BaseScheduler, db_handler: DatabaseHandler, app
 
     logger.info("Registering scheduled jobs...")
     try:
-        tasks_config = app_config.get("tasks_schedule", {})
-
         job_definitions = [
             {
                 "job_id": FETCH_PRICES_JOB_ID,
                 "task_function": task_fetch_and_store_day_ahead_prices,
                 "trigger": "cron",
-                "trigger_args": lambda cfg: {"hour": cfg[0], "minute": cfg[1]},
+                "trigger_args": "",
                 "job_args": [scheduler, db_handler, app_config],
                 "name": "Fetch Day-Ahead ENTSO-E Prices",
                 "misfire_grace_time": 32400,  # 9 hours
@@ -264,7 +276,7 @@ def register_all_jobs(scheduler: BaseScheduler, db_handler: DatabaseHandler, app
                 "job_id": MIDNIGHT_ROLLOVER_JOB_ID,
                 "task_function": task_midnight_rollover,
                 "trigger": "cron",
-                "trigger_args": lambda cfg: {"hour": cfg[0], "minute": cfg[1]},
+                "trigger_args": "",
                 "job_args": [db_handler, app_config],
                 "name": "Midnight Rollover",
                 "misfire_grace_time": 50400,  # 13 hours
@@ -273,21 +285,29 @@ def register_all_jobs(scheduler: BaseScheduler, db_handler: DatabaseHandler, app
                 "job_id": FETCH_ELIA_FORECAST_JOB_ID,
                 "task_function": task_fetch_elia_forecasts,
                 "trigger": "cron",
-                "trigger_args": lambda cfg: {"hour": cfg[0], "minute": cfg[1]},
+                "trigger_args": "",
                 "job_args": [db_handler, app_config],
                 "name": "Fetch Elia Forecasts",
                 "misfire_grace_time": 3600,  # 1 hour
             },
+            {
+                "job_id": UPDATE_ROLLING_AVERAGES_JOB_ID,
+                "task_function": update_rolling_averages,
+                "trigger": "cron",
+                "trigger_args": "",
+                "job_args": [],
+                "name": "Update Rolling Averages",
+                "misfire_grace_time": 10,
+            }
         ]
 
         # Register CRON jobs
+        tasks_config = app_config.get("tasks_schedule", {})
         for job in job_definitions:
             task_config = tasks_config.get(job["job_id"], {})
-            scheduled_time = task_config.get('time')
-            parsed_time = parse_hh_mm_time_string(scheduled_time)
+            trigger_args = task_config.get('trigger')
 
-            if parsed_time:
-                trigger_args = job["trigger_args"](parsed_time)
+            if trigger_args:
                 register_job(
                     scheduler,
                     job_id=job["job_id"],
@@ -299,7 +319,7 @@ def register_all_jobs(scheduler: BaseScheduler, db_handler: DatabaseHandler, app
                     grace_time=job["misfire_grace_time"],
                 )
             else:
-                logger.warning(f"Could not parse time for job '{job['job_id']}'. Skipping.")
+                logger.warning(f"No trigger for job '{job['job_id']}'. Skipping.")
 
         # Register P1 Meter job if available
         if p1_client:
@@ -320,11 +340,11 @@ def register_all_jobs(scheduler: BaseScheduler, db_handler: DatabaseHandler, app
 
         # Register inverter job if available
         if inv_client:
-            inverter_schedule = tasks_config.get(INVERTER_JOB_ID, {})
+            inverter_schedule = tasks_config.get(INVERTER_FOR_DB_JOB_ID, {})
             minute = inverter_schedule.get('minute', '*/15')
             register_job(
                 scheduler,
-                job_id=INVERTER_JOB_ID,
+                job_id=INVERTER_FOR_DB_JOB_ID,
                 func=task_poll_inverter_for_db_logging,
                 trigger="cron",
                 trigger_args={"minute": minute},
@@ -332,8 +352,20 @@ def register_all_jobs(scheduler: BaseScheduler, db_handler: DatabaseHandler, app
                 name="Poll inverter for DB Logging",
                 grace_time=600,
             )
+            inverter_schedule = tasks_config.get(INVERTER_FOR_CONTROLLER_JOB_ID, {})
+            second = inverter_schedule.get('second', '*/15')
+            register_job(
+                scheduler,
+                job_id=INVERTER_FOR_CONTROLLER_JOB_ID,
+                func=task_poll_inverter_for_controller_update,
+                trigger="cron",
+                trigger_args={"second": second},
+                job_args=[db_handler, inv_client, app_config],
+                name="Poll inverter for controller",
+                grace_time=10,
+            )
         else:
-            logger.warning(f"Inverter client not initialized. '{INVERTER_JOB_ID}' job not scheduled.")
+            logger.warning(f"Inverter client not initialized. '{INVERTER_FOR_CONTROLLER_JOB_ID}' job not scheduled.")
 
         # Register evcc job if available
         if evcc_client:

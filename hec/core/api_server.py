@@ -1,6 +1,8 @@
 import logging
+from collections import deque
 from datetime import datetime
 from enum import Enum
+
 from flask import Flask, jsonify
 
 from hec.core import constants as c
@@ -46,6 +48,8 @@ def get_app_state_api():
                 else:
                     new_list.append(str(item))
             serializable_state[key] = new_list
+        elif isinstance(value, deque):
+            serializable_state[key] = list(value)
         elif isinstance(value, dict):
             new_dict = {}
             for k_nested, v_nested in value.items():

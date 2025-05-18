@@ -45,44 +45,6 @@ def get_interval_from_list(target_local: datetime, intervals: List[NetElectricit
     return None
 
 
-def parse_hh_mm_time_string(time_str: str) -> Optional[Tuple[int, int]]:
-    """
-    Parses a time string in "HH:MM" format and returns the hour and minute as integers.
-
-    Args:
-        time_str (str): The time string to parse (e.g., "13:05", "08:30").
-
-    Returns:
-        Optional[Tuple[int, int]]: A tuple (hour, minute) if parsing is successful,
-                                     None otherwise.
-    """
-    if not isinstance(time_str, str):
-        logger.error(f"Invalid input type for time string: expected str, got {type(time_str)}")
-        return None
-
-    parts = time_str.split(':')
-    if len(parts) != 2:
-        logger.error(f"Invalid time string format: '{time_str}'. Expected HH:MM.")
-        return None
-
-    try:
-        hour = int(parts[0])
-        minute = int(parts[1])
-
-        if not (0 <= hour <= 23):
-            logger.error(f"Invalid hour value in time string: '{time_str}'. Hour must be 0-23.")
-            return None
-
-        if not (0 <= minute <= 59):
-            logger.error(f"Invalid minute value in time string: '{time_str}'. Minute must be 0-59.")
-            return None
-
-        return hour, minute
-    except ValueError:
-        logger.error(f"Could not parse hour or minute as integer from time string: '{time_str}'.")
-        return None
-
-
 def process_price_points_to_app_state(price_points: list, target_day: datetime,
                                       app_state_key: str, app_config, db_handler: DatabaseHandler = None):
     """

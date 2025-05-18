@@ -181,43 +181,43 @@ class EvccApiClient:
 
 
 # Example Usage (for testing this module directly)
-if __name__ == '__main__':
-    logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-
-    TEST_EVCC_URL = "http://192.168.0.247:7070/api"
-
-    print(f"--- Testing EvccApiClient with base URL: {TEST_EVCC_URL} ---")
-    evcc = EvccApiClient(base_api_url=TEST_EVCC_URL)
-
-    if evcc.is_available:
-        print("\n--- Getting Current State ---")
-        state = evcc.get_current_state()
-        if state:
-            print(f"EVCC Grid Power: {state.get('gridPower')} W")
-            if state.get('loadpoints') and len(state['loadpoints']) > 0:
-                lp0 = state['loadpoints'][0]
-                print(f"Loadpoint 1 Mode: {lp0.get('mode')}")
-                print(f"Loadpoint 1 Charging: {lp0.get('charging')}")
-                print(f"Loadpoint 1 SoC: {lp0.get('vehicleSoc')} %")
-            print("Full state:", state)
-        else:
-            print("Failed to get current EVCC state.")
-
-        print("\n--- Testing Commands ---")
-        print("Setting mode to 'pv'...")
-        if evcc.set_charge_mode(c.EVCCManualState.EVCC_CMD_STATE_PV.value):
-            time.sleep(3)
-            print("Setting mode back to 'off'...")
-            evcc.set_charge_mode(c.EVCCManualState.EVCC_CMD_STATE_OFF.value)
-        else:
-            print("Failed to set mode to 'pv'.")
-
-        print("\nSetting max current to 10A...")
-        if evcc.set_max_current(10):
-            time.sleep(3)
-            print("Setting max current back to 30A...")
-            evcc.set_max_current(30)
-        else:
-            print("Failed to set max current to 10A.")
-    else:
-        print(f"EVCC API client could not connect or EVCC is not available at {TEST_EVCC_URL}.")
+# if __name__ == '__main__':
+#     logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+#
+#     TEST_EVCC_URL = "http://192.168.0.247:7070/api"
+#
+#     print(f"--- Testing EvccApiClient with base URL: {TEST_EVCC_URL} ---")
+#     evcc = EvccApiClient(base_api_url=TEST_EVCC_URL)
+#
+#     if evcc.is_available:
+#         print("\n--- Getting Current State ---")
+#         state = evcc.get_current_state()
+#         if state:
+#             print(f"EVCC Grid Power: {state.get('gridPower')} W")
+#             if state.get('loadpoints') and len(state['loadpoints']) > 0:
+#                 lp0 = state['loadpoints'][0]
+#                 print(f"Loadpoint 1 Mode: {lp0.get('mode')}")
+#                 print(f"Loadpoint 1 Charging: {lp0.get('charging')}")
+#                 print(f"Loadpoint 1 SoC: {lp0.get('vehicleSoc')} %")
+#             print("Full state:", state)
+#         else:
+#             print("Failed to get current EVCC state.")
+#         exit(0)
+#         print("\n--- Testing Commands ---")
+#         print("Setting mode to 'pv'...")
+#         if evcc.set_charge_mode(c.EVCCManualState.EVCC_CMD_STATE_PV.value):
+#             time.sleep(3)
+#             print("Setting mode back to 'off'...")
+#             evcc.set_charge_mode(c.EVCCManualState.EVCC_CMD_STATE_OFF.value)
+#         else:
+#             print("Failed to set mode to 'pv'.")
+#
+#         print("\nSetting max current to 10A...")
+#         if evcc.set_max_current(10):
+#             time.sleep(3)
+#             print("Setting max current back to 30A...")
+#             evcc.set_max_current(30)
+#         else:
+#             print("Failed to set max current to 10A.")
+#     else:
+#         print(f"EVCC API client could not connect or EVCC is not available at {TEST_EVCC_URL}.")

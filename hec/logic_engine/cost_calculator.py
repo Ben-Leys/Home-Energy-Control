@@ -317,26 +317,26 @@ def calculate_total_costs_for_period(start_date: date, end_date: date, app_confi
 
 
 # For testing only
-if __name__ == "__main__":
-    from hec.core.tariff_manager import initialize_tariff_manager
-    from hec.core.app_initializer import load_app_config, initialize_database_handler
-
-    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-    debug_logger = logging.getLogger('Calc Debug')
-
-    prepare_time = datetime.now()
-    app_config = load_app_config()
-    db = initialize_database_handler(app_config)
-    tm = initialize_tariff_manager(app_config)
-
-    print(calculate_total_costs_for_period(date(2025, 1, 15), date(2025, 5, 15), app_config, db, tm))
-    exit(0)
-    start_time = datetime.now()
-    net_prices = []
-    t_date = datetime.now()
-    for i in range(365):
-        net_prices += calculate_net_intervals_for_day(db, tm, t_date - timedelta(days=365 - i))
-    end_time = datetime.now()
-    for nepi in net_prices:
-        print(nepi)
-    print(f"Calc time: {end_time - start_time}")
+# if __name__ == "__main__":
+#     from hec.core.tariff_manager import initialize_tariff_manager
+#     from hec.core.app_initializer import load_app_config, initialize_database_handler
+#
+#     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+#     debug_logger = logging.getLogger('Calc Debug')
+#
+#     prepare_time = datetime.now()
+#     app_config = load_app_config()
+#     db = initialize_database_handler(app_config)
+#     tm = initialize_tariff_manager(app_config)
+#
+#     print(calculate_total_costs_for_period(date(2025, 1, 15), date(2025, 5, 15), app_config, db, tm))
+#     exit(0)
+#     start_time = datetime.now()
+#     net_prices = []
+#     t_date = datetime.now()
+#     for i in range(365):
+#         net_prices += calculate_net_intervals_for_day(db, tm, t_date - timedelta(days=365 - i))
+#     end_time = datetime.now()
+#     for nepi in net_prices:
+#         print(nepi)
+#     print(f"Calc time: {end_time - start_time}")
