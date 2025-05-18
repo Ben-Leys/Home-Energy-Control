@@ -7,7 +7,7 @@ from hec.core import constants as c
 from hec.core.app_state import GLOBAL_APP_STATE
 from hec.data_sources.api_entsoe import fetch_entsoe_prices
 from hec.database_ops.db_handler import DatabaseHandler
-from hec.logic_engine.utils import process_price_points_to_app_state
+from hec.utils.utils import process_price_points_to_app_state
 
 logger = logging.getLogger(__name__)
 
@@ -152,15 +152,15 @@ def _calculate_average_power_from_samples(
     if actual_duration_seconds <= 0:  # Avoid division by zero
         return None
 
-    # Average power = (Change in Energy * conversion_factor) / (Change in Time in Hours)
-    # Example: If delta_energy is in kWh, and we want Watts:
+    # Average power = (change in energy * conversion_factor) / (change in time)
+    # Example: if delta_energy is in kWh, and we want Watts:
     # (delta_energy_kwh * 1000 Wh/kWh) / (actual_duration_seconds / 3600 s/h)
     # = delta_energy_kwh * 1000 * 3600 / actual_duration_seconds
-    # Here, unit_conversion_factor is for energy (e.g. 1000 if input is kWh, and we want Wh for power calc)
-    # Power (e.g. Watts) = (delta_energy_in_Wh) / (duration_in_hours)
+    # Unit_conversion_factor is for energy (1000 if input is kWh, and we want Wh for power calc)
+    # Power (Watts) = (delta_energy_in_Wh) / (duration_in_hours)
     power = (delta_energy * unit_conversion_factor) / (actual_duration_seconds / 3600)
 
-    # Sanity check (e.g. if meter resets, delta_energy could be negative)
+    # Sanity check (if meter resets, delta_energy could be negative)
     if delta_energy < 0:
         logger.warning(f"Negative energy delta ({delta_energy}) detected for window {window_seconds}s. "
                        f"Start: {val_start} @ {ts_start}, End: {val_end} @ {ts_end}. This could be a meter error.")
@@ -181,7 +181,6 @@ def update_rolling_averages():
     p1_data = GLOBAL_APP_STATE.get("p1_meter_data")
     if p1_data and isinstance(p1_data, dict):
         try:
-            # Ensure p1_data timestamp is also UTC and aware for comparison
             p1_timestamp_str = p1_data.get("timestamp_utc_iso")
             p1_timestamp_utc = datetime.fromisoformat(p1_timestamp_str) if p1_timestamp_str else now_utc
 
@@ -241,7 +240,7 @@ def update_rolling_averages():
                 )
             # Will daily_yield_wh give exact enough results for short average times (15-30 seconds)?
             # If not: switch to modified logic below where averages are calculated with current
-            # pv_power. This however could possibly give readings that are off for longer rimes
+            # pv_power. This however could possibly give readings that are off for longer times
             # because it's not really an average production but an average of momentary production readings
 
             # --- MODIFIED SOLAR LOGIC: Using inverter_data["pv_power_watts"] ---
