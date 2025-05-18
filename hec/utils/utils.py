@@ -127,7 +127,7 @@ def send_email_with_attachments(
     Sends an email with HTML body and optional image attachments.
 
     Args:
-        smtp_config (dict): SMTP server details {'host', 'port', 'user'}
+        smtp_config (dict): SMTP server details {'host', 'port', 'user', 'password', 'use_ssl'}
         sender_email (str): The sender's email address.
         recipients (List[str]): List of recipient email addresses.
         subject (str): Email subject.
