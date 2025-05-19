@@ -1,11 +1,11 @@
 # hec/logic_engine/utils.py
 import logging
+import os
 import smtplib
 from datetime import datetime, timedelta, date
 from email.mime.image import MIMEImage
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
-
 from typing import Optional, List, Tuple
 
 from astral import LocationInfo
@@ -127,7 +127,7 @@ def send_email_with_attachments(
     Sends an email with HTML body and optional image attachments.
 
     Args:
-        smtp_config (dict): SMTP server details {'host', 'port', 'user', 'password', 'use_ssl'}
+        smtp_config (dict): SMTP server details {'host', 'port', 'user'}
         sender_email (str): The sender's email address.
         recipients (List[str]): List of recipient email addresses.
         subject (str): Email subject.
