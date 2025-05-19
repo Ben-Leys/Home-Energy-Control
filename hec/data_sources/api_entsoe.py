@@ -1,8 +1,8 @@
 # data_sources/api_entsoe.py
 import logging
 import os
-from datetime import datetime, timedelta, timezone
-from typing import List, Optional
+from datetime import datetime, timedelta, timezone, time
+from typing import List, Optional, Dict
 from xml.etree import ElementTree as ElTree
 
 import requests
@@ -12,10 +12,10 @@ from hec.models.models import PricePoint
 logger = logging.getLogger(__name__)
 
 
-def fetch_entsoe_prices(target_day_local: datetime, app_config: dict) -> Optional[List[PricePoint]]:
+def fetch_entsoe_prices(t_day_local: datetime, app_config: dict) -> Optional[List[PricePoint]]:
     """
     Fetches day-ahead electricity prices from ENTSO-E for a given target day.
-    The target_day_local is expected to be a datetime object representing the start of the day in the local timezone.
+    The t_day_local is expected to be a datetime object representing the start of the day in the local timezone.
     Prices are for the day after the auction closes (usually auction for D+1 happens on D).
     If entsoe_api_key is not provided, it attempts to load it from the environment.
 
@@ -26,18 +26,13 @@ def fetch_entsoe_prices(target_day_local: datetime, app_config: dict) -> Optiona
     entsoe_config = app_config['entsoe']
     auction_opening_hour = entsoe_config.get('auction_opening_hour')
 
+    # Target day checks
     now_local = datetime.now().astimezone()
     tomorrow_local = now_local + timedelta(days=1)
-    local_tz = datetime.now().astimezone().tzinfo
-
-    period_start_local = target_day_local.replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=local_tz)
-    period_end_local = (target_day_local + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0,
-                                                                      tzinfo=local_tz)
-    # Target day checks
-    if (target_day_local.day > tomorrow_local.day or
-            (target_day_local.day == tomorrow_local.day and now_local.hour < auction_opening_hour)):
+    if (t_day_local.date() > tomorrow_local.date() or
+            (t_day_local.date() == tomorrow_local.date() and now_local.hour < auction_opening_hour)):
         logger.info(
-            f"Attempting to fetch prices for ({period_start_local.strftime('%Y-%m-%d')}) before auction opening time "
+            f"Attempting to fetch prices for ({t_day_local.strftime('%Y-%m-%d')}) before auction opening time "
             f"({auction_opening_hour}:00 local). Data will not be available. Returning empty list.")
         return []
 
@@ -47,10 +42,15 @@ def fetch_entsoe_prices(target_day_local: datetime, app_config: dict) -> Optiona
         return None
 
     # ENTSO-E API expects periodStart and periodEnd in UTC
-    # If target_day_local is for tomorrow, the period starts at 00:00 tomorrow local time
-    # and ends at 00:00 the day after tomorrow local time. This needs to be converted to UTC.
+    # If t_day_local is for tomorrow, the period starts at 00:00 tomorrow local time
+    # and ends at 00:00 the day after tomorrow local time. These can be two different time zones (DST)
+    # and need to be converted to UTC. To correctly handle we need the local timezone.
 
-    # To correctly handle DST transitions for the period, we need the local timezone.
+    period_start_tz = datetime.combine(t_day_local, time.min).astimezone().tzinfo
+    period_end_tz = datetime.combine(t_day_local, time.max).astimezone().tzinfo
+
+    period_start_local = datetime.combine(t_day_local, time.min, tzinfo=period_start_tz)
+    period_end_local = datetime.combine(t_day_local + timedelta(days=1), time.min, tzinfo=period_end_tz)
 
     period_start_utc_str = period_start_local.astimezone(timezone.utc).strftime('%Y%m%d%H%M')
     period_end_utc_str = period_end_local.astimezone(timezone.utc).strftime('%Y%m%d%H%M')
@@ -138,55 +138,87 @@ def _parse_entsoe_price_xml(xml_content: bytes) -> Optional[List[PricePoint]]:
         # It should match the period_start_utc requested, but better to use what the API confirms.
         period_time_interval_start_str = period_element.findtext('.//ns:timeInterval/ns:start',
                                                                  namespaces=ns_map if namespace else None)
-        if not period_time_interval_start_str:
-            logger.error("Could not find Period.timeInterval.start in ENTSO-E response.")
+        period_time_interval_end_str = period_element.findtext('.//ns:timeInterval/ns:end',
+                                                               namespaces=ns_map if namespace else None)
+        if not period_time_interval_start_str or not period_time_interval_end_str:
+            logger.error("Could not find Period.timeInterval.start or Period.timeInterval.end in ENTSO-E response. "
+                         "Skipping period.")
             return None
 
         # ENTSO-E timestamps are UTC time
         try:
             current_interval_start_utc = datetime.strptime(period_time_interval_start_str, '%Y-%m-%dT%H:%MZ').replace(
                 tzinfo=timezone.utc)
+            period_interval_end_utc = datetime.strptime(period_time_interval_end_str, '%Y-%m-%dT%H:%MZ').replace(
+                tzinfo=timezone.utc)
         except ValueError:
-            logger.error(f"Could not parse period start time: {period_time_interval_start_str}")
+            logger.error(f"Could not parse period start/end time: start='{period_time_interval_start_str}', "
+                         f"end='{period_time_interval_end_str}'. Skipping period.")
             return None
 
-        logger.debug(f"Parsing Period starting at {current_interval_start_utc.isoformat()} "
-                     f"with resolution {resolution_minutes} min")
+        # ENTSO_E doesn't give a price point if the price did not change. We want to copy the previous for consistency.
+        duration_seconds = (period_interval_end_utc - current_interval_start_utc).total_seconds()
+        if duration_seconds < 0:
+            logger.error(f"Period end time {period_interval_end_utc} before start time {current_interval_start_utc}.")
+            continue
+        expected_total_positions = int(duration_seconds / (resolution_minutes * 60))
+        logger.debug(
+            f"Parsing Period from {current_interval_start_utc.isoformat()} to {period_interval_end_utc.isoformat()} "
+            f"with resolution {resolution_minutes} min. Expecting {expected_total_positions} points.")
 
         point_elements = period_element.findall('.//ns:Point', ns_map) if namespace else period_element.findall(
             './/Point')
 
         # Sort points by position in case they are out of order
-        sorted_points_data = []
+        parsed_points_data: Dict[int, float] = {}
         for point_el in point_elements:
             pos_text = point_el.findtext('ns:position', namespaces=ns_map if namespace else None)
             price_text = point_el.findtext('ns:price.amount', namespaces=ns_map if namespace else None)
             if pos_text is not None and price_text is not None:
                 try:
-                    sorted_points_data.append({
-                        "position": int(pos_text),
-                        "price": float(price_text)
-                    })
+                    position = int(pos_text)
+                    price = float(price_text)
+                    parsed_points_data[position] = price
                 except ValueError:
                     logger.warning(f"Could not parse position/price for point: pos='{pos_text}', price='{price_text}'")
 
-        sorted_points_data.sort(key=lambda dp: dp["position"])
+        current_period_price_points: List[PricePoint] = []
+        last_known_price: Optional[float] = None
 
-        for point_data in sorted_points_data:
-            position = point_data["position"]
-            price = point_data["price"]
+        for current_pos in range(1, expected_total_positions + 1):
+            point_timestamp_utc = current_interval_start_utc + timedelta(minutes=(current_pos - 1) * resolution_minutes)
+            price_to_use: Optional[float] = None
 
-            # Position is 1-based. Calculate timestamp for this point.
-            # (position - 1) because first interval starts at current_interval_start_utc
-            point_timestamp_utc = current_interval_start_utc + timedelta(minutes=(position - 1) * resolution_minutes)
+            if current_pos in parsed_points_data:
+                price_to_use = parsed_points_data[current_pos]
+                last_known_price = price_to_use
+                logger.debug(f"Using pos {current_pos} price {price_to_use:.2f} @ {point_timestamp_utc.isoformat()}")
+            elif last_known_price is not None:  # Gap, but we have a previous price
+                price_to_use = last_known_price
+                logger.debug(f"FILLING GAP: Pos {current_pos}, Price {price_to_use:.2f} "
+                             f"(carried from pos {current_pos - 1}) @ {point_timestamp_utc.isoformat()}")
+            else:
+                # Could first price of the D be equal to last price of D-1? Will it be empty?
+                logger.error(
+                    f"Cannot fill gap at position {current_pos} for period {current_interval_start_utc.isoformat()}: "
+                    f"No preceding price found. Aborting parse for this TimeSeries.")
+                current_period_price_points.clear()
+                break
 
-            all_price_points.append(PricePoint(
-                timestamp_utc=point_timestamp_utc,
-                price_eur_per_mwh=price,
-                position=position,
-                resolution_minutes=resolution_minutes
-            ))
-            logger.debug(f"Parsed: Pos {position}, Price {price:.2f} @ {point_timestamp_utc.isoformat()}")
+            if price_to_use is not None:
+                current_period_price_points.append(PricePoint(
+                    timestamp_utc=point_timestamp_utc,
+                    price_eur_per_mwh=price_to_use,
+                    position=current_pos,
+                    resolution_minutes=resolution_minutes
+                ))
+
+        if len(current_period_price_points) == expected_total_positions:
+            all_price_points.extend(current_period_price_points)
+        elif current_period_price_points:
+            logger.warning(
+                f"Failed to construct a complete set of points for period {current_interval_start_utc.isoformat()}. "
+                f"Expected {expected_total_positions}, got {len(current_period_price_points)}. Discarding.")
 
     if not all_price_points:
         logger.warning("No valid price points extracted from ENTSO-E response.")
@@ -209,28 +241,27 @@ def _parse_resolution_to_minutes(resolution_str: str) -> int:
 
 
 # --- Example for testing ---
-if __name__ == '__main__':
-    # from hec.core.config_loader import load_app_config
-    # APP_CONFIG = load_app_config()
-    # Test for today's prices
-    # test_target_day = (datetime.now()).replace(hour=0, minute=0, second=0, microsecond=0)
-    # Test for tomorrow
-    test_target_day = (datetime.now()).replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
-    # test_target_day = datetime(2023, 10, 29).replace(hour=0, minute=0, second=0, microsecond=0) # Fall DST
-    # test_target_day = datetime(2024, 3, 31).replace(hour=0, minute=0, second=0, microsecond=0) # Spring DST
-
-    print(f"Attempting to fetch prices for local day: {test_target_day.strftime('%Y-%m-%d')}")
-
-    # Configure basic logging for standalone test
-    logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-
-    prices = fetch_entsoe_prices(test_target_day, {"entsoe": {"auction_opening_hour": 13}})
-
-    if prices is None:
-        print("API call failed critically or bad API key.")
-    elif not prices:  # Empty list
-        print("No prices available yet for the target day, or no data found.")
-    else:
-        print(f"\nRetrieved {len(prices)} price points:")
-        for p in prices:
-            print(p)
+# if __name__ == '__main__':
+#     from hec.core.app_initializer import load_app_config
+#     logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+#     logger_main = logging.getLogger(__name__)
+#     APP_CONFIG = load_app_config()
+#     test_day = (datetime.now()).replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
+#     test_day_winter = datetime(2025, 1, 1).replace(hour=0, minute=0, second=0, microsecond=0)
+#     fall_dst_day = datetime(2024, 10, 27).replace(hour=0, minute=0, second=0, microsecond=0)
+#     spring_dst_day = datetime(2025, 3, 30).replace(hour=0, minute=0, second=0, microsecond=0)
+#     test_target_day = test_day
+#     print(f"Attempting to fetch prices for local day: {test_target_day.strftime('%Y-%m-%d')}")
+#
+#     # Configure basic logging for standalone test
+#
+#     prices = fetch_entsoe_prices(test_target_day, APP_CONFIG)
+#
+#     if prices is None:
+#         print("API call failed critically or bad API key.")
+#     elif not prices:  # Empty list
+#         print("No prices available yet for the target day, or no data found.")
+#     else:
+#         print(f"\nRetrieved {len(prices)} price points:")
+#         for p in prices:
+#             print(p)
