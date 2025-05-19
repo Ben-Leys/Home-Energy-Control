@@ -1,11 +1,11 @@
 # hec/logic_engine/utils.py
 import logging
-import os
 import smtplib
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 from email.mime.image import MIMEImage
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
+
 from typing import Optional, List, Tuple
 
 from astral import LocationInfo
@@ -178,6 +178,40 @@ def send_email_with_attachments(
     except Exception as e:
         logger.error(f"Failed to send email '{subject}': {e}", exc_info=True)
         return False
+
+
+def is_a_holiday(t_date):
+    if isinstance(t_date, datetime):
+        t_date = t_date.date()
+
+    holidays = {
+        date(t_date.year, 1, 1),  # New Year's Day
+        date(t_date.year, 5, 1),  # Labor Day
+        date(t_date.year, 7, 21),  # National Day
+        date(t_date.year, 8, 15),  # Assumption Day
+        date(t_date.year, 11, 1),  # All Saints' Day
+        date(t_date.year, 11, 11),  # Armistice Day
+        date(t_date.year, 12, 25),  # Christmas Day
+    }
+
+    holidays.add(calculate_easter(t_date.year) + timedelta(days=1))  # Easter Monday
+    holidays.add(calculate_easter(t_date.year) + timedelta(days=39))  # Ascension Day
+    holidays.add(calculate_easter(t_date.year) + timedelta(days=50))  # Pentecost Monday
+
+    return t_date in holidays
+
+
+def calculate_easter(year):
+    """Computes the date of Easter Sunday for the given year."""
+    a = year % 19
+    b = year // 100
+    c = year % 100
+    d = (19 * a + b - b // 4 - ((b - (b + 8) // 25 + 1) // 3) + 15) % 30
+    e = (32 + 2 * (b % 4) + 2 * (c // 4) - d - (c % 4)) % 7
+    f = d + e - 7 * ((a + 11 * d + 22 * e) // 451) + 114
+    month = f // 31
+    day = f % 31 + 1
+    return date(year, month, day)
 
 
 # if __name__ == '__main__':
