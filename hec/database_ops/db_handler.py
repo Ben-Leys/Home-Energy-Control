@@ -785,7 +785,12 @@ class DatabaseHandler:
 #     db_handler.initialize_database()
 #     today_local = datetime.combine(datetime.now(), time.min)
 #     tomorrow_local = today_local + timedelta(days=1)
+#     fall_dst = datetime(2024, 10, 27, 0, 0, 0)
 #
+#     # Retrieve solar forecast
+#     solar_forecast = db_handler.get_elia_forecasts("solar", fall_dst, fall_dst + timedelta(days=1))
+#     print(solar_forecast)
+#     exit(0)
 #     # Inverter data
 #     print(db_handler.get_inverter__data(start_date_local=today_local,
 #                                         end_date_local=datetime.combine(today_local, time.max)))
@@ -804,7 +809,3 @@ class DatabaseHandler:
 #     # Retrieve electricity prices
 #     prices_today_from_db = db_handler.get_da_prices(today_local)
 #     print(prices_today_from_db)
-#
-#     # Retrieve solar forecast
-#     solar_forecast = db_handler.get_elia_forecasts("solar", today_local, tomorrow_local + timedelta(days=6))
-#     print(solar_forecast)

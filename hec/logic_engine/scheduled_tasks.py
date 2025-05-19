@@ -1,6 +1,6 @@
 # hec/logic_engine/scheduled_tasks.py
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, time, date
 from typing import Optional, List, Dict, Any
 
 from apscheduler.schedulers.base import BaseScheduler
@@ -15,16 +15,19 @@ from hec.controllers.modbus_sma_inverter import InverterSmaModbusClient
 from hec.database_ops.db_handler import DatabaseHandler
 from hec.logic_engine.data_processors import populate_appstate_with_price_data, populate_appstate_with_forecast_data, \
     update_rolling_averages
+from hec.reporting.daily_summary import DailySummaryGenerator
 from hec.utils.utils import process_price_points_to_app_state, is_daylight
 
 logger = logging.getLogger(__name__)
 
 # --- Scheduled Tasks ---
 FETCH_PRICES_JOB_ID = "fetch_day_ahead_prices"
+FETCH_PRICES_HISTORICAL_JOB_ID = "fetch_day_ahead_historical_prices"
 fetch_prices_attempt_count = 0
 MIDNIGHT_ROLLOVER_JOB_ID = "midnight_rollover"
 P1_METER_JOB_ID = "p1_meter_update"
 FETCH_ELIA_FORECAST_JOB_ID = "fetch_elia_forecast"
+FETCH_ELIA_HISTORICAL_DATA_JOB_ID = "fetch_elia_historical_data"
 INVERTER_FOR_DB_JOB_ID = "inverter_update_for_db"
 INVERTER_FOR_CONTROLLER_JOB_ID = "inverter_update_for_controller"
 POLL_EVCC_JOB_ID = "evcc_update"
@@ -83,6 +86,7 @@ def task_midnight_rollover(db_handler: DatabaseHandler, app_config: dict):
         populate_appstate_with_price_data(db_handler, app_config, True)
 
     populate_appstate_with_forecast_data(db_handler)
+    # todo: load current forecast data into app_state, test for dst dates
 
 
 def task_poll_p1_meter(db_handler: DatabaseHandler, p1_client: Optional[P1MeterHomewizardClient], boundary: int = 5):
@@ -254,10 +258,74 @@ def task_fetch_elia_forecasts(db_handler: DatabaseHandler, app_config: dict):
         logger.warning(f"No Elia forecast data fetched for {days_to_fetch} days. Check API.")
 
 
+def task_send_daily_energy_summary_email(app_config, db_handler, tariff_manager):
+    """
+    Scheduled task to generate and send the daily energy summary email.
+    """
+
+    summary_generator = DailySummaryGenerator(app_config, db_handler, tariff_manager)
+    logger.info("Running task: Send Daily Energy Summary Email.")
+
+    t_date_prices = GLOBAL_APP_STATE.get("electricity_prices_tomorrow")
+    if not t_date_prices:
+        logger.warning("Prices for 'tomorrow' (D+1) not yet in AppState. Daily summary email rescheduled.")
+        # Implement rescheduling logic here if desired, similar to price fetch task
+        # For now, we assume the email task runs *after* prices are expected to be populated.
+        # If this task runs and they are missing, it implies the price fetch failed or is delayed.
+        # The email task could retry a few times.
+        # todo return  # Skip this run. For now copy data
+        GLOBAL_APP_STATE.set("electricity_prices_tomorrow", GLOBAL_APP_STATE.get("electricity_prices_today"))
+
+    try:
+        success = summary_generator.generate_and_send_summary()
+        if success:
+            logger.info("Daily energy summary email generated and sent successfully.")
+        else:
+            logger.error("Failed to generate or send daily energy summary email.")
+    except Exception as e:
+        logger.error(f"Error in task_send_daily_energy_summary_email: {e}", exc_info=True)
+
+
+def fetch_historic_da_data(db_handler: DatabaseHandler, app_config: dict, hist_start_date):
+    """Fetch historic data from ENTSO-E for predictions"""
+    days = (datetime.now().date() - hist_start_date.date()).days
+    total_lines_added = 0
+    for day_offset in range(days):
+        day = hist_start_date + timedelta(days=day_offset)
+        price_points = fetch_entsoe_prices(day, app_config)
+
+        if price_points:
+            lines_added = db_handler.store_da_prices(price_points)
+            total_lines_added += lines_added
+        else:
+            logger.info(f"No historic data available for {day} day-ahead prices.")
+
+    logger.info(f"Fetched and stored {total_lines_added} day-ahead price points.")
+
+
+def fetch_historic_elia_data(db_handler: DatabaseHandler, app_config: dict, hist_start_date):
+    """Fetch historic data from Elia for predictions"""
+    days = (datetime.now().date() - hist_start_date.date()).days
+    total_lines_added = 0
+    for day_offset in range(days):
+        test_target_day = hist_start_date + timedelta(days=day_offset)
+
+        for f_type in ["solar", "wind", "grid_load"]:
+            result = fetch_and_process_forecast(test_target_day, app_config, f_type)
+            if result:
+                lines_added = db_handler.store_elia_forecasts(result)
+                total_lines_added += lines_added
+            else:
+                logger.info(f"No historic data available for Elia forecasts for {test_target_day}.")
+
+    logger.info(f"Fetched and stored {total_lines_added} Elia forecast records.")
+
+
 def register_all_jobs(scheduler: BaseScheduler, db_handler: DatabaseHandler, app_config: dict,
                       p1_client: Optional[P1MeterHomewizardClient],
                       inv_client: Optional[InverterSmaModbusClient],
-                      evcc_client: Optional[EvccApiClient]):
+                      evcc_client: Optional[EvccApiClient],
+                      fetch_entsoe=False, fetch_elia=False):
     """Registers all defined scheduled jobs with the provided scheduler instance."""
 
     logger.info("Registering scheduled jobs...")
@@ -305,7 +373,7 @@ def register_all_jobs(scheduler: BaseScheduler, db_handler: DatabaseHandler, app
         tasks_config = app_config.get("tasks_schedule", {})
         for job in job_definitions:
             task_config = tasks_config.get(job["job_id"], {})
-            trigger_args = task_config.get('trigger')
+            trigger_args = task_config.get('trigger_args', job.get('trigger_args', ""))
 
             if trigger_args:
                 register_job(
@@ -383,6 +451,34 @@ def register_all_jobs(scheduler: BaseScheduler, db_handler: DatabaseHandler, app
             )
         else:
             logger.warning(f"P1 Meter client not initialized. '{POLL_EVCC_JOB_ID}' job not scheduled.")
+
+        if fetch_entsoe:
+            hist_start_date = datetime.combine(date.fromisoformat(app_config.get('historic_data').get('start_date')),
+                                               time.min)
+            register_job(
+                scheduler,
+                job_id=FETCH_PRICES_HISTORICAL_JOB_ID,
+                func=fetch_historic_da_data,
+                trigger="date",
+                trigger_args={"run_date": datetime.now() + timedelta(seconds=20)},
+                job_args=[db_handler, app_config, hist_start_date],
+                name="Fetch historical entsoe data",
+                grace_time=10,
+            )
+
+        if fetch_elia:
+            hist_start_date = datetime.combine(date.fromisoformat(app_config.get('historic_data').get('start_date')),
+                                               time.min)
+            register_job(
+                scheduler,
+                job_id=FETCH_ELIA_HISTORICAL_DATA_JOB_ID,
+                func=fetch_historic_elia_data,
+                trigger="date",
+                trigger_args={"run_date": datetime.now() + timedelta(seconds=140)},
+                job_args=[db_handler, app_config, hist_start_date],
+                name="Fetch historical elia data",
+                grace_time=10,
+            )
 
     except Exception as e:
         logger.critical(f"Failed to register scheduled jobs: {e}", exc_info=True)

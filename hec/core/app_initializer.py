@@ -1,5 +1,6 @@
 # hec/core/app_initializer.py
 import logging
+from datetime import datetime, timedelta, time, date
 from pathlib import Path
 from typing import Optional, Dict
 
@@ -15,7 +16,7 @@ from hec.core import constants as c
 from hec.data_sources import api_p1_meter_homewizard
 from hec.database_ops.db_handler import DatabaseHandler
 from hec.logic_engine.data_processors import populate_appstate_with_price_data, populate_appstate_with_forecast_data
-from hec.logic_engine.scheduled_tasks import task_poll_evcc_state
+from hec.logic_engine.scheduled_tasks import task_poll_evcc_state, register_job
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +38,34 @@ def populate_app_state(db_handler: DatabaseHandler, app_config: dict, evcc_clien
 
     except Exception as e:
         logger.error(f"Error during AppState population: {e}", exc_info=True)
+
+
+def check_historic_data(db_handler: DatabaseHandler, app_config: dict):
+    """
+    Check if historic data is available in the database for the price predictor.
+    If not, this is probably the first run of the system.
+    """
+    hist_start_date = datetime.combine(date.fromisoformat(app_config.get('historic_data').get('start_date')), time.min)
+    days = (datetime.now().date() - hist_start_date.date()).days
+    fetch_entsoe, fetch_elia = False, False
+
+    # Check for day-ahead prices
+    da_hist_start = db_handler.get_da_prices(hist_start_date)
+    if not da_hist_start:
+        logger.info(f"No historic data available for day-ahead prices. Fetching {days} days with task...")
+        fetch_entsoe = True
+    else:
+        logger.info(f"Historic day-ahead price data available for {days} days.")
+
+    # Check for Elia forecasts
+    forecast_hist_start = db_handler.get_elia_forecasts("solar", hist_start_date, hist_start_date)
+    if not forecast_hist_start:
+        logger.info(f"No historic data available for Elia forecasts. Fetching {days} days with task...")
+        fetch_elia = True
+    else:
+        logger.info(f"Historic forecast data available for {days} days.")
+
+    return fetch_entsoe, fetch_elia
 
 
 def initialize_database_handler(app_config: dict) -> Optional[DatabaseHandler]:

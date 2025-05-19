@@ -56,7 +56,7 @@ def populate_appstate_with_price_data(db_handler: DatabaseHandler, app_config: d
 
 
 def populate_appstate_with_forecast_data(db_handler: DatabaseHandler):
-    """Loads forecast data for target_day_local."""
+    """Loads forecast data from DB into appstate for now + 4 or 5 days depending on type."""
 
     local_now = datetime.combine(datetime.now().astimezone(), time.min)
 
