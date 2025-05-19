@@ -250,7 +250,7 @@ def _parse_resolution_to_minutes(resolution_str: str) -> int:
 #     test_day_winter = datetime(2025, 1, 1).replace(hour=0, minute=0, second=0, microsecond=0)
 #     fall_dst_day = datetime(2024, 10, 27).replace(hour=0, minute=0, second=0, microsecond=0)
 #     spring_dst_day = datetime(2025, 3, 30).replace(hour=0, minute=0, second=0, microsecond=0)
-#     test_target_day = test_day
+#     test_target_day = fall_dst_day
 #     print(f"Attempting to fetch prices for local day: {test_target_day.strftime('%Y-%m-%d')}")
 #
 #     # Configure basic logging for standalone test

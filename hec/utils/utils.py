@@ -69,7 +69,6 @@ def process_price_points_to_app_state(price_points: list, target_day: datetime,
         logger.error(f"Critical API fetch error for {target_day.date()}.")
         GLOBAL_APP_STATE.set(app_state_key, [])
         return False
-
     elif not price_points:
         logger.debug(f"No price points available for {target_day.date()} (API data not yet published).")
         GLOBAL_APP_STATE.set(app_state_key, [])

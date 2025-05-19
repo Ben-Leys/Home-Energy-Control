@@ -59,12 +59,17 @@ def _fetch_raw_data(base_url: str, dataset_id: str, date_str: str, url_params: s
 # --- Specific Forecast Fetchers ---
 def fetch_and_process_forecast(target_day_local: datetime, app_config: dict, forecast_type: str) -> Optional[List[Dict[str, Any]]]:
     """Fetches forecast data for a specific type (solar, wind, grid_load)."""
-    config = _load_config(app_config)
+    config = app_config.get('elia', {})
 
+    today = datetime.now(target_day_local.tzinfo).date()
+    target_date = target_day_local.date()
+    is_past = target_date < today
+
+    # Use historical dataset if target day is in the past
     dataset_map = {
-        "solar": config['dataset_solar'],
-        "wind": config['dataset_wind'],
-        "grid_load": config['dataset_grid_load'],
+        "solar": config['dataset_solar_hist'] if is_past else config['dataset_solar'],
+        "wind": config['dataset_wind_hist'] if is_past else config['dataset_wind'],
+        "grid_load": config['dataset_grid_load_hist'] if is_past else config['dataset_grid_load'],
     }
 
     dataset_id = dataset_map.get(forecast_type)
@@ -110,18 +115,6 @@ def fetch_and_process_forecast(target_day_local: datetime, app_config: dict, for
         except Exception as e:
             logger.warning(f"Elia {forecast_type.capitalize()}: Error processing record {item}: {e}")
     return processed_records
-
-
-def _load_config(app_config: dict) -> dict:
-    """Loads and returns the Elia API configuration."""
-    elia_config = app_config.get('elia', {})
-    return {
-        "api_base_url": elia_config.get('api_base_url', ''),
-        "timezone": elia_config.get('timezone', ''),
-        "dataset_solar": elia_config.get('dataset_solar', ''),
-        "dataset_wind": elia_config.get('dataset_wind', ''),
-        "dataset_grid_load": elia_config.get('dataset_grid_load', ''),
-    }
 
 
 # --- For testing this module directly ---
