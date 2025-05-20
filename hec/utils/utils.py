@@ -12,9 +12,9 @@ from astral import LocationInfo
 from astral.sun import sun
 
 from hec.core.app_state import GLOBAL_APP_STATE
+from hec.core.models import NetElectricityPriceInterval
 from hec.database_ops.db_handler import DatabaseHandler
 from hec.logic_engine.cost_calculator import calculate_net_intervals_for_day
-from hec.models.models import NetElectricityPriceInterval
 
 logger = logging.getLogger(__name__)
 
@@ -53,7 +53,7 @@ def get_interval_from_list(target_local: datetime, intervals: List[NetElectricit
 def process_price_points_to_app_state(price_points: list, target_day: datetime,
                                       app_state_key: str, app_config, db_handler: DatabaseHandler = None):
     """
-    Processes price points by storing them in the database in raw format and updating the AppState with net prices.
+    Processes price points by storing them in the database in raw format and updating the AppState with NEPI's.
 
     Args:
         price_points (list): List of price points retrieved from the API.

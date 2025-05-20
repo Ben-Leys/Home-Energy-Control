@@ -7,7 +7,7 @@ from xml.etree import ElementTree as ElTree
 
 import requests
 
-from hec.models.models import PricePoint
+from hec.core.models import PricePoint
 
 logger = logging.getLogger(__name__)
 

@@ -28,3 +28,4 @@ data/
 /packages.html
 /classes.html
 /sql_dump/
+/hec/logfile.log*

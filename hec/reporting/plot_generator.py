@@ -8,12 +8,10 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
+from hec.core.models import NetElectricityPriceInterval, PricePoint
 from hec.database_ops.db_handler import DatabaseHandler
 from hec.logic_engine.cost_calculator import calculate_net_intervals_for_day
-from hec.models.models import NetElectricityPriceInterval, PricePoint
 
-# from hec.core.tariff_manager import TARIFF_MANAGER (if needed for fixed price lines)
-# from hec.pricing.cost_calculator import calculate_net_interval_prices (if needed for fixed price lines)
 
 logger = logging.getLogger(__name__)
 
