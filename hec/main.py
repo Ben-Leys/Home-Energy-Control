@@ -11,15 +11,14 @@ from hec.core.app_logging import start_logger
 from hec.core.app_state import GLOBAL_APP_STATE
 from hec.core.tariff_manager import initialize_tariff_manager
 from hec.logic_engine import scheduled_tasks
-from hec.logic_engine.scheduled_tasks import task_send_daily_energy_summary_email
 
 try:
     APP_CONFIG = load_app_config()
-except FileNotFoundError as e:
-    print(f"CRITICAL: Configuration file not found. {e}. Exiting.")
+except FileNotFoundError as err:
+    print(f"CRITICAL: Configuration file not found. {err}. Exiting.")
     exit(1)
-except ValueError as e:
-    print(f"CRITICAL: Error parsing configuration file. {e}. Exiting.")
+except ValueError as err:
+    print(f"CRITICAL: Error parsing configuration file. {err}. Exiting.")
     exit(1)
 
 start_logger(APP_CONFIG, GLOBAL_APP_STATE)
@@ -45,8 +44,7 @@ def run_application():
 
     # --- POPULATE APP STATE ---
     populate_app_state(db_handler, APP_CONFIG, evcc_client)
-    # task_send_daily_energy_summary_email(APP_CONFIG, db_handler, tariff_manager)
-    # exit(0)
+
     # --- START API SERVER ---
     api_thread = None
     if APP_CONFIG.get('api_server', {}).get('enabled', True):
@@ -63,8 +61,8 @@ def run_application():
     # --- SET UP SCHEDULER ---
     run_scheduler_in_background = APP_CONFIG.get('scheduler', {}).get('run_in_background', True)
     scheduler = setup_scheduler(APP_CONFIG, run_in_background=run_scheduler_in_background)
-    scheduled_tasks.register_all_jobs(scheduler, db_handler, APP_CONFIG, p1_meter_client, inverter_client, evcc_client,
-                                      fetch_entsoe, fetch_elia)
+    scheduled_tasks.register_all_jobs(scheduler, db_handler, APP_CONFIG, p1_meter_client, inverter_client,
+                                      evcc_client, tariff_manager, fetch_entsoe, fetch_elia)
 
     logger.info("Starting scheduler...")
     try:

@@ -1,6 +1,6 @@
 # hec/core/app_initializer.py
 import logging
-from datetime import datetime, timedelta, time, date
+from datetime import datetime, timedelta, time, date, timezone
 from pathlib import Path
 from typing import Optional, Dict
 
@@ -16,7 +16,7 @@ from hec.core import constants as c
 from hec.data_sources import api_p1_meter_homewizard
 from hec.database_ops.db_handler import DatabaseHandler
 from hec.logic_engine.data_processors import populate_appstate_with_price_data, populate_appstate_with_forecast_data
-from hec.logic_engine.scheduled_tasks import task_poll_evcc_state, register_job
+from hec.logic_engine.scheduled_tasks import task_poll_evcc_state
 
 logger = logging.getLogger(__name__)
 
@@ -45,7 +45,8 @@ def check_historic_data(db_handler: DatabaseHandler, app_config: dict):
     Check if historic data is available in the database for the price predictor.
     If not, this is probably the first run of the system.
     """
-    hist_start_date = datetime.combine(date.fromisoformat(app_config.get('historic_data').get('start_date')), time.min)
+    hist_start_date = datetime.combine(date.fromisoformat(app_config.get('historic_data').get('start_date')),
+                                       time.min, tzinfo=timezone.utc)
     days = (datetime.now().date() - hist_start_date.date()).days
     fetch_entsoe, fetch_elia = False, False
 
@@ -58,7 +59,8 @@ def check_historic_data(db_handler: DatabaseHandler, app_config: dict):
         logger.info(f"Historic day-ahead price data available for {days} days.")
 
     # Check for Elia forecasts
-    forecast_hist_start = db_handler.get_elia_forecasts("solar", hist_start_date, hist_start_date)
+    forecast_hist_start = db_handler.get_elia_forecasts("solar", hist_start_date,
+                                                        hist_start_date + timedelta(days=1))
     if not forecast_hist_start:
         logger.info(f"No historic data available for Elia forecasts. Fetching {days} days with task...")
         fetch_elia = True

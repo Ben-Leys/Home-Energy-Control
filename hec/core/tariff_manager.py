@@ -47,7 +47,6 @@ class TariffManager:
                 "grid_operator": self.process_section(raw_tariffs.get("grid_operator", {})),
                 "government": self.process_section(raw_tariffs.get("government", {})),
             }
-            logger.info(f"Tariffs successfully loaded from '{self.tariffs_file_path}'.")
 
         except yaml.YAMLError as e:
             logger.error(f"Error parsing YAML tariff file '{self.tariffs_file_path}': {e}", exc_info=True)

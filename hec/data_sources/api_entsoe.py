@@ -71,6 +71,9 @@ def fetch_entsoe_prices(t_day_local: datetime, app_config: dict) -> Optional[Lis
         response = requests.get(entsoe_config.get('api_base_url'), params=params, timeout=30)
         response.raise_for_status()
         logger.debug(f"ENTSO-E API response status: {response.status_code}")
+    except requests.exceptions.Timeout:
+        logger.info(f"ENTSO-E API request timed out: {entsoe_config.get('api_base_url')}")
+        return None
     except requests.exceptions.RequestException as e:
         logger.error(f"ENTSO-E API request failed: {e}")
         logger.debug(f"Request URL: {response.url if response else entsoe_config.get('api_base_url')}")
