@@ -5,7 +5,7 @@ from datetime import datetime, timezone, timedelta, time, date
 from pathlib import Path
 from typing import List, Optional, Dict, Any
 
-from hec.models.models import PricePoint, NetElectricityPriceInterval
+from hec.core.models import PricePoint, NetElectricityPriceInterval
 
 logger = logging.getLogger(__name__)
 
