@@ -1,20 +1,18 @@
 # hec/reporting/daily_summary.py
 import logging
-from datetime import datetime, timedelta, date, time, timezone
+from datetime import datetime, timedelta, date, timezone
 from typing import List, Dict, Any, Optional, Tuple
 
 import pandas as pd
 
 from hec.core.app_state import GLOBAL_APP_STATE
-from hec.database_ops.db_handler import DatabaseHandler
+from hec.core.models import NetElectricityPriceInterval
 from hec.core.tariff_manager import TariffManager
-from hec.logic_engine.cost_calculator import calculate_net_intervals_for_day, calculate_total_costs_for_period
-from hec.reporting.plot_generator import generate_price_solar_plot, generate_future_price_plot
+from hec.database_ops.db_handler import DatabaseHandler
+from hec.logic_engine.cost_calculator import calculate_total_costs_for_period
 from hec.logic_engine.price_predictor import EnergyPricePredictor
+from hec.reporting.plot_generator import generate_price_solar_plot, generate_future_price_plot
 from hec.utils.utils import send_email_with_attachments
-from hec.models.models import NetElectricityPriceInterval, PricePoint
-from hec.core import constants as c
-from dataclasses import asdict
 
 logger = logging.getLogger(__name__)
 

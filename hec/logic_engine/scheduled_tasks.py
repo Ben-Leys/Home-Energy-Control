@@ -6,13 +6,13 @@ from typing import Optional, List, Dict, Any
 from apscheduler.schedulers.base import BaseScheduler
 
 from hec.controllers.api_evcc import EvccApiClient
+from hec.controllers.modbus_sma_inverter import InverterSmaModbusClient
 from hec.core import constants as c
 from hec.core.app_state import GLOBAL_APP_STATE
 from hec.core.tariff_manager import TariffManager
 from hec.data_sources.api_elia import fetch_and_process_forecast
 from hec.data_sources.api_entsoe import fetch_entsoe_prices
 from hec.data_sources.api_p1_meter_homewizard import P1MeterHomewizardClient
-from hec.controllers.modbus_sma_inverter import InverterSmaModbusClient
 from hec.database_ops.db_handler import DatabaseHandler
 from hec.logic_engine.data_processors import populate_appstate_with_price_data, populate_appstate_with_forecast_data, \
     update_rolling_averages
@@ -46,7 +46,7 @@ def task_fetch_and_store_day_ahead_prices(scheduler: BaseScheduler, db_handler: 
 
     day_ahead_schedule = app_config.get("scheduler", {}).get(FETCH_PRICES_JOB_ID, {})
     max_retries = day_ahead_schedule.get("max_retries", 36)
-    retry_after = 2 if fetch_prices_attempt_count < 0 else day_ahead_schedule.get("retry_after", 0)
+    retry_after = 2 if fetch_prices_attempt_count < 0 else day_ahead_schedule.get("retry_after", 15)
     daily_summary_mail = day_ahead_schedule.get('summary_email', False)
 
     logger.info(f"Running task: Fetch and Store Day-Ahead Prices (Attempt: {fetch_prices_attempt_count + 1})")
@@ -75,9 +75,9 @@ def task_fetch_and_store_day_ahead_prices(scheduler: BaseScheduler, db_handler: 
         except Exception as e:  # Catch JobLookupError if job was removed
             logger.warning(f"Could not reschedule price fetch job: {e}", exc_info=True)
     else:
-        logger.warning(f"Max retry attempts ({max_retries}) reached for fetching prices for "
-                       f"{target_day.strftime('%Y-%m-%d')}. Giving up.")
-        fetch_prices_attempt_count = 0  # Reset for the next day's attempt
+        logger.error(f"Max retry attempts ({max_retries}) reached for fetching prices for "
+                     f"{target_day.strftime('%Y-%m-%d')}. Giving up.")
+        fetch_prices_attempt_count = -5  # Reset for the next day's attempt
 
 
 def task_midnight_rollover(db_handler: DatabaseHandler, app_config: dict):
@@ -94,6 +94,7 @@ def task_midnight_rollover(db_handler: DatabaseHandler, app_config: dict):
 
     populate_appstate_with_forecast_data(db_handler)
     # todo: load current forecast data into app_state, test for dst dates
+    # todo: if current month power peak stored in AppState, check if new month and reset to minimum (2.5 kW or config?)
 
 
 def task_poll_p1_meter(db_handler: DatabaseHandler, p1_client: Optional[P1MeterHomewizardClient], boundary: int = 5):
@@ -115,6 +116,7 @@ def task_poll_p1_meter(db_handler: DatabaseHandler, p1_client: Optional[P1MeterH
         return
 
     ts = datetime.fromisoformat(p1_data["timestamp_utc_iso"])
+
     # 1. Update live data in AppState
     live = {
         "timestamp_utc_iso": p1_data["timestamp_utc_iso"],

@@ -4,9 +4,9 @@ import logging
 from datetime import datetime, date, timedelta, time
 from typing import Optional, Dict, Any, List
 
+from hec.core.models import NetElectricityPriceInterval, PricePoint
 from hec.core.tariff_manager import TariffManager, initialize_tariff_manager
 from hec.database_ops.db_handler import DatabaseHandler
-from hec.models.models import NetElectricityPriceInterval, PricePoint
 
 logger = logging.getLogger(__name__)
 debug_logger = logging.getLogger('Calc Debug')
@@ -22,7 +22,7 @@ def calculate_net_intervals_for_day(db: DatabaseHandler, app_config, target_date
     Args:
         db: has method get_da_prices(date) -> List[PricePoint]
         app_config: Dict with application configuration data.
-        target_date_local (local): the date for which to build intervals
+        target_date_local (local): the date in datetime for which to build intervals
         price_points (Optional[List[PricePoint]]): list of price points to build intervals for
 
     Returns:
@@ -83,7 +83,7 @@ def calculate_net_intervals_for_day(db: DatabaseHandler, app_config, target_date
             debug_logger.debug(f"   Fixed + gov_tax: {fixed_buy}")
             debug_logger.debug(f"   Dynamic + gov_tax: {dynamic_buy}")
 
-            # Tiered excise: based on yet unknown year consumption - already add the lowest value
+            # Tiered excise: based on yet unknown year consumption - already add the below value
             excise = gov["rate_per_kwh_below"]
             fixed_buy += excise
             dynamic_buy += excise
