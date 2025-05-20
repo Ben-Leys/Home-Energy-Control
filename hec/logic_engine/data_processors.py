@@ -46,6 +46,8 @@ def populate_appstate_with_price_data(db_handler: DatabaseHandler, app_config: d
             logger.info(f"No DB data for '{key}' on {day.date()}, attempting API fetch.")
             price_points = fetch_entsoe_prices(day, app_config)
             store_to_db = True if price_points else False
+        if not price_points:
+            continue
 
         # Process the price points (if any)
         process_price_points_to_app_state(price_points, day, key, app_config,

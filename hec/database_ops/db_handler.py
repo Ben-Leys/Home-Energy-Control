@@ -191,7 +191,7 @@ class DatabaseHandler:
 
         return inserted_count
 
-    def get_da_prices(self, target_day_local: datetime) -> List[PricePoint]:
+    def get_da_prices(self, target_day_local: datetime, day_end_local: datetime = None) -> List[PricePoint]:
         """
         Retrieves price forecasts for a specific local day from the database.
         Returns a list of PricePoint objects.
@@ -200,7 +200,8 @@ class DatabaseHandler:
         local_tz = target_day_local.tzinfo or datetime.now().astimezone().tzinfo
 
         day_start_local = datetime.combine(target_day_local.date(), time.min, local_tz)
-        day_end_local = day_start_local + timedelta(days=1)
+        if not day_end_local:
+            day_end_local = day_start_local + timedelta(days=1)
 
         # Convert local day boundaries to UTC strings for querying
         day_start_utc_str = day_start_local.astimezone(timezone.utc).isoformat()
@@ -230,7 +231,6 @@ class DatabaseHandler:
                     position=0,  # Has no added value when retrieving
                     resolution_minutes=row["resolution_minutes"]
                 ))
-            logger.info(f"Retrieved {len(results)} price points from DB for {target_day_local.strftime('%Y-%m-%d')}.")
         except sqlite3.Error as e:
             logger.error(f"Error retrieving price forecasts from database: {e}", exc_info=True)
 
@@ -678,10 +678,9 @@ class DatabaseHandler:
                 record['fetched_at_utc'] = datetime.fromisoformat(record['fetched_at_utc'])
                 results.append(record)
 
-            if results:
-                logger.info(f"Retrieved {len(results)} Elia '{forecast_type}' records from DB.")
-            else:
-                logger.info(f"No Elia '{forecast_type}' records found in DB for the period.")
+            if not results:
+                logger.info(f"No Elia '{forecast_type}' records found in DB for the period "
+                            f"{start_date_local} - {end_date_local}.")
         except sqlite3.Error as e:
             logger.error(f"Error retrieving Elia '{forecast_type}' forecasts from database: {e}", exc_info=True)
 

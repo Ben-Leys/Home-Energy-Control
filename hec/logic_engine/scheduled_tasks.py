@@ -8,6 +8,7 @@ from apscheduler.schedulers.base import BaseScheduler
 from hec.controllers.api_evcc import EvccApiClient
 from hec.core import constants as c
 from hec.core.app_state import GLOBAL_APP_STATE
+from hec.core.tariff_manager import TariffManager
 from hec.data_sources.api_elia import fetch_and_process_forecast
 from hec.data_sources.api_entsoe import fetch_entsoe_prices
 from hec.data_sources.api_p1_meter_homewizard import P1MeterHomewizardClient
@@ -23,7 +24,7 @@ logger = logging.getLogger(__name__)
 # --- Scheduled Tasks ---
 FETCH_PRICES_JOB_ID = "fetch_day_ahead_prices"
 FETCH_PRICES_HISTORICAL_JOB_ID = "fetch_day_ahead_historical_prices"
-fetch_prices_attempt_count = 0
+fetch_prices_attempt_count = -5  # First 5 retries on the house
 MIDNIGHT_ROLLOVER_JOB_ID = "midnight_rollover"
 P1_METER_JOB_ID = "p1_meter_update"
 FETCH_ELIA_FORECAST_JOB_ID = "fetch_elia_forecast"
@@ -32,9 +33,11 @@ INVERTER_FOR_DB_JOB_ID = "inverter_update_for_db"
 INVERTER_FOR_CONTROLLER_JOB_ID = "inverter_update_for_controller"
 POLL_EVCC_JOB_ID = "evcc_update"
 UPDATE_ROLLING_AVERAGES_JOB_ID = "update_rolling_averages"
+DAILY_SUMMARY_EMAIL_JOB_ID = "daily_summary_email"
 
 
-def task_fetch_and_store_day_ahead_prices(scheduler: BaseScheduler, db_handler: DatabaseHandler, app_config: dict):
+def task_fetch_and_store_day_ahead_prices(scheduler: BaseScheduler, db_handler: DatabaseHandler, app_config: dict,
+                                          tariff_manager: TariffManager):
     """
     Scheduled task to fetch day-ahead prices, store them in database, and update AppState.
     Handles retries by rescheduling itself if data is not yet available.
@@ -43,8 +46,8 @@ def task_fetch_and_store_day_ahead_prices(scheduler: BaseScheduler, db_handler: 
 
     day_ahead_schedule = app_config.get("scheduler", {}).get(FETCH_PRICES_JOB_ID, {})
     max_retries = day_ahead_schedule.get("max_retries", 36)
-    retry_after = day_ahead_schedule.get("retry_after", 0)
-    retry_interval_minutes = app_config.get('scheduler', {}).get('price_fetch_retry_interval_min', 15)
+    retry_after = 2 if fetch_prices_attempt_count < 0 else day_ahead_schedule.get("retry_after", 0)
+    daily_summary_mail = day_ahead_schedule.get('summary_email', False)
 
     logger.info(f"Running task: Fetch and Store Day-Ahead Prices (Attempt: {fetch_prices_attempt_count + 1})")
 
@@ -53,9 +56,13 @@ def task_fetch_and_store_day_ahead_prices(scheduler: BaseScheduler, db_handler: 
 
     price_points = fetch_entsoe_prices(target_day, app_config)
 
-    if process_price_points_to_app_state(price_points, target_day, "electricity_prices_tomorrow", db_handler):
-        fetch_prices_attempt_count = 0
-        return
+    if price_points:
+        if process_price_points_to_app_state(price_points, target_day, "electricity_prices_tomorrow", db_handler):
+            fetch_prices_attempt_count = -5
+            if daily_summary_mail:
+                register_job(scheduler, DAILY_SUMMARY_EMAIL_JOB_ID, task_send_daily_energy_summary_email, "date", None,
+                             [app_config, db_handler, tariff_manager], "Daily summary e-mail", 3600)
+            return
 
     # --- Handle Retries if no price points ---
     fetch_prices_attempt_count += 1
@@ -64,7 +71,7 @@ def task_fetch_and_store_day_ahead_prices(scheduler: BaseScheduler, db_handler: 
         try:
             scheduler.modify_job(FETCH_PRICES_JOB_ID, next_run_time=next_run_time)
             logger.info(f"Price fetch job rescheduled to run at {next_run_time.astimezone().isoformat()} "
-                        f"(in {retry_interval_minutes} min).")
+                        f"(in {retry_after} min).")
         except Exception as e:  # Catch JobLookupError if job was removed
             logger.warning(f"Could not reschedule price fetch job: {e}", exc_info=True)
     else:
@@ -268,16 +275,10 @@ def task_send_daily_energy_summary_email(app_config, db_handler, tariff_manager)
 
     t_date_prices = GLOBAL_APP_STATE.get("electricity_prices_tomorrow")
     if not t_date_prices:
-        logger.warning("Prices for 'tomorrow' (D+1) not yet in AppState. Daily summary email rescheduled.")
-        # Implement rescheduling logic here if desired, similar to price fetch task
-        # For now, we assume the email task runs *after* prices are expected to be populated.
-        # If this task runs and they are missing, it implies the price fetch failed or is delayed.
-        # The email task could retry a few times.
-        # todo return  # Skip this run. For now copy data
-        GLOBAL_APP_STATE.set("electricity_prices_tomorrow", GLOBAL_APP_STATE.get("electricity_prices_today"))
+        logger.warning("Prices for 'tomorrow' not yet in AppState. Daily summary email skipped.")
 
     try:
-        success = summary_generator.generate_and_send_summary()
+        success = summary_generator.generate_and_send_summary(app_config)
         if success:
             logger.info("Daily energy summary email generated and sent successfully.")
         else:
@@ -325,6 +326,7 @@ def register_all_jobs(scheduler: BaseScheduler, db_handler: DatabaseHandler, app
                       p1_client: Optional[P1MeterHomewizardClient],
                       inv_client: Optional[InverterSmaModbusClient],
                       evcc_client: Optional[EvccApiClient],
+                      tariff_manager: Optional[TariffManager],
                       fetch_entsoe=False, fetch_elia=False):
     """Registers all defined scheduled jobs with the provided scheduler instance."""
 
@@ -336,7 +338,7 @@ def register_all_jobs(scheduler: BaseScheduler, db_handler: DatabaseHandler, app
                 "task_function": task_fetch_and_store_day_ahead_prices,
                 "trigger": "cron",
                 "trigger_args": "",
-                "job_args": [scheduler, db_handler, app_config],
+                "job_args": [scheduler, db_handler, app_config, tariff_manager],
                 "name": "Fetch Day-Ahead ENTSO-E Prices",
                 "misfire_grace_time": 32400,  # 9 hours
             },

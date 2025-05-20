@@ -66,7 +66,7 @@ def process_price_points_to_app_state(price_points: list, target_day: datetime,
         True in case of success, False in case of failure.
     """
     if price_points is None:
-        logger.error(f"Critical API fetch error for {target_day.date()}.")
+        # No error logging. Caught by calling functions
         GLOBAL_APP_STATE.set(app_state_key, [])
         return False
     elif not price_points:
