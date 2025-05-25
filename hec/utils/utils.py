@@ -2,11 +2,11 @@
 import logging
 import os
 import smtplib
-from datetime import datetime, timedelta, date
+from datetime import date, datetime, timedelta
 from email.mime.image import MIMEImage
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
-from typing import Optional, List, Tuple
+from typing import List, Optional, Tuple
 
 from astral import LocationInfo
 from astral.sun import sun
@@ -99,7 +99,8 @@ def is_daylight(app_config: dict) -> bool:
         return True
 
     now_dt_aware = datetime.now().astimezone()
-    city = LocationInfo("MyCity", location_config['region_name_for_astral_optional'],
+    city = LocationInfo(location_config['city'],
+                        location_config['region_name_for_astral_optional'],
                         location_config['timezone'],
                         location_config['latitude'],
                         location_config['longitude'])
@@ -179,9 +180,11 @@ def send_email_with_attachments(
         return False
 
 
-def is_a_holiday(t_date):
+def is_a_holiday(t_date: [date, datetime]):
     if isinstance(t_date, datetime):
         t_date = t_date.date()
+    elif not isinstance(t_date, date):
+        raise TypeError("t_date must be of type date or datetime.")
 
     holidays = {
         date(t_date.year, 1, 1),  # New Year's Day
@@ -200,7 +203,7 @@ def is_a_holiday(t_date):
     return t_date in holidays
 
 
-def calculate_easter(year):
+def calculate_easter(year: int):
     """Computes the date of Easter Sunday for the given year."""
     a = year % 19
     b = year // 100
@@ -211,6 +214,31 @@ def calculate_easter(year):
     month = f // 31
     day = f % 31 + 1
     return date(year, month, day)
+
+
+def convert_power(current_a: Optional[float] = None, power_kw: Optional[float] = None) -> float:
+    """
+    Convert between power (kW) and current (A) for a single-phase system.
+    Voltage: 230 V. Power Factor: 1.0
+
+    Args:
+        current_a (Optional[float]): Current in amperes.
+        power_kw (Optional[float]): Power in kilowatts.
+
+    Returns:
+        float: The converted value (kW if current_a is given, A if power_kw is given).
+    """
+    voltage = 230
+    power_factor = 1.0
+
+    if current_a is not None and power_kw is None:
+        # Convert current (A) to power (kW)
+        return current_a * voltage * power_factor / 1000  # Convert W to kW
+    elif power_kw is not None and current_a is None:
+        # Convert power (kW) to current (A)
+        return power_kw * 1000 / (voltage * power_factor)  # Convert kW to W and calculate A
+    else:
+        logger.error("Provide exactly one parameter: either 'current_a' or 'power_kw'.")
 
 
 # if __name__ == '__main__':

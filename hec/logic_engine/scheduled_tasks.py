@@ -1,5 +1,6 @@
 # hec/logic_engine/scheduled_tasks.py
 import logging
+import time
 from datetime import datetime, timedelta, timezone, time, date
 from typing import Optional, List, Dict, Any
 
@@ -9,6 +10,7 @@ from hec.controllers.api_evcc import EvccApiClient
 from hec.controllers.modbus_sma_inverter import InverterSmaModbusClient
 from hec.core import constants as c
 from hec.core.app_state import GLOBAL_APP_STATE
+from hec.core.models import EVCCOverallState, EVCCLoadpointState
 from hec.core.tariff_manager import TariffManager
 from hec.data_sources.api_elia import fetch_and_process_forecast
 from hec.data_sources.api_entsoe import fetch_entsoe_prices
@@ -16,6 +18,7 @@ from hec.data_sources.api_p1_meter_homewizard import P1MeterHomewizardClient
 from hec.database_ops.db_handler import DatabaseHandler
 from hec.logic_engine.data_processors import populate_appstate_with_price_data, populate_appstate_with_forecast_data, \
     update_rolling_averages
+from hec.logic_engine.system_mediator import SystemMediator
 from hec.reporting.daily_summary import DailySummaryGenerator
 from hec.utils.utils import process_price_points_to_app_state, is_daylight
 
@@ -24,16 +27,16 @@ logger = logging.getLogger(__name__)
 # --- Scheduled Tasks ---
 FETCH_PRICES_JOB_ID = "fetch_day_ahead_prices"
 FETCH_PRICES_HISTORICAL_JOB_ID = "fetch_day_ahead_historical_prices"
-fetch_prices_attempt_count = -5  # First 5 retries on the house
+fetch_prices_attempt_count = 0  # First 5 retries on the house
 MIDNIGHT_ROLLOVER_JOB_ID = "midnight_rollover"
 P1_METER_JOB_ID = "p1_meter_update"
 FETCH_ELIA_FORECAST_JOB_ID = "fetch_elia_forecast"
 FETCH_ELIA_HISTORICAL_DATA_JOB_ID = "fetch_elia_historical_data"
 INVERTER_FOR_DB_JOB_ID = "inverter_update_for_db"
-INVERTER_FOR_CONTROLLER_JOB_ID = "inverter_update_for_controller"
+INVERTER_FOR_MEDIATOR_JOB_ID = "inverter_update_for_mediator"
 POLL_EVCC_JOB_ID = "evcc_update"
-UPDATE_ROLLING_AVERAGES_JOB_ID = "update_rolling_averages"
 DAILY_SUMMARY_EMAIL_JOB_ID = "daily_summary_email"
+MEDIATOR_LOGIC_JOB_ID = "mediator_logic"
 
 
 def task_fetch_and_store_day_ahead_prices(scheduler: BaseScheduler, db_handler: DatabaseHandler, app_config: dict,
@@ -44,9 +47,9 @@ def task_fetch_and_store_day_ahead_prices(scheduler: BaseScheduler, db_handler: 
     """
     global fetch_prices_attempt_count
 
-    day_ahead_schedule = app_config.get("scheduler", {}).get(FETCH_PRICES_JOB_ID, {})
+    day_ahead_schedule = app_config.get("tasks_schedule", {}).get(FETCH_PRICES_JOB_ID, {})
     max_retries = day_ahead_schedule.get("max_retries", 36)
-    retry_after = 2 if fetch_prices_attempt_count < 0 else day_ahead_schedule.get("retry_after", 15)
+    retry_after = 2 if fetch_prices_attempt_count < 5 else day_ahead_schedule.get("retry_after", 15)
     daily_summary_mail = day_ahead_schedule.get('summary_email', False)
 
     logger.info(f"Running task: Fetch and Store Day-Ahead Prices (Attempt: {fetch_prices_attempt_count + 1})")
@@ -57,16 +60,17 @@ def task_fetch_and_store_day_ahead_prices(scheduler: BaseScheduler, db_handler: 
     price_points = fetch_entsoe_prices(target_day, app_config)
 
     if price_points:
-        if process_price_points_to_app_state(price_points, target_day, "electricity_prices_tomorrow", db_handler):
+        if process_price_points_to_app_state(price_points, target_day, "electricity_prices_tomorrow", app_config,
+                                             db_handler):
             fetch_prices_attempt_count = -5
             if daily_summary_mail:
-                register_job(scheduler, DAILY_SUMMARY_EMAIL_JOB_ID, task_send_daily_energy_summary_email, "date", None,
+                register_job(scheduler, DAILY_SUMMARY_EMAIL_JOB_ID, task_send_daily_energy_summary_email, "date", {},
                              [app_config, db_handler, tariff_manager], "Daily summary e-mail", 3600)
             return
 
     # --- Handle Retries if no price points ---
     fetch_prices_attempt_count += 1
-    if fetch_prices_attempt_count < max_retries:
+    if fetch_prices_attempt_count < max_retries + 5:
         next_run_time = datetime.now(timezone.utc) + timedelta(minutes=retry_after)
         try:
             scheduler.modify_job(FETCH_PRICES_JOB_ID, next_run_time=next_run_time)
@@ -93,8 +97,6 @@ def task_midnight_rollover(db_handler: DatabaseHandler, app_config: dict):
         populate_appstate_with_price_data(db_handler, app_config, True)
 
     populate_appstate_with_forecast_data(db_handler)
-    # todo: load current forecast data into app_state, test for dst dates
-    # todo: if current month power peak stored in AppState, check if new month and reset to minimum (2.5 kW or config?)
 
 
 def task_poll_p1_meter(db_handler: DatabaseHandler, p1_client: Optional[P1MeterHomewizardClient], boundary: int = 5):
@@ -124,11 +126,15 @@ def task_poll_p1_meter(db_handler: DatabaseHandler, p1_client: Optional[P1MeterH
         "active_power_average_w": p1_data.get("active_power_average_w"),
         "total_power_import_kwh": p1_data.get("total_power_import_kwh"),
         "total_power_export_kwh": p1_data.get("total_power_export_kwh"),
-        "monthly_power_peak_w": p1_data.get("monthly_power_peak_w"),
-        "monthly_power_peak_timestamp": p1_data.get("monthly_power_peak_timestamp"),
+        "monthly_power_peak_w": p1_data.get("montly_power_peak_w"),  # P1_meter spelling error
+        "monthly_power_peak_timestamp": p1_data.get("montly_power_peak_timestamp"),  # P1_meter spelling error
     }
+    if datetime.now().day == 1 and datetime.now().hour == 0:
+        # Monthly power peak doesn't reset immediately in smart meter possibly allowing charging to create a new peak
+        live["monthly_power_peak_w"] = 0
     GLOBAL_APP_STATE.set("p1_meter_data", live)
     logger.debug(f"P1 Meter live data set: {live['timestamp_utc_iso']}")
+    update_rolling_averages()
 
     # 2. Boundary‐slot determination
     minute = ts.minute
@@ -156,6 +162,12 @@ def task_poll_inverter(db_handler: DatabaseHandler, inv_client: InverterSmaModbu
                        log_to_db: bool) -> Optional[Dict[str, Any]]:
     """Polling inverter, updating AppState, and optionally logging to DB."""
     if not inv_client:
+        logger.debug("Inverter poll: Client not initialized.")
+        GLOBAL_APP_STATE.set("inverter_data", None)
+        return None
+
+    status = inv_client.get_operational_status()
+    if status == c.InverterStatus.UNKNOWN and status == c.InverterStatus.OFFLINE:
         logger.debug("Inverter poll: Client not available.")
         GLOBAL_APP_STATE.set("inverter_data", None)
         return None
@@ -201,12 +213,12 @@ def task_poll_inverter_for_live_update(db_handler: DatabaseHandler, inv_client: 
     task_poll_inverter(db_handler, inv_client, app_config, log_to_db=False)
 
 
-def task_poll_inverter_for_controller_update(db_handler: DatabaseHandler, inv_client: InverterSmaModbusClient,
-                                             app_config):
+def task_poll_inverter_for_mediator_update(db_handler: DatabaseHandler, inv_client: InverterSmaModbusClient,
+                                           app_config):
     """Poll to update average values for controller calculations."""
     # Avoid running together with standard db_logging task every 15 minutes ?
     if GLOBAL_APP_STATE.get("inverter_manual_state") == c.InverterManualState.INV_CMD_LIMIT_TO_USE:
-        logger.debug("Running task: Poll inverter for Controller Update")
+        logger.debug("Running task: Poll inverter for Mediator Update")
         task_poll_inverter(db_handler, inv_client, app_config, log_to_db=False)
 
 
@@ -214,19 +226,35 @@ def task_poll_evcc_state(evcc_client: Optional[EvccApiClient]):
     """Poll evcc for state dict and store in AppState"""
     if not evcc_client or not evcc_client.is_available:
         logger.debug("EVCC polling task: Client not available. Skipping.")
-        GLOBAL_APP_STATE.set("evcc_data", None)
+        GLOBAL_APP_STATE.set("evcc_overall_state", None)
         return
 
     logger.debug("EVCC polling task: Fetching state...")
-    evcc_state = evcc_client.get_current_state()
+    evcc_state = evcc_client.get_current_state_data()
 
     if evcc_state:
-        GLOBAL_APP_STATE.set("evcc_data", evcc_state)
-        logger.debug(f"EVCC: AppState updated. Mode: {evcc_state['loadpoints'][0].get('mode')}, "
-                     f"Charging: {evcc_state['loadpoints'][0].get('charging')}")
+        cur_state = EVCCOverallState(timestamp_utc_iso=evcc_state.get("timestamp_utc_iso"),
+                                     residual_power=evcc_state.get('residualPower'))
+        lp_data = evcc_state.get('loadpoints')[0]
+        cur_lp = EVCCLoadpointState(loadpoint_id=1,
+                                    is_connected=lp_data.get('connected'),
+                                    is_charging=lp_data.get('charging'),
+                                    charge_current=lp_data.get('chargeCurrent'),
+                                    min_current=lp_data.get('minCurrent'),
+                                    max_current=lp_data.get('maxCurrent'),
+                                    enable_threshold=lp_data.get('enableThreshold'),
+                                    disable_threshold=lp_data.get('disableThreshold'),
+                                    limit_energy=lp_data.get('limitEnergy'),
+                                    mode=lp_data.get('mode'),
+                                    session_energy=lp_data.get('sessionEnergy'),
+                                    smart_cost_active=lp_data.get('smartCostActive'))
+        GLOBAL_APP_STATE.set("evcc_overall_state", cur_state.to_dict())
+        GLOBAL_APP_STATE.set("evcc_loadpoint_state", cur_lp.to_dict())
+        logger.debug(f"EVCC: AppState updated. Mode: {cur_lp.mode}, Charging: {cur_lp.is_charging}")
+
     else:
         logger.warning("EVCC polling task: Failed to fetch state from EVCC.")
-        GLOBAL_APP_STATE.set("evcc_data", None)
+        GLOBAL_APP_STATE.set("evcc_overall_state", None)
 
 
 def task_fetch_elia_forecasts(db_handler: DatabaseHandler, app_config: dict):
@@ -235,7 +263,7 @@ def task_fetch_elia_forecasts(db_handler: DatabaseHandler, app_config: dict):
     and store them in the database. Fetches for the next 5 days (D+1 to D+5).
     Grid load forecast only available until D+4.
     """
-    logger.info("Running task: Fetch Elia Renewables Forecasts.")
+    logger.info("Running task: Fetch Elia Forecasts.")
 
     # Define the range of days to fetch (e.g., today + 1 to today + 5)
     # Forecasts are for D+1, D+2, ..., D+5
@@ -258,7 +286,8 @@ def task_fetch_elia_forecasts(db_handler: DatabaseHandler, app_config: dict):
             if data:
                 all_fetched_records.extend(data)
             else:
-                logger.error(f"Failed to fetch {forecast_type} forecast for {target_day_utc_str}.")
+                logger.warning(f"Failed to fetch {forecast_type} forecast for {target_day_utc_str}.")
+            time.sleep(1)  # Too many requests leads to empty response
 
     if all_fetched_records:
         logger.info(f"Finished fetching Elia forecasts. Total days: {days_to_fetch} rec: {len(all_fetched_records)}.")
@@ -324,11 +353,16 @@ def fetch_historic_elia_data(db_handler: DatabaseHandler, app_config: dict, hist
     logger.info(f"Fetched and stored {total_lines_added} Elia forecast records.")
 
 
+def task_system_mediator(system_mediator: SystemMediator):
+    system_mediator.run_system_mediation_logic()
+
+
 def register_all_jobs(scheduler: BaseScheduler, db_handler: DatabaseHandler, app_config: dict,
                       p1_client: Optional[P1MeterHomewizardClient],
                       inv_client: Optional[InverterSmaModbusClient],
                       evcc_client: Optional[EvccApiClient],
                       tariff_manager: Optional[TariffManager],
+                      system_mediator: SystemMediator,
                       fetch_entsoe=False, fetch_elia=False):
     """Registers all defined scheduled jobs with the provided scheduler instance."""
 
@@ -363,12 +397,12 @@ def register_all_jobs(scheduler: BaseScheduler, db_handler: DatabaseHandler, app
                 "misfire_grace_time": 3600,  # 1 hour
             },
             {
-                "job_id": UPDATE_ROLLING_AVERAGES_JOB_ID,
-                "task_function": update_rolling_averages,
+                "job_id": MEDIATOR_LOGIC_JOB_ID,
+                "task_function": task_system_mediator,
                 "trigger": "cron",
                 "trigger_args": "",
-                "job_args": [],
-                "name": "Update Rolling Averages",
+                "job_args": [system_mediator],
+                "name": "System Mediator",
                 "misfire_grace_time": 10,
             }
         ]
@@ -424,20 +458,20 @@ def register_all_jobs(scheduler: BaseScheduler, db_handler: DatabaseHandler, app
                 name="Poll inverter for DB Logging",
                 grace_time=600,
             )
-            inverter_schedule = tasks_config.get(INVERTER_FOR_CONTROLLER_JOB_ID, {})
+            inverter_schedule = tasks_config.get(INVERTER_FOR_MEDIATOR_JOB_ID, {})
             second = inverter_schedule.get('second', '*/15')
             register_job(
                 scheduler,
-                job_id=INVERTER_FOR_CONTROLLER_JOB_ID,
-                func=task_poll_inverter_for_controller_update,
+                job_id=INVERTER_FOR_MEDIATOR_JOB_ID,
+                func=task_poll_inverter_for_mediator_update,
                 trigger="cron",
                 trigger_args={"second": second},
                 job_args=[db_handler, inv_client, app_config],
-                name="Poll inverter for controller",
+                name="Poll inverter for mediator (if required)",
                 grace_time=10,
             )
         else:
-            logger.warning(f"Inverter client not initialized. '{INVERTER_FOR_CONTROLLER_JOB_ID}' job not scheduled.")
+            logger.warning(f"Inverter client not initialized. '{INVERTER_FOR_MEDIATOR_JOB_ID}' job not scheduled.")
 
         # Register evcc job if available
         if evcc_client:

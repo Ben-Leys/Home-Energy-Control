@@ -102,7 +102,7 @@ def generate_price_solar_plot(
 
     # --- Plotting ---
     try:
-        with plt.style.context('dark_background'):
+        with plt.style.context('default'):
             fig, ax1 = plt.subplots(figsize=(16, 10))  # Wider for more intervals
 
             intervals_n_date_to_plot = intervals_to_show_per_hour * 10
@@ -140,19 +140,19 @@ def generate_price_solar_plot(
 
             # Plot Buy Prices
             ax1.bar(x_axis_indices[mask_today], np_buy[mask_today], width=bar_width,
-                    color='lightgray', alpha=0.3, label='Buy price today')
+                    color='lightgray', alpha=1, label='Buy price today')
             ax1.bar(x_axis_indices[mask_buy_pos], np_buy[mask_buy_pos], width=bar_width,
-                    color='#2525E6', edgecolor=None, alpha=0.7, label='Buy price tomorrow', zorder=1)
+                    color='#2525E6', edgecolor=None, alpha=1, label='Buy price tomorrow', zorder=1)
             ax1.bar(x_axis_indices[mask_buy_neg], np_buy[mask_buy_neg], width=bar_width,
-                    color='#6A0DAD', edgecolor=None, alpha=0.7, label='Buy price (neg)',
+                    color='#6A0DAD', edgecolor=None, alpha=1, label='Buy price (neg)',
                     zorder=3)  # Purple for neg buy
 
             # Plot Sell Prices (only where solar is producing)
             ax1.bar(x_axis_indices[mask_solar_producing & mask_sell_pos], np_sell[mask_solar_producing & mask_sell_pos],
-                    width=bar_width, color='#25E625', edgecolor=None, alpha=0.7,
+                    width=bar_width, color='#25E625', edgecolor=None, alpha=1,
                     label='Sell price (solar)', zorder=2)
             ax1.bar(x_axis_indices[mask_solar_producing & mask_sell_neg], np_sell[mask_solar_producing & mask_sell_neg],
-                    width=bar_width, color='#E62525', edgecolor=None, alpha=0.7,
+                    width=bar_width, color='#E62525', edgecolor=None, alpha=1,
                     label='Sell price (solar, neg)', zorder=2)
 
             ax1.set_xlabel('Time interval')
@@ -161,9 +161,9 @@ def generate_price_solar_plot(
             # Solar Production on ax2
             ax2 = ax1.twinx()
             ax2.plot(x_axis_indices[mask_solar_producing], np_solar[mask_solar_producing],
-                     color='#E6B625', label='Solar Production (kW)', linewidth=0.6)
+                     color='#E6B625', label='Solar Production (kW)', linewidth=1.0)
             ax2.fill_between(x_axis_indices[mask_solar_producing], np_solar[mask_solar_producing],
-                             color='#E6B625', alpha=0.4, zorder=4)
+                             color='#E6B625', alpha=0.6, zorder=4)
             ax2.set_ylabel('Solar production (kW)')
             # Align solar y-axis with price axis for visual comparison
             ax2.set_ylim(y_min_ax1 / y_max_ax1 * inverter_kw * 1.1, inverter_kw * 1.1)
@@ -186,9 +186,9 @@ def generate_price_solar_plot(
             # Ticks and grid
             ax1.tick_params(direction='out')
             ax1.set_xticks(tick_positions)
-            ax1.set_xticklabels(tick_labels, ha="center", color="gray")
+            ax1.set_xticklabels(tick_labels, ha="center", color="black")
             ax1.set_xlim(-0.5, total_intervals_to_plot - 0.1)
-            ax1.grid(color='darkgray', which="major", linestyle='solid', alpha=0.5)
+            ax1.grid(color='darkgray', which="major", linestyle='solid', alpha=0.6)
 
             # Title and Legend
             days = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
@@ -297,13 +297,13 @@ def generate_future_price_plot(
     y_max = max_price * 1.1
 
     try:
-        with plt.style.context('dark_background'):
+        with plt.style.context('default'):
             fig, ax1 = plt.subplots(figsize=(16, 10))
             x = np.arange(total_intervals)
 
             # bars for buy/sell
-            ax1.bar(x, np_buy, width=1, color='#2525E6', edgecolor=None, alpha=0.7, label='Buy price', zorder=1)
-            ax1.bar(x, np_sell, width=1, color='#25E625', edgecolor=None, alpha=0.7, label='Sell price', zorder=2)
+            ax1.bar(x, np_buy, width=1, color='#2525E6', edgecolor=None, alpha=1, label='Buy price', zorder=1)
+            ax1.bar(x, np_sell, width=1, color='#25E625', edgecolor=None, alpha=1, label='Sell price', zorder=2)
 
             ax1.set_ylim(y_min, y_max)
             ax1.set_xlabel('Interval')
@@ -311,11 +311,11 @@ def generate_future_price_plot(
 
             # twin axis for factors
             ax2 = ax1.twinx()
-            ax2.plot(x, np_solar, linestyle='-', color='#E6B625', linewidth=0.6, label='Solar factor')
-            ax2.fill_between(x, np_solar, color='#E6B625', alpha=0.4)
-            ax2.plot(x, np_wind, linestyle='-', color='green', linewidth=0.6, label='Wind factor')
-            ax2.fill_between(x, np_wind, color='green', alpha=0.3)
-            ax2.plot(x, np_grid, linestyle='-', color='red', linewidth=0.8, label='Grid load')
+            ax2.plot(x, np_solar, linestyle='-', color='#E6B625', linewidth=1.5, label='Solar factor')
+            ax2.fill_between(x, np_solar, color='#E6B625', alpha=0.5)
+            ax2.plot(x, np_wind, linestyle='-', color='green', linewidth=1.5, label='Wind factor')
+            ax2.fill_between(x, np_wind, color='green', alpha=0.4)
+            ax2.plot(x, np_grid, linestyle='-', color='red', linewidth=1.5, label='Grid load')
             ax2.set_ylabel('Factors / load (normalized)')
             ax2.set_ylim(y_min / y_max * inverter_kw * 1.1, inverter_kw * 1.1)
 
@@ -323,7 +323,7 @@ def generate_future_price_plot(
             cum = 0
             for length in intervals_per_day[:-1]:
                 cum += length
-                ax1.axvline(x=cum, color='gray', linestyle='--', linewidth=0.5)
+                ax1.axvline(x=cum, color='black', linestyle='--', linewidth=1, zorder=5)
 
             # legend & layout
             h1, l1 = ax1.get_legend_handles_labels()
@@ -337,12 +337,29 @@ def generate_future_price_plot(
             ax1.set_xticklabels(custom_labels, ha="center")
 
             # title date range
-            day_names = ["Mon","Tue","Wed","Thu","Fri","Sat","Sun"]
+            day_names = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
             start, end = future_dates[0], future_dates[-1]
             title = (f"Future prices and factors: "
                      f"{day_names[start.weekday()]} {start.strftime('%d-%m-%Y')} – "
                      f"{day_names[end.weekday()]} {end.strftime('%d-%m-%Y')}")
             plt.title(title)
+
+            # Add day names inside the graph, centered above each day's midpoint
+            day_midpoints = [(sum(intervals_per_day[:i]) + intervals_per_day[i] // 2) for i in
+                             range(len(intervals_per_day))]
+            for i, midpoint in enumerate(day_midpoints):
+                day_label = f"{day_names[future_dates[i].weekday()]}"  # {future_dates[i].strftime('%d-%m')}"
+                ax1.text(
+                    x=midpoint,
+                    y=(y_min + y_max) / 2 * 0.9,  # Position text slightly above the center line
+                    s=day_label,  # Display day name and short date
+                    color="black",
+                    fontsize=18,
+                    ha="center",
+                    va="center",
+                    zorder=6,
+                    bbox=dict(facecolor='white', alpha=0.6, boxstyle='round,pad=0.2')  # Optional: adds a background
+                )
 
             fig.tight_layout()
             buf = io.BytesIO()

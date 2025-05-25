@@ -11,6 +11,7 @@ from hec.core.app_logging import start_logger
 from hec.core.app_state import GLOBAL_APP_STATE
 from hec.core.tariff_manager import initialize_tariff_manager
 from hec.logic_engine import scheduled_tasks
+from hec.logic_engine.system_mediator import SystemMediator
 
 try:
     APP_CONFIG = load_app_config()
@@ -43,7 +44,12 @@ def run_application():
     p1_meter_client, inverter_client, evcc_client = initialize_external_clients(APP_CONFIG)
 
     # --- POPULATE APP STATE ---
+    GLOBAL_APP_STATE.set_db_handler(db_handler)
+    GLOBAL_APP_STATE.load_persisted_settings()
     populate_app_state(db_handler, APP_CONFIG, evcc_client)
+
+    # --- INITIALIZE SYSTEM MEDIATOR ---
+    system_mediator = SystemMediator(APP_CONFIG, evcc_client, inverter_client)
 
     # --- START API SERVER ---
     api_thread = None
@@ -62,7 +68,7 @@ def run_application():
     run_scheduler_in_background = APP_CONFIG.get('scheduler', {}).get('run_in_background', True)
     scheduler = setup_scheduler(APP_CONFIG, run_in_background=run_scheduler_in_background)
     scheduled_tasks.register_all_jobs(scheduler, db_handler, APP_CONFIG, p1_meter_client, inverter_client,
-                                      evcc_client, tariff_manager, fetch_entsoe, fetch_elia)
+                                      evcc_client, tariff_manager, system_mediator, fetch_entsoe, fetch_elia)
 
     logger.info("Starting scheduler...")
     try:

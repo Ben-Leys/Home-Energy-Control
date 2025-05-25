@@ -35,6 +35,7 @@ def _fetch_raw_data(base_url: str, dataset_id: str, date_str: str, url_params: s
         results = data.get('results', [])
         if not results:
             logger.warning(f"Elia API ({dataset_id}): No results found for date {date_str}.")
+            logger.debug(f"Received data: {data}")
             return []  # Return empty list if no data, not None
 
         # Check for API specific errors in the results structure
@@ -118,19 +119,19 @@ def fetch_and_process_forecast(target_day_local: datetime, app_config: dict, for
 
 
 # --- For testing this module directly ---
-if __name__ == '__main__':
-    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(name)s - %(message)s')
-    test_config = {"elia": {"api_base_url": "https://opendata.elia.be/api/explore/v2.1/catalog/datasets",
-                            "timezone": "UTC", "dataset_solar": "ods087", "dataset_wind": "ods086",
-                            "dataset_grid_load": "ods002"}}
-
-    test_target_day = (datetime.now(timezone.utc) + timedelta(days=1)).replace(hour=0, minute=0, second=0,
-                                                                               microsecond=0)
-
-    for f_type in ["solar", "wind", "grid_load"]:
-        print(f"\nFetching {f_type.capitalize()} Forecast for {test_target_day.strftime('%Y-%m-%d')}:")
-        result = fetch_and_process_forecast(test_target_day, test_config, f_type)
-        if result:
-            print(f"  Fetched {len(result)} records. Example: {result[0]}")
-        else:
-            print(f"  Failed or no {f_type} data.")
+# if __name__ == '__main__':
+#     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(name)s - %(message)s')
+#     test_config = {"elia": {"api_base_url": "https://opendata.elia.be/api/explore/v2.1/catalog/datasets",
+#                             "timezone": "UTC", "dataset_solar": "ods087", "dataset_wind": "ods086",
+#                             "dataset_grid_load": "ods002"}}
+#
+#     test_target_day = (datetime.now(timezone.utc) + timedelta(days=1)).replace(hour=0, minute=0, second=0,
+#                                                                                microsecond=0)
+#
+#     for f_type in ["solar", "wind", "grid_load"]:
+#         print(f"\nFetching {f_type.capitalize()} Forecast for {test_target_day.strftime('%Y-%m-%d')}:")
+#         result = fetch_and_process_forecast(test_target_day, test_config, f_type)
+#         if result:
+#             print(f"  Fetched {len(result)} records. Example: {result[0]}")
+#         else:
+#             print(f"  Failed or no {f_type} data.")

@@ -35,7 +35,7 @@ class InverterSmaModbusClient:
         self.port = port
         self.unit_id = modbus_unit_id
         self.grid_guard_code = grid_guard_code
-        self.standard_power_limit = standard_power_limit
+        self.standard_power_limit = standard_power_limit  # Watts
         self.timeout = timeout_sec
         self.client: Optional[ModbusTcpClient] = None
         self.is_grid_guard_logged_in: bool = False  # Track login state
@@ -205,38 +205,36 @@ class InverterSmaModbusClient:
                 return True
             elif status_code == 2:  # User level login
                 logger.info("InverterSMA: Grid Guard logged in at 'User' level. Insufficient for power limit.")
-                self.is_grid_guard_logged_in = False
-                return False
             else:  # Not logged in (0) or unknown status
                 logger.info("InverterSMA: Grid Guard not logged in. Attempting login...")
 
-                try:
-                    payload_regs = self.client.convert_to_registers(
-                        self.grid_guard_code,
-                        data_type=self.client.DATATYPE.UINT32
-                    )
+            self.is_grid_guard_logged_in = False
+            try:
+                payload_regs = self.client.convert_to_registers(
+                    self.grid_guard_code,
+                    data_type=self.client.DATATYPE.UINT32
+                )
 
-                    wr = self.client.write_registers(SMA_REG_GRID_GUARD_LOGIN, payload_regs, slave=self.unit_id)
-                    if wr.isError():
-                        logger.warning(f"InverterSMA: Modbus Error writing Grid Guard code: {wr}")
-                        if isinstance(wr, ModbusIOException):
-                            self.disconnect()
-                    else:
-                        logger.info("InverterSMA: Grid Guard code sent. Re-checking status shortly...")
-                        time.sleep(3)  # Wait for inverter to process login
-                        continue
-                except ModbusIOException as e:
-                    logger.warning(f"InverterSMA: ModbusIOException during Grid Guard login write: {e}. Disconnecting.")
-                    self.disconnect()
-                    return False
-                except Exception as e:
-                    logger.error(f"InverterSMA: Unexpected error writing Grid Guard login: {e}", exc_info=True)
-                    return False
+                wr = self.client.write_registers(SMA_REG_GRID_GUARD_LOGIN, payload_regs, slave=self.unit_id)
+                if wr.isError():
+                    logger.warning(f"InverterSMA: Modbus Error writing Grid Guard code: {wr}")
+                    if isinstance(wr, ModbusIOException):
+                        self.disconnect()
+                else:
+                    logger.info("InverterSMA: Grid Guard code sent. Re-checking status shortly...")
+                    continue
+            except ModbusIOException as e:
+                logger.warning(f"InverterSMA: ModbusIOException during Grid Guard login write: {e}. Disconnecting.")
+                self.disconnect()
+                return False
+            except Exception as e:
+                logger.error(f"InverterSMA: Unexpected error writing Grid Guard login: {e}", exc_info=True)
+                return False
 
             if attempt < max_login_attempts - 1:
-                time.sleep(2)  # Short delay before retrying status read
+                time.sleep(2)  # Short delay before retrying
 
-        logger.error("InverterSMA: Failed to log in to Grid Guard after multiple attempts.")
+        logger.error(f"InverterSMA: Failed to log in to Grid Guard after {max_login_attempts} attempts.")
         self.is_grid_guard_logged_in = False
         return False
 
@@ -291,49 +289,49 @@ class InverterSmaModbusClient:
 
 
 # Standalone Test
-if __name__ == '__main__':
-    logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-
-    TEST_INV_HOST = "192.168.0.141"
-    TEST_INV_PORT = 502
-    TEST_INV_UNIT_ID = 3
-    TEST_GRID_GUARD_CODE = 1285929600
-    TEST_STANDARD_POWER_LIMIT = 7000
-
-    print(f"--- Testing InverterSmaModbusClient with host: {TEST_INV_HOST} ---")
-    inv_client = InverterSmaModbusClient(
-        host=TEST_INV_HOST,
-        port=TEST_INV_PORT,
-        modbus_unit_id=TEST_INV_UNIT_ID,
-        grid_guard_code=TEST_GRID_GUARD_CODE
-    )
-
-    if inv_client.client and inv_client.client.is_socket_open():
-        print("\n--- Reading Live Data ---")
-        live_data = inv_client.get_live_data()
-        if live_data:
-            print(f"Live Data: {live_data}")
-        else:
-            print("Failed to get live data.")
-
-        print("\n--- Testing Power Limit (will attempt Grid Guard Login) ---")
-        test_limit_value = 6900  # Watts
-        print(f"Attempting to set limit to: {test_limit_value}W")
-        success_set = inv_client.set_active_power_limit(test_limit_value)
-        if success_set:
-            time.sleep(3)
-            print(f"Set limit command sent. Current limit read: {inv_client.get_current_power_limit_setpoint()}W")
-
-            time.sleep(10)
-            print(f"\nAttempting to set limit to: {TEST_STANDARD_POWER_LIMIT}W (remove limit)")
-            success_remove = inv_client.set_active_power_limit(TEST_STANDARD_POWER_LIMIT)
-            if success_remove:
-                print(f"Remove limit command sent. Current limit: {inv_client.get_current_power_limit_setpoint()}W")
-            else:
-                print(f"Failed to set limit to {TEST_STANDARD_POWER_LIMIT}W.")
-        else:
-            print(f"Failed to set limit to {test_limit_value}W.")
-
-        inv_client.disconnect()
-    else:
-        print(f"Failed to connect to inverter at {TEST_INV_HOST} during initialization.")
+# if __name__ == '__main__':
+#     logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+#
+#     TEST_INV_HOST = "192.168.0.141"
+#     TEST_INV_PORT = 502
+#     TEST_INV_UNIT_ID = 3
+#     TEST_GRID_GUARD_CODE = 1285929600
+#     TEST_STANDARD_POWER_LIMIT = 7000
+#
+#     print(f"--- Testing InverterSmaModbusClient with host: {TEST_INV_HOST} ---")
+#     inv_client = InverterSmaModbusClient(
+#         host=TEST_INV_HOST,
+#         port=TEST_INV_PORT,
+#         modbus_unit_id=TEST_INV_UNIT_ID,
+#         grid_guard_code=TEST_GRID_GUARD_CODE
+#     )
+#
+#     if inv_client.client and inv_client.client.is_socket_open():
+#         print("\n--- Reading Live Data ---")
+#         live_data = inv_client.get_live_data()
+#         if live_data:
+#             print(f"Live Data: {live_data}")
+#         else:
+#             print("Failed to get live data.")
+#
+#         print("\n--- Testing Power Limit (will attempt Grid Guard Login) ---")
+#         test_limit_value = 6900  # Watts
+#         print(f"Attempting to set limit to: {test_limit_value}W")
+#         success_set = inv_client.set_active_power_limit(test_limit_value)
+#         if success_set:
+#             time.sleep(3)
+#             print(f"Set limit command sent. Current limit read: {inv_client.get_current_power_limit_setpoint()}W")
+#
+#             time.sleep(10)
+#             print(f"\nAttempting to set limit to: {TEST_STANDARD_POWER_LIMIT}W (remove limit)")
+#             success_remove = inv_client.set_active_power_limit(TEST_STANDARD_POWER_LIMIT)
+#             if success_remove:
+#                 print(f"Remove limit command sent. Current limit: {inv_client.get_current_power_limit_setpoint()}W")
+#             else:
+#                 print(f"Failed to set limit to {TEST_STANDARD_POWER_LIMIT}W.")
+#         else:
+#             print(f"Failed to set limit to {test_limit_value}W.")
+#
+#         inv_client.disconnect()
+#     else:
+#         print(f"Failed to connect to inverter at {TEST_INV_HOST} during initialization.")

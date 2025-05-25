@@ -113,7 +113,7 @@ def _parse_entsoe_price_xml(xml_content: bytes) -> Optional[List[PricePoint]]:
         # Common reason text when no data is available yet: No matching data found.
         if "No matching data found" in reason_element.text or \
                 "No data available for the requested period" in reason_element.text:
-            logger.warning(f"ENTSO-E: Data not yet available. Reason: {reason_element.text}")
+            logger.info(f"ENTSO-E: Data not yet available. Reason: {reason_element.text}")
             return []  # Return empty list to signify "not yet available" rather than a hard error
         else:
             logger.error(f"ENTSO-E API returned an error/reason: {reason_element.text}")
@@ -241,7 +241,6 @@ def _parse_resolution_to_minutes(resolution_str: str) -> int:
     else:
         logger.warning(f"Unknown resolution string: {resolution_str}. Defaulting to 60 minutes.")
         return 60
-
 
 # --- Example for testing ---
 # if __name__ == '__main__':
