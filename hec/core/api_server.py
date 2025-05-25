@@ -25,7 +25,7 @@ def get_app_state_api():
         if isinstance(value, datetime):
             serializable_state[key] = value.isoformat()
         elif isinstance(value, c.AppStatus) or \
-                isinstance(value, c.AppManualState) or \
+                isinstance(value, c.MediatorGoal) or \
                 isinstance(value, c.OperatingMode) or \
                 isinstance(value, c.InverterStatus) or \
                 isinstance(value, c.InverterManualState) or \

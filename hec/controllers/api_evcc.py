@@ -1,11 +1,11 @@
 # hec/controllers/api_evcc.py
 import json
 import logging
+import time
 from datetime import datetime, timezone
+from typing import Any, Dict, Optional
 
 import requests
-import time
-from typing import Optional, Dict, Any, Union
 
 from hec.core import constants as c
 
@@ -16,12 +16,12 @@ class EvccApiClient:
     def __init__(self, base_api_url: str, default_loadpoint_id: int = 1,
                  max_current: int = 32, request_timeout: int = 10):
         """
-        Client for interacting with the EVCC API.
+        Client for interacting with the EVCC API (currently only 1 loadpoint).
 
         Args:
             base_api_url (str): The base URL of the EVCC API (e.g., "http://localhost:7070/api").
             default_loadpoint_id (int): The default loadpoint ID to interact with.
-            max_current (int): The maximum current the loadpoint accepts (currently only 1 loadpoint).
+            max_current (int): The maximum current the loadpoint accepts.
             request_timeout (int): Timeout in seconds for HTTP requests.
         """
         if not base_api_url.endswith('/'):
@@ -54,7 +54,7 @@ class EvccApiClient:
         """Constructs the URL for a specific loadpoint."""
         return f"{self.base_url}loadpoints/{loadpoint_id or self.default_loadpoint_id}"
 
-    def get_current_state(self) -> Optional[Dict[str, Any]]:
+    def get_current_state_data(self) -> Optional[Dict[str, Any]]:
         """
         Fetches the full current state from EVCC's /api/state endpoint.
 
@@ -129,14 +129,20 @@ class EvccApiClient:
                 self.is_available = False
             return False
 
-    def set_charge_mode(self, mode: str, loadpoint_id: Optional[int] = None) -> bool:
+    def set_charge_mode(self, mode: c.EVCCManualState, loadpoint_id: Optional[int] = None) -> bool:
         """Sets the charging mode (e.g., 'off', 'pv', 'minpv', 'now')."""
-        valid_modes = [c.EVCCManualState.EVCC_CMD_STATE_OFF.value, c.EVCCManualState.EVCC_CMD_STATE_PV.value,
-                       c.EVCCManualState.EVCC_CMD_STATE_MINPV.value, c.EVCCManualState.EVCC_CMD_STATE_NOW.value]
+        if not isinstance(mode, c.EVCCManualState):
+            logger.warning(f"EVCC API: Invalid charge mode type '{type(mode)}'. Expected c.EVCCManualState.")
+            return False
+
+        valid_modes = {c.EVCCManualState.EVCC_CMD_STATE_OFF, c.EVCCManualState.EVCC_CMD_STATE_PV,
+                       c.EVCCManualState.EVCC_CMD_STATE_MINPV, c.EVCCManualState.EVCC_CMD_STATE_NOW}
         if mode not in valid_modes:
             logger.warning(f"EVCC API: Invalid charge mode '{mode}' requested.")
             return False
-        return self._send_command(f"/mode/{mode}", loadpoint_id=loadpoint_id)
+
+        # Send mode.value to the command
+        return self._send_command(f"/mode/{mode.value}", loadpoint_id=loadpoint_id)
 
     def set_target_soc(self, soc_percent: int, loadpoint_id: Optional[int] = None) -> bool:
         """Sets the target State of Charge."""
@@ -174,10 +180,10 @@ class EvccApiClient:
     def sequence_force_pv_charging(self, loadpoint_id: Optional[int] = None) -> bool:
         """Attempts a sequence to start PV charging immediately instead of waiting for min_time."""
         logger.info("EVCC API: Initiating sequence for PV charging (minpv -> pv).")
-        if not self.set_charge_mode(c.EVCCManualState.EVCC_CMD_STATE_MINPV.name, loadpoint_id):
+        if not self.set_charge_mode(c.EVCCManualState.EVCC_CMD_STATE_MINPV, loadpoint_id):
             return False
-        time.sleep(1)  # Short delay for EVCC to process mode change
-        return self.set_charge_mode(c.EVCCManualState.EVCC_CMD_STATE_PV.name, loadpoint_id)
+        time.sleep(3)  # Short delay for EVCC to process mode change
+        return self.set_charge_mode(c.EVCCManualState.EVCC_CMD_STATE_PV, loadpoint_id)
 
 
 # Example Usage (for testing this module directly)

@@ -1,8 +1,8 @@
 # hec/core/app_initializer.py
 import logging
-from datetime import datetime, timedelta, time, date, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
-from typing import Optional, Dict
+from typing import Dict, Optional
 
 import yaml
 from apscheduler.executors.pool import ThreadPoolExecutor
@@ -15,7 +15,7 @@ from hec.controllers.api_evcc import EvccApiClient
 from hec.core import constants as c
 from hec.data_sources import api_p1_meter_homewizard
 from hec.database_ops.db_handler import DatabaseHandler
-from hec.logic_engine.data_processors import populate_appstate_with_price_data, populate_appstate_with_forecast_data
+from hec.logic_engine.data_processors import populate_appstate_with_forecast_data, populate_appstate_with_price_data
 from hec.logic_engine.scheduled_tasks import task_poll_evcc_state
 
 logger = logging.getLogger(__name__)
@@ -125,11 +125,11 @@ def initialize_external_clients(app_config: dict):
             }
             client = modbus_sma_inverter.InverterSmaModbusClient(**kwargs)
             status = client.get_operational_status()
-            if status != c.InverterStatus.UNKNOWN:
+            if status != c.InverterStatus.UNKNOWN and status != c.InverterStatus.OFFLINE:
                 inverter_client = client
                 logger.info(f"Inverter client status: {status.value.lower()}")
             else:
-                logger.warning(f"Inverter client unknown at startup.")
+                logger.warning(f"Inverter client unknown or offline at startup.")
     except Exception as e:
         logger.error(f"Error initializing Inverter SMA Modbus client: {e}", exc_info=True)
 
@@ -141,10 +141,12 @@ def initialize_external_clients(app_config: dict):
             evcc_client = EvccApiClient(
                 base_api_url=api_url,
                 default_loadpoint_id=evcc_config.get('default_loadpoint_id'),
+                max_current=evcc_config.get('max_current'),
                 request_timeout=evcc_config.get('request_timeout_seconds')
             )
             if not evcc_client.is_available:
                 logger.warning("EVCC client initialized, but EVCC API seems unavailable at startup.")
+                evcc_client = None
         else:
             logger.warning("EVCC API URL not configured. EVCC client will be disabled.")
     except Exception as e:

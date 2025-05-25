@@ -11,9 +11,9 @@ class AppStatus(Enum):
     SHUTDOWN = "Shutdown"   # Application is in the process of shutting down
 
 
-class AppManualState(Enum):
+class MediatorGoal(Enum):
     NO_CHARGING = "no charging"
-    CHARGE_WHEN_ANY_SOLAR_POWER = "charge when any solar power"
+    CHARGE_WITH_MINIMUM_SOLAR_POWER = "charge when any solar power"
     CHARGE_WITH_ONLY_EXCESS_SOLAR_POWER = "charge with excess solar power"
     CHARGE_WHEN_SELL_PRICE_NEGATIVE = "charge when sell price negative"
     CHARGE_WHEN_BUY_PRICE_NEGATIVE = "charge when buy price negative"

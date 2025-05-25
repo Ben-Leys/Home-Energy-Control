@@ -1,9 +1,12 @@
 # database_ops/db_handler.py
+import json
 import logging
 import sqlite3
 from datetime import datetime, timezone, timedelta, time, date
+from enum import Enum
 from pathlib import Path
 from typing import List, Optional, Dict, Any
+from hec.core import constants as c
 
 from hec.core.models import PricePoint, NetElectricityPriceInterval
 
@@ -142,6 +145,17 @@ class DatabaseHandler:
                         """)
             logger.info("Table 'inverter_log' checked/created.")
 
+            # --- Settings table ---
+            cursor.execute("""
+                        CREATE TABLE IF NOT EXISTS app_settings (
+                            setting_key TEXT PRIMARY KEY,
+                            setting_value TEXT NOT NULL,
+                            value_type TEXT NOT NULL,
+                            last_updated_utc TEXT NOT NULL
+                        );
+                    """)
+            logger.info("Table 'app_settings' checked/created.")
+
             conn.commit()
         except sqlite3.Error as e:
             logger.error(f"Error initializing database tables: {e}", exc_info=True)
@@ -268,8 +282,8 @@ class DatabaseHandler:
             p1_data.get('active_current_l2_a'),
             p1_data.get('active_current_l3_a'),
             p1_data.get('active_power_average_w'),
-            p1_data.get('montly_power_peak_w'),
-            p1_data.get('montly_power_peak_timestamp')
+            p1_data.get('montly_power_peak_w'),  # P1_meter spelling error
+            p1_data.get('montly_power_peak_timestamp')  # P1_meter spelling error
         )
 
         sql = """
@@ -754,7 +768,7 @@ class DatabaseHandler:
                 FROM inverter_log
                 WHERE timestamp_utc >= ? 
                   AND timestamp_utc < ? 
-                ORDER BY timestamp_utc ASC;
+                ORDER BY timestamp_utc;
             """
             cursor.execute(sql, (start_utc_str, end_utc_str))
             rows = cursor.fetchall()
@@ -773,6 +787,165 @@ class DatabaseHandler:
 
         return results
 
+    def save_setting(self, key: str, value: Any) -> bool:
+        """Saves or updates a single application setting in the database."""
+        now_utc_str = datetime.now(timezone.utc).isoformat()
+
+        try:
+            if isinstance(value, bool):
+                value_type_str = "bool"
+                value_json_str = json.dumps(value)
+            elif isinstance(value, int):
+                value_type_str = "int"
+                value_json_str = json.dumps(value)
+            elif isinstance(value, float):
+                value_type_str = "float"
+                value_json_str = json.dumps(value)
+            elif isinstance(value, str):
+                value_type_str = "str"
+                value_json_str = json.dumps(value)
+            elif isinstance(value, Enum):  # Handle Enum types
+                value_type_str = f"enum:{value.__class__.__name__}"  # e.g., "enum:AppStatus"
+                value_json_str = json.dumps(value.name)  # Store the Enum member's name
+            elif isinstance(value, (dict, list)):
+                value_type_str = "dict" if isinstance(value, dict) else "list"
+                value_json_str = json.dumps(value)  # Directly serialize dicts/lists
+            elif value is None:
+                value_type_str = "none"
+                value_json_str = json.dumps(None)
+            else:
+                logger.warning(
+                    f"Attempting to save unsupported type for setting '{key}': {type(value)}. Storing as string.")
+                value_type_str = "str_fallback"
+                value_json_str = json.dumps(str(value))
+
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            sql = """
+                INSERT OR REPLACE INTO app_settings 
+                (setting_key, setting_value, value_type, last_updated_utc)
+                VALUES (?, ?, ?, ?);
+            """
+            cursor.execute(sql, (key, value_json_str, value_type_str, now_utc_str))
+            conn.commit()
+            logger.info(f"Setting '{key}' saved to database with value type '{value_type_str}'.")
+            return True
+        except sqlite3.Error as e:
+            logger.error(f"Error saving setting '{key}' to database: {e}", exc_info=True)
+            return False
+        except json.JSONDecodeError as e:
+            logger.error(f"Error serializing value for setting '{key}': {e}", exc_info=True)
+            return False
+
+    def load_setting(self, key: str, default: Optional[Any] = None) -> Optional[Any]:
+        """Loads a single application setting from the database."""
+        try:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            sql = "SELECT setting_value, value_type FROM app_settings WHERE setting_key = ?;"
+            cursor.execute(sql, (key,))
+            row = cursor.fetchone()
+
+            if row:
+                value_json_str, value_type_str = row["setting_value"], row["value_type"]
+
+                if value_type_str == "bool":
+                    return json.loads(value_json_str)
+                elif value_type_str == "int":
+                    return json.loads(value_json_str)
+                elif value_type_str == "float":
+                    return json.loads(value_json_str)
+                elif value_type_str == "str":
+                    return json.loads(value_json_str)
+                elif value_type_str.startswith("enum:"):
+                    enum_class_name = value_type_str.split(":")[1]
+                    enum_member_name = json.loads(value_json_str)
+                    # Attempt to find the Enum class in constants module
+                    if hasattr(c, enum_class_name):
+                        enum_class = getattr(c, enum_class_name)
+                        if hasattr(enum_class, enum_member_name):
+                            return getattr(enum_class, enum_member_name)
+                        else:
+                            logger.warning(
+                                f"Enum member '{enum_member_name}' not found in Enum class '{enum_class_name}' "
+                                f"for setting '{key}'. Returning default.")
+                    else:
+                        logger.warning(
+                            f"Enum class '{enum_class_name}' not found in constants for setting '{key}'. "
+                            f"Returning default.")
+                    return default  # Fallback to default if enum deserialization fails
+                elif value_type_str in ["dict", "list"]:
+                    return json.loads(value_json_str)
+                elif value_type_str == "none":
+                    return None
+                elif value_type_str == "str_fallback":
+                    # This was stored as str(value), try to load as string
+                    return json.loads(value_json_str)
+                else:
+                    logger.warning(f"Unknown value_type '{value_type_str}' for setting '{key}'. Returning default.")
+                    return default
+            else:
+                # logger.debug(f"Setting '{key}' not found in database. Returning default.")
+                return default
+        except sqlite3.Error as e:
+            logger.error(f"Error loading setting '{key}' from database: {e}", exc_info=True)
+            return default
+        except json.JSONDecodeError as e:
+            logger.error(f"Error deserializing value for setting '{key}': {e}", exc_info=True)
+            return default
+
+    def load_all_settings(self) -> Dict[str, Any]:
+        """Loads all settings from the database into a dictionary."""
+        all_settings_from_db = {}
+        try:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            sql = "SELECT setting_key, setting_value, value_type FROM app_settings;"
+            cursor.execute(sql)
+            rows = cursor.fetchall()
+
+            for row in rows:
+                key, value_json_str, value_type_str = row["setting_key"], row["setting_value"], row["value_type"]
+                value = None
+                try:
+                    if value_type_str == "bool":
+                        value = json.loads(value_json_str)
+                    elif value_type_str == "int":
+                        value = json.loads(value_json_str)
+                    elif value_type_str == "float":
+                        value = json.loads(value_json_str)
+                    elif value_type_str == "str":
+                        value = json.loads(value_json_str)
+                    elif value_type_str.startswith("enum:"):
+                        enum_class_name = value_type_str.split(":")[1]
+                        enum_member_name = json.loads(value_json_str)
+                        if hasattr(c, enum_class_name):
+                            enum_class = getattr(c, enum_class_name)
+                            if hasattr(enum_class, enum_member_name):
+                                value = getattr(enum_class, enum_member_name)
+                    elif value_type_str in ["dict", "list"]:
+                        value = json.loads(value_json_str)
+                    elif value_type_str == "none":
+                        value = None
+                    elif value_type_str == "str_fallback":
+                        value = json.loads(value_json_str)
+
+                    if value is not None or value_type_str == "none":  # Include None if it was explicitly stored
+                        all_settings_from_db[key] = value
+                    else:  # Deserialization failed for some reason for this type
+                        logger.warning(
+                            f"Could not deserialize setting '{key}' of type '{value_type_str}' "
+                            f"during load_all_settings.")
+
+                except Exception as e_inner:
+                    logger.error(
+                        f"Error deserializing setting '{key}' (type: {value_type_str}) "
+                        f"during load_all_settings: {e_inner}")
+
+            logger.info(f"Loaded {len(all_settings_from_db)} settings from database.")
+        except sqlite3.Error as e:
+            logger.error(f"Error loading all settings from database: {e}", exc_info=True)
+        return all_settings_from_db
 
 # if __name__ == '__main__':
 #     logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')

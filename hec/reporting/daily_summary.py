@@ -113,8 +113,8 @@ class DailySummaryGenerator:
         negative_html = ""
         if negative_hours:
             negative_html = (
-                f"<td style='padding:4px;'>➖ Negative hrs:{negative_str}<br>"
-                f"<span color:red;'>Shut off panels saves € {negative_income:,.2f}</span></td>"
+                f"<td style='padding:4px;'>➖ Negative hrs: {negative_str}<br>"
+                f"<span color:red;'>Shut off panels saves: € {negative_income:,.2f}</span></td>"
             )
         else:
             negative_html = f"<td></td>"

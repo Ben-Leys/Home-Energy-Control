@@ -173,7 +173,7 @@ def _calculate_average_power_from_samples(
 
 def update_rolling_averages():
     """
-    Called periodically by scheduled task.
+    Called from p1_meter polling task.
     Updates recent data dequeue and calculates rolling averages for AppState.
     """
     _initialize_rolling_average_structures_if_needed()
