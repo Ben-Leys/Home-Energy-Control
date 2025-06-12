@@ -154,6 +154,12 @@ def _calculate_average_power_from_samples(
     if actual_duration_seconds <= 0:  # Avoid division by zero
         return None
 
+    # Sanity check (if meter resets, delta_energy could be negative = normal for solar inverter)
+    if delta_energy < 0:
+        logger.info(f"Negative energy delta ({delta_energy}) detected for window {window_seconds}s. "
+                    f"Start: {val_start} @ {ts_start}, End: {val_end} @ {ts_end}. New meter or new day.")
+        return None
+
     # Average power = (change in energy * conversion_factor) / (change in time)
     # Example: if delta_energy is in kWh, and we want Watts:
     # (delta_energy_kwh * 1000 Wh/kWh) / (actual_duration_seconds / 3600 s/h)
@@ -161,12 +167,6 @@ def _calculate_average_power_from_samples(
     # Unit_conversion_factor is for energy (1000 if input is kWh, and we want Wh for power calc)
     # Power (Watts) = (delta_energy_in_Wh) / (duration_in_hours)
     power = (delta_energy * unit_conversion_factor) / (actual_duration_seconds / 3600)
-
-    # Sanity check (if meter resets, delta_energy could be negative)
-    if delta_energy < 0:
-        logger.warning(f"Negative energy delta ({delta_energy}) detected for window {window_seconds}s. "
-                       f"Start: {val_start} @ {ts_start}, End: {val_end} @ {ts_end}. This could be a meter error.")
-        return None
 
     return round(power, 3)
 

@@ -17,31 +17,31 @@ class AppState:
     def __init__(self):
         self.current_values = {
             # General app values
-            "app_state": c.AppStatus.STARTING,  # DONE
+            "app_state": c.AppStatus.STARTING,
             "app_operating_mode": c.OperatingMode.MODE_MANUAL,
             "app_mediator_goal": c.MediatorGoal.NO_CHARGING,
             # P1 meter data, recent import/export samples and averages
-            "p1_meter_data": None,  # DONE
-            "p1_meter_last_stored_boundary_slot_utc_iso": None,  # DONE
-            "recent_p1_import_kwh_samples": None,  # DONE
-            "recent_p1_export_kwh_samples": None,  # DONE
-            "average_grid_import_watts": None,  # DONE
-            "average_grid_export_watts": None,  # DONE
+            "p1_meter_data": None,
+            "p1_meter_last_stored_boundary_slot_utc_iso": None,
+            "recent_p1_import_kwh_samples": None,
+            "recent_p1_export_kwh_samples": None,
+            "average_grid_import_watts": None,
+            "average_grid_export_watts": None,
             # Inverter data, recent import/export samples and averages
-            "inverter_data": {"operational_status": c.InverterStatus.UNKNOWN},  # DONE
+            "inverter_data": {"operational_status": c.InverterStatus.UNKNOWN},
             "inverter_manual_state": None,
             "inverter_manual_limit": None,
-            "recent_solar_production_wh_samples": None,  # DONE
-            "average_solar_production_watts": None,  # DONE
+            "recent_solar_production_wh_samples": None,
+            "average_solar_production_watts": None,
             # EV data TODO (Tesla connect?)
             "ev_data": None,
             "ev_charge_status": c.EVChargeStatus.UNKNOWN,
             # Electricity prices and solar, wind and grid_load forecasts
-            "electricity_prices_today": None,  # DONE
-            "electricity_prices_tomorrow": None,  # DONE
-            "forecasts": None,  # DONE
+            "electricity_prices_today": None,
+            "electricity_prices_tomorrow": None,
+            "forecasts": None,
             # EVCC data
-            "evcc_overall_state": None,  # DONE
+            "evcc_overall_state": None,
             "evcc_loadpoint_state": None,
             "evcc_manual_state": None
         }

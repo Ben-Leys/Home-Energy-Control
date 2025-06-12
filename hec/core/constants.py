@@ -12,13 +12,13 @@ class AppStatus(Enum):
 
 
 class MediatorGoal(Enum):
-    NO_CHARGING = "no charging"
-    CHARGE_WITH_MINIMUM_SOLAR_POWER = "charge when any solar power"
-    CHARGE_WITH_ONLY_EXCESS_SOLAR_POWER = "charge with excess solar power"
-    CHARGE_WHEN_SELL_PRICE_NEGATIVE = "charge when sell price negative"
-    CHARGE_WHEN_BUY_PRICE_NEGATIVE = "charge when buy price negative"
-    CHARGE_NOW_WITH_CAPACITY_RATE = "charge now with capacity rate"
-    CHARGE_NOW_NO_CAPACITY_RATE = "charge now no capacity rate"
+    NO_CHARGING = "No charging"
+    CHARGE_WITH_MINIMUM_SOLAR_POWER = "Charge when any solar power"
+    CHARGE_WITH_ONLY_EXCESS_SOLAR_POWER = "Charge with excess solar power"
+    CHARGE_WHEN_SELL_PRICE_NEGATIVE = "Charge when sell price negative"
+    CHARGE_WHEN_BUY_PRICE_NEGATIVE = "Charge when buy price negative"
+    CHARGE_NOW_WITH_CAPACITY_RATE = "Charge now with capacity rate"
+    CHARGE_NOW_NO_CAPACITY_RATE = "Charge now no capacity rate"
 
 
 class OperatingMode(Enum):

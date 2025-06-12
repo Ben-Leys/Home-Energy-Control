@@ -220,6 +220,7 @@ class SystemMediator:
         try:
             # Load point state
             lp = EVCCLoadpointState.from_dict(GLOBAL_APP_STATE.get('evcc_loadpoint_state'))
+            self.new_max_amps = lp.max_current if self.new_max_amps is None else self.new_max_amps
 
             # 2. Only when charging, about to charge or temporarily stopped AND not in CHARGE_NOW_NO_CAPACITY_RATE
             cur_state = GLOBAL_APP_STATE.get('evcc_manual_state', None)
@@ -273,14 +274,18 @@ class SystemMediator:
                     logger.debug(f"Charging stopped because {max_amp} below minimum of {self.evcc_client.min_current}")
 
             if self.new_evcc_state:
-                if self.new_evcc_state.value != lp.mode or self.new_max_amps != lp.max_current:
+                enum_member = self.new_evcc_state
+                if enum_member.value != lp.mode:
                     return True
+            if self.new_max_amps != lp.max_current:
+                return True
             return False
 
         except KeyError as ke:
             logger.error(f"KeyError during amperage calculation: {ke}")
         except AttributeError as ae:
-            logger.error(f"AttributeError during amperage calculation: {ae}")
+            logger.error(f"AttributeError during amperage calculation: {ae} "
+                         f"(self.new_evcc_state.value: {self.new_evcc_state})")
         except TypeError as te:
             logger.error(f"TypeError during amperage calculation: {te}")
         except ValueError as ve:
@@ -354,6 +359,8 @@ class SystemMediator:
                 # 6. Long term import due to short term usage peaks
                 avg_5m_import_w = GLOBAL_APP_STATE.get('average_grid_import_watts').get('5m', 0)
                 avg_5m_prod_w = GLOBAL_APP_STATE.get('average_solar_production_watts').get('5m', 0)
+                avg_5m_import_w = avg_5m_import_w if avg_5m_import_w is not None else 0
+                avg_5m_prod_w = avg_5m_prod_w if avg_5m_prod_w is not None else 0
                 prod_below_limit = avg_5m_prod_w < cur_limit_w - 200 and elapsed >= 5
                 still_importing = avg_5m_import_w - desired_limit_w > 150
                 if avg_5m_import_w is not None and still_importing and not prod_below_limit and elapsed >= 5:
@@ -386,18 +393,28 @@ class SystemMediator:
         if is_daylight(self.app_config):
             inv_data = GLOBAL_APP_STATE.get('inverter_data', {})
             cur_limit_w = inv_data.get('active_power_limit_watts', self.inverter_client.standard_power_limit)
+            if self.new_inv_limit is None:
+                return
             if self.new_inv_limit != cur_limit_w:
-                self.inverter_client.set_active_power_limit(self.new_inv_limit)
+                logger.debug(f"Mediator pushed new inverter limit from {cur_limit_w} to {int(self.new_inv_limit)} W")
+                self.inverter_client.set_active_power_limit(int(self.new_inv_limit))
                 self.last_pv_limit_change_time = datetime.now()
             GLOBAL_APP_STATE.set('inverter_manual_state', self.new_inv_state)
         else:
             logger.info(f"Inverter changes not pushed because outside of daylight.")
 
+    def _execute_evcc_state(self) -> None:
+        if self.new_evcc_state is not None:
+            self.evcc_client.set_charge_mode(self.new_evcc_state)
+            GLOBAL_APP_STATE.set('evcc_manual_state', self.new_evcc_state)
+        if self.new_max_amps is not None:
+            self.evcc_client.set_max_current(self.new_max_amps)
+
     def _calculate_peak_consumption(self) -> bool:
         avg_import_watts = GLOBAL_APP_STATE.get('average_grid_import_watts', {})
-        avg_5m = avg_import_watts.get('5m') if avg_import_watts.get('5m') is not None else 0
-        avg_10m = avg_import_watts.get('10m') if avg_import_watts.get('10m') is not None else 0
-        avg_15m = avg_import_watts.get('15m') if avg_import_watts.get('15m') is not None else 0
+        avg_5m = avg_import_watts.get('5m') / 1000 if avg_import_watts.get('5m') is not None else 0
+        avg_10m = avg_import_watts.get('10m') / 1000 if avg_import_watts.get('10m') is not None else 0
+        avg_15m = avg_import_watts.get('15m') / 1000 if avg_import_watts.get('15m') is not None else 0
 
         # Check if water heater is on
         now = datetime.now()
@@ -468,9 +485,7 @@ class SystemMediator:
             evcc_changes = self._recalculate_charging_amperage()
         if evcc_changes or peak_safety_override:
             logger.info(f"Evcc changes: {evcc_changes}. To push: {self.new_evcc_state} with {self.new_max_amps} A")
-            self.evcc_client.set_max_current(self.new_max_amps)
-            self.evcc_client.set_charge_mode(self.new_evcc_state)
-            GLOBAL_APP_STATE.set('evcc_manual_state', self.new_evcc_state)
+            self._execute_evcc_state()
 
         inverter_changes = False
         if not peak_safety_override:

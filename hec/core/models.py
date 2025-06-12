@@ -1,3 +1,4 @@
+import json
 from dataclasses import dataclass, asdict, field, fields
 from datetime import datetime, timezone
 from typing import Optional, Dict, Any
@@ -33,18 +34,24 @@ class NetElectricityPriceInterval:
         return d
 
     def __repr__(self) -> str:
-        prices = {
-            contract_type: {key: round(value, 6) for key, value in prices.items() if value is not None}
-            for contract_type, prices in (self.net_prices_eur_per_kwh or {}).items()
-        }
-        return (
-            "NEPI: {"
-            f"start: {self.interval_start_local.isoformat()}, "
-            f"minutes: {self.resolution_minutes}, "
-            f"contract: '{self.active_contract_type}', "
-            f"prices: {prices}"
-            "}"
-        )
+        """Returns a JSON-like string representation."""
+        # Convert to a dictionary and use `json.dumps` for consistent formatting
+        as_dict = self.to_dict()
+        return json.dumps(as_dict, indent=None, separators=(',', ':'))
+
+    # def __repr__(self) -> str:
+    #     prices = {
+    #         contract_type: {key: round(value, 6) for key, value in prices.items() if value is not None}
+    #         for contract_type, prices in (self.net_prices_eur_per_kwh or {}).items()
+    #     }
+    #     return (
+    #         '{"NEPI": {'
+    #         f'"start": "{self.interval_start_local.isoformat()}", '
+    #         f'"minutes": {self.resolution_minutes}, '
+    #         f'"contract": "{self.active_contract_type}", '
+    #         f'"prices": {prices}'
+    #         '}}'
+    #     )
 
 
 @dataclass(frozen=True)

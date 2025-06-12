@@ -14,6 +14,10 @@ active_contract:
 energy_supplier:
   fixed:
     buy_price_per_kwh:
+      - start_date: '2025-05-01'
+        value: 0.1166
+      - start_date: '2025-04-01'
+        value: 0.1226
       - start_date: '2025-03-01'
         value: 0.1319
       - start_date: '2025-02-01'
