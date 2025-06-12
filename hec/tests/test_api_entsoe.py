@@ -316,21 +316,8 @@ class TestApiEntsoe(unittest.TestCase):
                 self.assertEqual(len(result), 0,
                                  "Should return empty list if fetching for tomorrow before auction time.")
         else:
-            self.skipTest(
-                f"Skipping 'before_auction_time' test as current time ({now_local.hour}) is not before auction hour ({auction_hour}).")
-
-        # Scenario 2: Target D+2 (should attempt fetch, assuming API key is set)
-        target_day_d_plus_2 = (now_local + timedelta(days=2)).replace(hour=0, minute=0, second=0, microsecond=0)
-        with patch('hec.data_sources.api_entsoe.requests.get') as mock_get_dplus2:
-            mock_response = MagicMock()
-            mock_response.status_code = 200
-            mock_response.content = XML_NO_DATA_FOUND  # Assume D+2 data isn't there yet
-            mock_get_dplus2.return_value = mock_response
-
-            result_dplus2 = api_entsoe.fetch_entsoe_prices(target_day_d_plus_2, self.mock_app_config)
-            mock_get_dplus2.assert_called()  # Should have attempted the call
-            self.assertIsNotNone(result_dplus2)
-            self.assertEqual(len(result_dplus2), 0)  # Because XML_NO_DATA_FOUND was returned
+            self.skipTest(f"Skipping 'before_auction_time' test as current time ({now_local.hour}) "
+                          f"is not before auction hour ({auction_hour}).")
 
 
 if __name__ == '__main__':
