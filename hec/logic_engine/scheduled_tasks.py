@@ -167,7 +167,7 @@ def task_poll_inverter(db_handler: DatabaseHandler, inv_client: InverterSmaModbu
         return None
 
     status = inv_client.get_operational_status()
-    if status == c.InverterStatus.UNKNOWN and status == c.InverterStatus.OFFLINE:
+    if status == c.InverterStatus.UNKNOWN or status == c.InverterStatus.OFFLINE:
         logger.debug("Inverter poll: Client not available.")
         GLOBAL_APP_STATE.set("inverter_data", None)
         return None
@@ -217,9 +217,8 @@ def task_poll_inverter_for_mediator_update(db_handler: DatabaseHandler, inv_clie
                                            app_config):
     """Poll to update average values for controller calculations."""
     # Avoid running together with standard db_logging task every 15 minutes ?
-    if GLOBAL_APP_STATE.get("inverter_manual_state") == c.InverterManualState.INV_CMD_LIMIT_TO_USE:
-        logger.debug("Running task: Poll inverter for Mediator Update")
-        task_poll_inverter(db_handler, inv_client, app_config, log_to_db=False)
+    logger.debug("Running task: Poll inverter for Mediator Update")
+    task_poll_inverter(db_handler, inv_client, app_config, log_to_db=False)
 
 
 def task_poll_evcc_state(evcc_client: Optional[EvccApiClient]):

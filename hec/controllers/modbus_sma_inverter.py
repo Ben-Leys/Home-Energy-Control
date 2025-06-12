@@ -1,7 +1,8 @@
 # hec/data_sources/inverter_sma_modbus.py
 import logging
 import time
-from datetime import datetime, timezone
+from collections import deque
+from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, Any
 
 # Pymodbus v3.x imports
@@ -39,6 +40,8 @@ class InverterSmaModbusClient:
         self.timeout = timeout_sec
         self.client: Optional[ModbusTcpClient] = None
         self.is_grid_guard_logged_in: bool = False  # Track login state
+        self.last_grid_guard_login: Optional[datetime] = None  # Track last login time
+        self.power_limit_timestamps = deque(maxlen=4)  # Track power limit change timestamps
 
         self._connect()  # Attempt initial connection
 
@@ -179,6 +182,7 @@ class InverterSmaModbusClient:
     def check_and_perform_grid_guard_login_if_needed(self, force_login: bool = False) -> bool:
         """
         Checks Grid Guard login status and attempts to log in if not already, or if force_login is True.
+        Logs out and logs in again if the last login was more than an hour ago.
         Required before writing to protected registers (like power limit).
         Returns True if logged in (or login successful), False otherwise.
         """
@@ -188,6 +192,11 @@ class InverterSmaModbusClient:
 
         if not self._connect() or not self.client:
             return False
+
+        now = datetime.now()
+        if self.last_grid_guard_login and now - self.last_grid_guard_login > timedelta(hours=1):
+            logger.info("InverterSMA: Last Grid Guard login expired. Logging out.")
+            self.is_grid_guard_logged_in = False  # Force re-login
 
         if not force_login and self.is_grid_guard_logged_in:
             logger.debug("InverterSMA: Grid Guard already marked as logged in.")
@@ -249,8 +258,14 @@ class InverterSmaModbusClient:
         Returns:
             bool: True if limit was set successfully, False otherwise.
         """
-        if not (0 <= limit_watts <= self.standard_power_limit):  # Allow slightly above for safety
+        if not (0 <= limit_watts <= self.standard_power_limit):
             logger.error(f"InverterSMA: Invalid power limit {limit_watts} W.")
+            return False
+
+        # Enforce rate limiting
+        now = datetime.now()
+        if len(self.power_limit_timestamps) >= 4 and now - self.power_limit_timestamps[0] < timedelta(minutes=2):
+            logger.error("InverterSMA: Rate limit exceeded for setting power limit. Try again later.")
             return False
 
         if not self.check_and_perform_grid_guard_login_if_needed():
@@ -278,6 +293,7 @@ class InverterSmaModbusClient:
                 return False
 
             logger.info(f"InverterSMA: Successfully sent command to set power limit to {limit_watts}W.")
+            self.power_limit_timestamps.append(now)
             return True
         except ModbusIOException as e:
             logger.warning(f"InverterSMA: ModbusIOException during power limit write: {e}. Disconnecting.")

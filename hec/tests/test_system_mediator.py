@@ -225,7 +225,9 @@ class TestSystemMediatorFunctional(unittest.TestCase):
         prices = create_sample_price_intervals(start_time, 4, 15, buy_price=0.24, sell_price=0.08)
         GLOBAL_APP_STATE.set('electricity_prices_today', prices)
         GLOBAL_APP_STATE.set('p1_meter_data', {"active_power_w": 200, "monthly_power_peak_w": 2500})
-
+        GLOBAL_APP_STATE.set('evcc_loadpoint_state',
+                             EVCCLoadpointState(is_connected=False, is_charging=False, charge_current=0, max_current=32,
+                                                mode="pv").to_dict())
         self.mediator.run_system_mediation_logic()
 
         # Assert that EVCC client was told to go to "off"
