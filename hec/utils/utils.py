@@ -164,7 +164,7 @@ def send_email_with_attachments(
 
     try:
         port = smtp_config.get('port', 465)
-        server = smtplib.SMTP_SSL(smtp_config['host'], port, timeout=10)
+        server = smtplib.SMTP_SSL(smtp_config['host'], port, timeout=120)
 
         if smtp_config.get('user') and os.getenv('GMAIL_SMTP_PASSWORD'):
             server.login(smtp_config['user'], os.getenv('GMAIL_SMTP_PASSWORD'))

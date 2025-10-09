@@ -2,6 +2,7 @@
 import json
 import logging
 import sqlite3
+from time import sleep
 from datetime import datetime, timezone, timedelta, time, date
 from enum import Enum
 from pathlib import Path
@@ -596,7 +597,6 @@ class DatabaseHandler:
                 continue
 
             peak_w, = row
-            logger.debug(f"Peak w: {max(peak_w, minimum_peak_w)} for {mon}/{year}")
             if peak_w is not None:
                 peaks_kw.append(max(peak_w, minimum_peak_w))
 
@@ -722,24 +722,35 @@ class DatabaseHandler:
             ) VALUES (?, ?, ?, ?, ?, ?); 
         """
 
-        try:
-            conn = self._get_connection()
-            cursor = conn.cursor()
-            cursor.execute(sql, values)
-            conn.commit()
-            if cursor.rowcount > 0:
-                logger.debug(
-                    f"Inverter Log: Successfully stored data for timestamp {inverter_data['timestamp_utc_iso']} in DB.")
-                return True
-            else:
-                logger.warning(f"Inverter Log: Data for timestamp {inverter_data['timestamp_utc_iso']} was not stored.")
+        retries = 5
+        for attempt in range(retries):
+            try:
+                conn = self._get_connection()
+                cursor = conn.cursor()
+                cursor.execute(sql, values)
+                conn.commit()
+                if cursor.rowcount > 0:
+                    logger.debug(
+                        f"Inverter Log: Successfully stored data timestamp {inverter_data['timestamp_utc_iso']} in DB.")
+                    return True
+                else:
+                    logger.warning(f"Inverter Log: Data timestamp {inverter_data['timestamp_utc_iso']} not stored.")
+                    return False
+            except sqlite3.OperationalError as e:
+                if "database is locked" in str(e).lower():
+                    logger.warning(
+                        f"Inverter Log: Database is locked. Retrying {retries - attempt - 1} more time(s)...")
+                    sleep(1)
+                else:
+                    logger.error(f"Inverter Log: OperationalError: {e}", exc_info=True)
+                    return False
+            except sqlite3.Error as e:
+                logger.error(f"Inverter Log: Error storing data in database: {e}", exc_info=True)
                 return False
-        except sqlite3.Error as e:
-            logger.error(f"Inverter Log: Error storing data in database: {e}", exc_info=True)
-            return False
-        except KeyError as e:
-            logger.error(f"Inverter Log: Missing key '{e}' in inverter_data: {inverter_data}", exc_info=True)
-            return False
+            except KeyError as e:
+                logger.error(f"Inverter Log: Missing key '{e}' in inverter_data: {inverter_data}", exc_info=True)
+                return False
+        logger.error("Inverter Log: Failed to store data after multiple attempts.")
 
     def get_inverter__data(self, start_date_local: datetime, end_date_local: datetime) -> List[Dict[str, Any]]:
         """

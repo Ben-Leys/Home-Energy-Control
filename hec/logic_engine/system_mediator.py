@@ -37,6 +37,7 @@ class SystemMediator:
         self.cur_sell_price: Optional[float] = None
         # Charging/evcc
         self.temp_charging_stopped_by_capacity: bool = False
+        self.state_before_charging_stopped: Optional[c.EVCCManualState] = None
         self.new_evcc_state: Optional[c.EVCCManualState] = None
         self.new_max_amps: Optional[int] = None
         self.car_was_connected: bool = False
@@ -47,6 +48,8 @@ class SystemMediator:
         self.last_pv_limit_change_time: Optional[datetime] = None
         self.new_inv_state: Optional[c.InverterManualState] = None
         self.new_inv_limit = None
+        # Peak consumption
+        self.last_email_sent_time: datetime | None = None
 
         self._prepare_mediator_prerequisites(evcc_client, inverter_client)
 
@@ -197,9 +200,10 @@ class SystemMediator:
 
         cur_state = GLOBAL_APP_STATE.get('evcc_manual_state', None)
         is_connected = GLOBAL_APP_STATE.get('evcc_loadpoint_state', {}).get('is_connected', True)
-        if self.new_evcc_state == c.EVCCManualState.EVCC_CMD_STATE_PV and (
+        if (self.new_evcc_state == c.EVCCManualState.EVCC_CMD_STATE_PV and
+                self.car_start_deadline < datetime.now() and (
                 (cur_state != self.new_evcc_state and is_connected) or
-                (not self.car_was_connected and is_connected)):
+                (not self.car_was_connected and is_connected))):
             # Newly decided PV charge mode for EVCC and car is connected: start grace period
             self.car_start_deadline = datetime.now() + timedelta(minutes=2)
             logger.debug(f"Newly car connected or newly PV mode with car connected.")
@@ -226,7 +230,7 @@ class SystemMediator:
             cur_state = GLOBAL_APP_STATE.get('evcc_manual_state', None)
             is_about_to_charge = self.new_evcc_state != cur_state
             if ((lp.is_charging or self.temp_charging_stopped_by_capacity or is_about_to_charge) and
-                    self.app_mediator_goal != c.MediatorGoal.CHARGE_NOW_NO_CAPACITY_RATE):
+                    self.app_mediator_goal != c.MediatorGoal.CHARGE_NOW_NO_CAPACITY_RATE) and lp.smart_cost_active:
 
                 # 3. Base available kW
                 grid_kw = GLOBAL_APP_STATE.get('p1_meter_data', {}).get('active_power_w', 0) / 1000
@@ -238,9 +242,10 @@ class SystemMediator:
                 avail_kw = base_avail_kw
                 average_import = GLOBAL_APP_STATE.get('average_grid_import_watts', 0)
                 for window, (hi_mult, (low, high)) in _SHORTAGE_CONFIG.items():
-                    avg_kw = average_import.get(window) / 1000
-                    if avg_kw is None:  # Not enough readings yet
+                    avg_val = average_import.get(window)
+                    if avg_val is None:  # Not enough readings yet
                         continue
+                    avg_kw = avg_val / 1000
                     shortage = threshold_kw - avg_kw
                     if low < shortage <= high:
                         logger.debug(f"Shortage over {window}: {shortage:.2f} kW → adjust by {shortage:.2f}")
@@ -264,10 +269,11 @@ class SystemMediator:
                         logger.debug(f"Charging amp changed to {max_amp} kW")
                     if self.temp_charging_stopped_by_capacity:
                         self.temp_charging_stopped_by_capacity = False
-                        self.new_evcc_state = c.EVCCManualState.EVCC_CMD_STATE_NOW
+                        self.new_evcc_state.value = self.state_before_charging_stopped
                         logger.debug(f"Charging resumed.")
 
                 elif not self.temp_charging_stopped_by_capacity:
+                    self.state_before_charging_stopped = lp.mode
                     self.new_evcc_state = c.EVCCManualState.EVCC_CMD_STATE_OFF
                     self.temp_charging_stopped_by_capacity = True
                     self.new_max_amps = self.evcc_client.max_current
@@ -314,12 +320,18 @@ class SystemMediator:
                 self.new_inv_limit = manual_limit if manual_limit is not None else None
             elif self.new_inv_state == c.InverterManualState.INV_CMD_LIMIT_TO_USE:
                 now = datetime.now()
+                # 0. If this state has just started, assume car just connected to start grace period
+                # if GLOBAL_APP_STATE.get('inverter_manual_state') != self.new_inv_state: #  and now.minute % 15 == 0:
+                #     logger.debug(f"Current inverter state: {GLOBAL_APP_STATE.get('inverter_manual_state')}. "
+                #                  f"Reset car connection to False.")
+                #     self.car_was_connected = False
+
                 # 1. If EV just plugged in, reset to standard and trigger charge start
                 is_connected = GLOBAL_APP_STATE.get('evcc_loadpoint_state', {}).get('is_connected', False)
                 if is_connected and not self.car_was_connected:
                     self.new_inv_state = c.InverterManualState.INV_CMD_LIMIT_STANDARD
                     self.new_inv_limit = self.inverter_client.standard_power_limit
-                    self.car_start_deadline = now + timedelta(minutes=2)
+                    self.car_start_deadline = now + timedelta(minutes=1)
                     self.car_was_connected = True
                     logger.debug(f"Car connected. Grace period for charge activated.")
                     return True
@@ -331,14 +343,26 @@ class SystemMediator:
 
                 # 3. Compute dynamic buffer in Watt: positive -> favor export, negative -> favor import
                 price_diff = self.cur_buy_price - abs(self.cur_sell_price)
-                upper_limit_w = 90 if price_diff > 0 else -90
-                lower_limit_w = 0
+                if self.cur_sell_price < 0 and abs(self.cur_sell_price) < self.cur_buy_price / 6:
+                    upper_limit_w = 180 if price_diff > 0 else -180
+                elif self.cur_sell_price < 0 and abs(self.cur_sell_price) < self.cur_buy_price / 3:
+                    upper_limit_w = 120 if price_diff > 0 else -120
+                else:
+                    upper_limit_w = 90 if price_diff > 0 else -90
+
+                # Adjust upper limit based on recent limit adjustments
+                if len(self.inverter_client.power_limit_timestamps) >= 4:
+                    elapsed_time = now - self.inverter_client.power_limit_timestamps[0]
+                    multiplier = 3 if elapsed_time < timedelta(minutes=20) else 2 if elapsed_time < timedelta(
+                        minutes=60) else 1
+                    upper_limit_w *= multiplier
+                    logger.debug(f"Upper limit adjusted to {upper_limit_w} W (multiplier: {multiplier}).")
 
                 # 4. Desired new inverter limit to achieve flow within limits
                 home_use_w = grid_w + prod_w
-                raw_limit_w = home_use_w + (upper_limit_w - lower_limit_w) / 2
+                raw_limit_w = home_use_w + upper_limit_w / 3
                 desired_limit_w = max(0, min(raw_limit_w, self.inverter_client.standard_power_limit))
-                logger.debug(f"Raw limit: {desired_limit_w:.2f} W")
+                logger.debug(f"Raw limit: {desired_limit_w:.0f} W")
 
                 # 5. Allowed to update the limit (quiet time or big change)
                 can_update = False
@@ -347,13 +371,21 @@ class SystemMediator:
                 # a. in case of big change -> override buffer
                 if abs(raw_limit_w - cur_limit_w) >= 800:
                     can_update = True
-                    logger.debug(f"Big change detected: {abs(raw_limit_w - cur_limit_w):.2f} W")
-                # b. first ever or enough minutes elapsed
-                elif not self.last_pv_limit_change_time:
-                    can_update = True
-                else:
-                    if elapsed >= self.buffer_before_pv_limit_change:
+                    logger.debug(f"Big change detected: {abs(raw_limit_w - cur_limit_w):.0f} W")
+                # b. Otherwise, only if elapsed and home import is out of limits
+                elif elapsed >= self.buffer_before_pv_limit_change:
+                    if abs(desired_limit_w - cur_limit_w) > abs(upper_limit_w) / 2:
                         can_update = True
+                        logger.debug(
+                            f"Elapsed {elapsed:.1f} min and desired_limit_w {desired_limit_w:.0f} W vs cur_limit_w "
+                            f"{cur_limit_w:.0f} W. Threshold: {upper_limit_w / 2:.0f} W."
+                        )
+                    else:
+                        logger.debug(
+                            f"Elapsed {elapsed:.1f} min but limit difference {abs(desired_limit_w - cur_limit_w):.0f} W"
+                            f" is below threshold {upper_limit_w / 2:.0f} W. Skipping update."
+                        )
+
                 logger.debug(f"Can update: {can_update}")
 
                 # 6. Long term import due to short term usage peaks
@@ -372,7 +404,7 @@ class SystemMediator:
                     self.new_inv_limit = int(desired_limit_w)
 
             if ((self.new_inv_limit != cur_limit_w or
-                GLOBAL_APP_STATE.get('inverter_manual_state') != self.new_inv_state)
+                 GLOBAL_APP_STATE.get('inverter_manual_state') != self.new_inv_state)
                     and self.new_inv_limit is not None):
                 return True
             return False
@@ -429,20 +461,26 @@ class SystemMediator:
         )
 
         if peak_exceeded:
-            # Send notification email
-            smtp_cfg = self.app_config.get('smtp', {})
-            html_body = (f"\nCurrent month peak is {self.current_max_peak_consumption_kw:.2f} kWh"
-                         f"\n{avg_5m:.2f} kWh over the last 5 minutes"
-                         f"\n{avg_10m:.2f} kWh over the last 10 minutes"
-                         f"\n{avg_15m:.2f} kWh over the last 15 minutes")
-            send_email_with_attachments(
-                smtp_config=smtp_cfg,
-                sender_email=smtp_cfg.get('sender_email'),
-                recipients=smtp_cfg.get('default_recipients'),
-                subject=f"Peak consumption detected",
-                html_body=html_body
+            too_soon = (
+                    self.last_email_sent_time is not None
+                    and now - self.last_email_sent_time < timedelta(minutes=5)
             )
-            GLOBAL_APP_STATE.set('app_state', c.AppStatus.ALARM)
+            if not too_soon:
+                # Send notification email
+                smtp_cfg = self.app_config.get('smtp', {})
+                html_body = (f"\nCurrent month peak is {self.current_max_peak_consumption_kw:.2f} kWh"
+                             f"\n{avg_5m:.2f} kWh over the last 5 minutes"
+                             f"\n{avg_10m:.2f} kWh over the last 10 minutes"
+                             f"\n{avg_15m:.2f} kWh over the last 15 minutes")
+                send_email_with_attachments(
+                    smtp_config=smtp_cfg,
+                    sender_email=smtp_cfg.get('sender_email'),
+                    recipients=smtp_cfg.get('default_recipients'),
+                    subject=f"Peak consumption detected",
+                    html_body=html_body
+                )
+                GLOBAL_APP_STATE.set('app_state', c.AppStatus.ALARM)
+                self.last_email_sent_time = now  # update timestamp
 
             # Adjust EVCC and inverter states
             if (avg_10m > self.current_max_peak_consumption_kw * 1.05 or
@@ -498,7 +536,7 @@ class SystemMediator:
         # Charge car grace period: force start
         car_charge_grace_period = (datetime.now() - self.car_start_deadline).total_seconds() < 0
         if car_charge_grace_period and not self.force_charge_pushed:
-            logger.info(f"Car charge grace period activated.")
+            logger.info(f"Car charge grace period active. Force pv charging.")
             self.evcc_client.sequence_force_pv_charging()
             self.force_charge_pushed = True
         self.force_charge_pushed = car_charge_grace_period

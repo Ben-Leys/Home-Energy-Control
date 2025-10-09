@@ -179,6 +179,23 @@ class InverterSmaModbusClient:
                 logger.error(f"InverterSMA: Error converting Grid Guard status registers: {e}")
         return None
 
+    def _logout_grid_guard(self):
+        """Performs a logout action on the Grid Guard system."""
+        logger.debug("InverterSMA: Performing Grid Guard logout.")
+        try:
+            payload_regs = self.client.convert_to_registers(0, data_type=self.client.DATATYPE.UINT32)
+            logout_result = self.client.write_registers(SMA_REG_GRID_GUARD_LOGIN, payload_regs, slave=self.unit_id)
+            time.sleep(1)
+            if logout_result.isError():
+                logger.warning(f"InverterSMA: Modbus Error during Grid Guard logout: {logout_result}")
+                if isinstance(logout_result, ModbusIOException):
+                    self.disconnect()
+        except ModbusIOException as e:
+            logger.error(f"InverterSMA: ModbusIOException during Grid Guard logout: {e}")
+            self.disconnect()
+        except Exception as e:
+            logger.error(f"InverterSMA: Unexpected error during Grid Guard logout: {e}", exc_info=True)
+
     def check_and_perform_grid_guard_login_if_needed(self, force_login: bool = False) -> bool:
         """
         Checks Grid Guard login status and attempts to log in if not already, or if force_login is True.
@@ -194,8 +211,12 @@ class InverterSmaModbusClient:
             return False
 
         now = datetime.now()
-        if self.last_grid_guard_login and now - self.last_grid_guard_login > timedelta(hours=1):
+        if not self.last_grid_guard_login or now - self.last_grid_guard_login > timedelta(hours=3):
             logger.info("InverterSMA: Last Grid Guard login expired. Logging out.")
+            try:
+                self._logout_grid_guard()
+            except Exception as e:
+                logger.error(f"InverterSMA: Error during Grid Guard logout: {e}", exc_info=True)
             self.is_grid_guard_logged_in = False  # Force re-login
 
         if not force_login and self.is_grid_guard_logged_in:
@@ -211,6 +232,7 @@ class InverterSmaModbusClient:
             if status_code == 1:  # Installer level login
                 logger.info("InverterSMA: Grid Guard login successful.")
                 self.is_grid_guard_logged_in = True
+                self.last_grid_guard_login = now
                 return True
             elif status_code == 2:  # User level login
                 logger.info("InverterSMA: Grid Guard logged in at 'User' level. Insufficient for power limit.")
@@ -231,6 +253,7 @@ class InverterSmaModbusClient:
                         self.disconnect()
                 else:
                     logger.info("InverterSMA: Grid Guard code sent. Re-checking status shortly...")
+                    time.sleep(2)
                     continue
             except ModbusIOException as e:
                 logger.warning(f"InverterSMA: ModbusIOException during Grid Guard login write: {e}. Disconnecting.")
