@@ -243,27 +243,27 @@ def _parse_resolution_to_minutes(resolution_str: str) -> int:
         return 60
 
 # --- Example for testing ---
-# if __name__ == '__main__':
-#     from hec.core.app_initializer import load_app_config
-#     logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-#     logger_main = logging.getLogger(__name__)
-#     APP_CONFIG = load_app_config()
-#     test_day = (datetime.now()).replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
-#     test_day_winter = datetime(2025, 1, 1).replace(hour=0, minute=0, second=0, microsecond=0)
-#     fall_dst_day = datetime(2024, 10, 27).replace(hour=0, minute=0, second=0, microsecond=0)
-#     spring_dst_day = datetime(2025, 3, 30).replace(hour=0, minute=0, second=0, microsecond=0)
-#     test_target_day = fall_dst_day
-#     print(f"Attempting to fetch prices for local day: {test_target_day.strftime('%Y-%m-%d')}")
-#
-#     # Configure basic logging for standalone test
-#
-#     prices = fetch_entsoe_prices(test_target_day, APP_CONFIG)
-#
-#     if prices is None:
-#         print("API call failed critically or bad API key.")
-#     elif not prices:  # Empty list
-#         print("No prices available yet for the target day, or no data found.")
-#     else:
-#         print(f"\nRetrieved {len(prices)} price points:")
-#         for p in prices:
-#             print(p)
+if __name__ == '__main__':
+    from hec.core.app_initializer import load_app_config
+    logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    logger_main = logging.getLogger(__name__)
+    APP_CONFIG = load_app_config()
+    test_day = (datetime.now()).replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=0)
+    test_day_winter = datetime(2025, 1, 1).replace(hour=0, minute=0, second=0, microsecond=0)
+    fall_dst_day = datetime(2024, 10, 27).replace(hour=0, minute=0, second=0, microsecond=0)
+    spring_dst_day = datetime(2025, 3, 30).replace(hour=0, minute=0, second=0, microsecond=0)
+    test_target_day = test_day
+    print(f"Attempting to fetch prices for local day: {test_target_day.strftime('%Y-%m-%d')}")
+
+    # Configure basic logging for standalone test
+
+    prices = fetch_entsoe_prices(test_target_day, APP_CONFIG)
+
+    if prices is None:
+        print("API call failed critically or bad API key.")
+    elif not prices:  # Empty list
+        print("No prices available yet for the target day, or no data found.")
+    else:
+        print(f"\nRetrieved {len(prices)} price points:")
+        for p in prices:
+            print(p)

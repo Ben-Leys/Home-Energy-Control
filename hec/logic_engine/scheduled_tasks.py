@@ -1,6 +1,6 @@
 # hec/logic_engine/scheduled_tasks.py
 import logging
-import time
+from time import sleep
 from datetime import datetime, timedelta, timezone, time, date
 from typing import Optional, List, Dict, Any
 
@@ -223,7 +223,7 @@ def task_poll_inverter_for_mediator_update(db_handler: DatabaseHandler, inv_clie
 
 def task_poll_evcc_state(evcc_client: Optional[EvccApiClient]):
     """Poll evcc for state dict and store in AppState"""
-    if not evcc_client or not evcc_client.is_available:
+    if not evcc_client:
         logger.debug("EVCC polling task: Client not available. Skipping.")
         GLOBAL_APP_STATE.set("evcc_overall_state", None)
         return
@@ -235,10 +235,12 @@ def task_poll_evcc_state(evcc_client: Optional[EvccApiClient]):
         cur_state = EVCCOverallState(timestamp_utc_iso=evcc_state.get("timestamp_utc_iso"),
                                      residual_power=evcc_state.get('residualPower'))
         lp_data = evcc_state.get('loadpoints')[0]
+        currents = lp_data.get("chargeCurrents", [])
+        charge_current = sum(currents) if currents else None
         cur_lp = EVCCLoadpointState(loadpoint_id=1,
                                     is_connected=lp_data.get('connected'),
                                     is_charging=lp_data.get('charging'),
-                                    charge_current=lp_data.get('chargeCurrent'),
+                                    charge_current=charge_current,
                                     min_current=lp_data.get('minCurrent'),
                                     max_current=lp_data.get('maxCurrent'),
                                     enable_threshold=lp_data.get('enableThreshold'),
@@ -286,7 +288,7 @@ def task_fetch_elia_forecasts(db_handler: DatabaseHandler, app_config: dict):
                 all_fetched_records.extend(data)
             else:
                 logger.warning(f"Failed to fetch {forecast_type} forecast for {target_day_utc_str}.")
-            time.sleep(1)  # Too many requests leads to empty response
+            sleep(1)  # Too many requests leads to empty response
 
     if all_fetched_records:
         logger.info(f"Finished fetching Elia forecasts. Total days: {days_to_fetch} rec: {len(all_fetched_records)}.")

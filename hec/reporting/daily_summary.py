@@ -126,19 +126,28 @@ class DailySummaryGenerator:
 
         # --- Target Day Summary (D+1) ---
         t_day_nepi: List[NetElectricityPriceInterval] = data.get("target_day_prices", [])
-        t_day_solar = data.get("t_date_solar", [])
+        t_day_solar = data.get("t_date_solar", [0, 0])
+        t_day_solar = [value if value is not None else 0 for value in t_day_solar]
 
         # --- 1) Align solar to price resolution & compute solar income ---
         solar_income = 0
-        res_min = t_day_nepi[0].resolution_minutes
-        factor = res_min // 15  # Factor to aggregate solar data (1 for 15 min, 4 for 60 min)
-        adjusted_solar = [sum(t_day_solar[i:i + factor]) / factor for i in range(0, len(t_day_solar), factor)]
-        t_day_total_solar = sum(s for s in adjusted_solar if s is not None)
+        if t_day_nepi:
+            res_min = t_day_nepi[0].resolution_minutes
+            factor = res_min // 15  # Factor to aggregate solar data (1 for 15 min, 4 for 60 min)
+            adjusted_solar = [
+                sum(t_day_solar[i:i + factor]) / 4
+                for i in range(0, len(t_day_solar), factor)
+            ]
+            t_day_total_solar = sum(adjusted_solar)
+        else:
+            logger.warning("No target day prices provided; unable to compute solar income.")
+            adjusted_solar = []
+            t_day_total_solar = 0
 
         for idx, pi in enumerate(t_day_nepi):
             if idx >= len(adjusted_solar):
                 break
-            kwh = adjusted_solar[idx]
+            kwh = adjusted_solar[idx] * 4
             if kwh is None or kwh <= 0:
                 continue
             contract = pi.active_contract_type
@@ -176,7 +185,7 @@ class DailySummaryGenerator:
         html.append(f"<tr><td>{prod_bar}</td>")
 
         # Income bar
-        income_percent = round(solar_income / t_day_total_solar / 0.15 * 100)
+        income_percent = round(solar_income / t_day_total_solar / 0.15 * 100) if t_day_total_solar != 0 else 0
         if solar_income > 0:
             income_bar = html_bar_templ.format(pos=income_percent, color='#50C878', right='')
         else:

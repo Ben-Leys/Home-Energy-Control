@@ -74,12 +74,12 @@ class EvccApiClient:
             data = response.json()
 
             # Add a timestamp to the data for AppState consistency
-            if isinstance(data.get("result"), dict):
-                data["result"]["timestamp_utc_iso"] = datetime.now(timezone.utc).isoformat()
-                logger.debug(f"EVCC API: Successfully fetched state. Grid Power: {data['result'].get('gridPower')}W")
-                return data["result"]
+            if isinstance(data, dict):
+                data["timestamp_utc_iso"] = datetime.now(timezone.utc).isoformat()
+                logger.debug(f"EVCC API: Successfully fetched state. Grid Power: {data.get("grid", {}).get("power")}W")
+                return data
             else:
-                logger.warning(f"EVCC API: 'result' key not found or not a dict in state response: {data}")
+                logger.warning(f"EVCC API: Response is not a dict: {data}")
                 return None
         except requests.exceptions.Timeout:
             logger.warning(f"EVCC API: Request to {self.state_url} timed out.")
@@ -109,10 +109,6 @@ class EvccApiClient:
         Helper function to send a command to a loadpoint endpoint.
         `endpoint_suffix` is like "/mode/pv" or "/maxcurrent/16".
         """
-        if not self.is_available:
-            logger.warning(f"EVCC API: Unavailable, cannot send command '{endpoint_suffix}'.")
-            return False
-
         try:
             response = requests.request(
                 method=method.upper(),
@@ -179,8 +175,8 @@ class EvccApiClient:
 
     def sequence_force_pv_charging(self, loadpoint_id: Optional[int] = None) -> bool:
         """Attempts a sequence to start PV charging immediately instead of waiting for min_time."""
-        logger.info("EVCC API: Initiating sequence for PV charging (minpv -> pv).")
-        if not self.set_charge_mode(c.EVCCManualState.EVCC_CMD_STATE_MINPV, loadpoint_id):
+        logger.info("EVCC API: Initiating sequence for PV charging (now -> pv).")
+        if not self.set_charge_mode(c.EVCCManualState.EVCC_CMD_STATE_NOW, loadpoint_id):
             return False
         time.sleep(3)  # Short delay for EVCC to process mode change
         return self.set_charge_mode(c.EVCCManualState.EVCC_CMD_STATE_PV, loadpoint_id)
