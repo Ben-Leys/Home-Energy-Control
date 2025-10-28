@@ -1,4 +1,5 @@
 import logging
+import sys
 import time
 from threading import Thread
 
@@ -41,7 +42,7 @@ def run_application():
     fetch_entsoe, fetch_elia = check_historic_data(db_handler, APP_CONFIG)
 
     # --- INITIALIZE EXTERNAL CLIENTS ---
-    p1_meter_client, inverter_client, evcc_client = initialize_external_clients(APP_CONFIG)
+    p1_meter_client, inverter_client, evcc_client, battery_clients = initialize_external_clients(APP_CONFIG)
 
     # --- POPULATE APP STATE ---
     GLOBAL_APP_STATE.set_db_handler(db_handler)
@@ -68,9 +69,11 @@ def run_application():
     run_scheduler_in_background = APP_CONFIG.get('scheduler', {}).get('run_in_background', True)
     scheduler = setup_scheduler(APP_CONFIG, run_in_background=run_scheduler_in_background)
     scheduled_tasks.register_all_jobs(scheduler, db_handler, APP_CONFIG, p1_meter_client, inverter_client,
-                                      evcc_client, tariff_manager, system_mediator, fetch_entsoe, fetch_elia)
+                                      evcc_client, tariff_manager, system_mediator, battery_clients,
+                                      fetch_entsoe, fetch_elia)
 
     logger.info("Starting scheduler...")
+    exit_code = 0
     try:
         scheduler.start()
         if run_scheduler_in_background:
@@ -85,8 +88,10 @@ def run_application():
     except (KeyboardInterrupt, SystemExit):
         logger.info("Application interrupt received. Shutting down...")
         GLOBAL_APP_STATE.set("app_state", c.AppStatus.SHUTDOWN)
+        exit_code = 0
     except Exception as e:
         logger.critical(f"A critical error occurred with the scheduler or main loop: {e}", exc_info=True)
+        exit_code = 1
     finally:
         if scheduler and scheduler.running:
             logger.info("Shutting down scheduler...")
@@ -95,6 +100,8 @@ def run_application():
             db_handler.close_connection()
         logger.info("Application shut down gracefully.")
         logging.shutdown()
+
+    sys.exit(exit_code)
 
 
 if __name__ == "__main__":

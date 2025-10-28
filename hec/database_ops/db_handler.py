@@ -31,7 +31,7 @@ class DatabaseHandler:
             try:
                 # Ensure parent directory exists
                 self.db_path.parent.mkdir(parents=True, exist_ok=True)
-                self.conn = sqlite3.connect(self.db_path, detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES)
+                self.conn = sqlite3.connect(self.db_path, detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES, check_same_thread=False)
                 self.conn.row_factory = sqlite3.Row  # Access columns by name
                 logger.info(f"Successfully connected to SQLite database: {self.db_path}")
             except sqlite3.Error as e:
@@ -133,7 +133,7 @@ class DatabaseHandler:
                         """)
             logger.info("Index idx_elia_forecast_type_ts checked/created.")
 
-            # --- Inverter Log table ---
+            # --- Inverter Log Table ---
             cursor.execute("""
                             CREATE TABLE IF NOT EXISTS inverter_log (
                                 timestamp_utc TEXT PRIMARY KEY,
@@ -146,15 +146,30 @@ class DatabaseHandler:
                         """)
             logger.info("Table 'inverter_log' checked/created.")
 
-            # --- Settings table ---
+            # --- Battery Log Table ---
             cursor.execute("""
-                        CREATE TABLE IF NOT EXISTS app_settings (
-                            setting_key TEXT PRIMARY KEY,
-                            setting_value TEXT NOT NULL,
-                            value_type TEXT NOT NULL,
-                            last_updated_utc TEXT NOT NULL
+                        CREATE TABLE IF NOT EXISTS battery_log (
+                            timestamp_utc TEXT,
+                            battery_name TEXT,
+                            energy_import_kwh REAL,
+                            energy_export_kwh REAL,
+                            state_of_charge_pct REAL,
+                            battery_mode TEXT,
+                            cycles REAL,
+                            PRIMARY KEY (timestamp_utc, battery_name)
                         );
                     """)
+            logger.info("Table 'battery_log' checked/created.")
+
+            # --- Settings Table ---
+            cursor.execute("""
+                                    CREATE TABLE IF NOT EXISTS app_settings (
+                                        setting_key TEXT PRIMARY KEY,
+                                        setting_value TEXT NOT NULL,
+                                        value_type TEXT NOT NULL,
+                                        last_updated_utc TEXT NOT NULL
+                                    );
+                                """)
             logger.info("Table 'app_settings' checked/created.")
 
             conn.commit()
@@ -456,6 +471,164 @@ class DatabaseHandler:
             logger.error(f"P1 Meter deltas: Unexpected error for range {start_date}-{end_date}: {e}",
                          exc_info=True)
             return None
+
+    def get_battery_deltas_for_intervals(self, ivs: List['NetElectricityPriceInterval']) \
+            -> Dict[str, Dict[str, Dict[str, float]]]:
+        """
+        For each NetElectricityPriceInterval, computes the net energy deltas (imported/exported)
+        for ALL batteries in the log. The deltas are prorated to match the 15-minute resolution
+        of the intervals.
+
+        Returns a mapping from battery_name to:
+            {interval_start_local.isoformat(): {"imported_kwh": float, "exported_kwh": float}}
+        """
+        if not ivs:
+            return {}
+
+        # Determine overall UTC window (with 150-second buffer)
+        ivs = sorted(ivs, key=lambda i: i.interval_start_local)
+        first_start = ivs[0].interval_start_local
+        last_end = ivs[-1].interval_start_local + timedelta(minutes=ivs[-1].resolution_minutes)
+
+        buf = timedelta(seconds=150)
+        window_start_utc = (first_start - buf).astimezone(timezone.utc).isoformat()
+        window_end_utc = (last_end + buf).astimezone(timezone.utc).isoformat()
+
+        conn = self._get_connection()
+        cursor = conn.cursor()
+
+        # --- 1. Identify all batteries in the time window ---
+        cursor.execute("""
+            SELECT DISTINCT battery_name
+            FROM battery_log
+            WHERE timestamp_utc >= ? AND timestamp_utc <= ?
+        """, (window_start_utc, window_end_utc))
+        battery_names = [row[0] for row in cursor.fetchall()]
+
+        if not battery_names:
+            return {}
+
+        # --- 2. Fetch all readings for all batteries ---
+        # The ORDER BY is critical for the later iteration logic
+        cursor.execute(f"""
+            SELECT timestamp_utc, battery_name, energy_import_kwh, energy_export_kwh
+            FROM battery_log
+            WHERE timestamp_utc >= ? AND timestamp_utc <= ?
+            ORDER BY battery_name, timestamp_utc
+        """, (window_start_utc, window_end_utc))
+        all_rows = cursor.fetchall()
+
+        if not all_rows:
+            return {}
+
+        # --- 3. Group readings by battery_name ---
+        battery_readings: Dict[str, List[tuple]] = {name: [] for name in battery_names}
+        for ts_str, name, imp, exp in all_rows:
+            dt = datetime.fromisoformat(ts_str)
+            battery_readings[name].append((dt, imp, exp))
+
+        # --- 4. Process Deltas for Each Battery ---
+        final_result: Dict[str, Dict[str, Dict[str, float]]] = {name: {} for name in battery_names}
+
+        for battery_name, readings in battery_readings.items():
+            if len(readings) < 2:
+                logger.debug(f"Skipping {battery_name}: less than 2 readings found in window.")
+                continue
+
+            # The logic iterates through the readings and  prorates the deltas to the 15-minute intervals (ivs).
+            # Readings structure: (dt, import, export)
+
+            # Index to track position in the readings list
+            read_idx = 0
+            n = len(readings)
+
+            for iv in ivs:
+                iv_start_utc = iv.interval_start_local.astimezone(timezone.utc)
+                iv_end_utc = (iv.interval_start_local + timedelta(minutes=iv.resolution_minutes)).astimezone(
+                    timezone.utc)
+
+                # Find the two closest readings that bracket the interval window (iv_start_utc to iv_end_utc)
+
+                # 1. Find the starting reading: last reading <= iv_start_utc
+                # Rewind read_idx to the starting point for this interval search
+                start_idx = read_idx
+
+                # Find the start point (ts_start <= iv_start_utc)
+                while start_idx < n and readings[start_idx][0] <= iv_start_utc + timedelta(seconds=60):
+                    start_idx += 1
+
+                # The start reading is the one BEFORE the loop broke
+                start_idx = max(0, start_idx - 1)
+
+                if start_idx >= n:
+                    # No reading at or before interval start (shouldn't happen with the buffer, but safe check)
+                    continue
+
+                ts_start, imp_start, exp_start = readings[start_idx]
+
+                if not imp_start or not exp_start:
+                    continue
+
+                # 2. Find the end reading: first reading >= iv_end_utc
+                end_idx = start_idx
+                while end_idx < n and readings[end_idx][0] < iv_end_utc:
+                    end_idx += 1
+
+                if end_idx >= n:
+                    # No reading at or after interval end—use the last available reading
+                    ts_end, imp_end, exp_end = readings[-1]
+                    end_idx = n - 1
+                else:
+                    ts_end, imp_end, exp_end = readings[end_idx]
+
+                # The actual duration covered by these two readings (in seconds)
+                actual_duration_sec = (ts_end - ts_start).total_seconds()
+
+                # The interval duration (15 minutes = 900 seconds)
+                target_duration_sec = iv.resolution_minutes * 60
+
+                # If the actual duration is too short or zero, skip (avoids division by zero and bad data)
+                # We enforce a minimum reading frequency here (e.g., at least 1 reading per hour)
+                if actual_duration_sec < 60:  # Less than 1 minute of data between points
+                    # If the points are too close, it often means the same timestamp or bad data.
+                    continue
+
+                # Compute gross deltas
+                gross_imported = max(0.0, imp_end - imp_start)
+                gross_exported = max(0.0, exp_end - exp_start)
+
+                # --- Proration Logic ---
+                # Determine the fraction of the actual duration that overlaps with the target interval.
+                # We need to compute the change over a 15-minute period from the change over the actual duration.
+
+                # Prorate the deltas to the 15-minute resolution
+                proration_factor = target_duration_sec / actual_duration_sec
+
+                imported_prorated = gross_imported * proration_factor
+                exported_prorated = gross_exported * proration_factor
+
+                # 5. Store the result
+                final_result[battery_name][iv.interval_start_local.isoformat()] = {
+                    "imported_kwh": round(imported_prorated, 3),
+                    "exported_kwh": round(exported_prorated, 3)
+                }
+
+                # Prepare for next interval:
+                # The starting point for the next interval search is the same as the starting point
+                # for the current interval's search (ts_start), as the intervals are contiguous.
+                # We don't advance the read_idx here because the interval processing uses
+                # fixed windows (iv_start_utc to iv_end_utc) over the continuous data stream.
+                # Let the next loop iteration re-calculate its start point based on iv_start_utc.
+                # Resetting read_idx to the beginning of the dense data for the new interval is more robust
+                # than trying to track the window boundaries precisely.
+                # For simplicity and correctness with contiguous time intervals, we just make sure
+                # the next interval search starts from the index that satisfied the last interval's end point.
+
+                # Set the starting index for the next search to be the index of the current end reading.
+                # This is key to prevent redundant work.
+                read_idx = end_idx
+
+        return final_result
 
     def get_energy_deltas_for_intervals(self, ivs: List[NetElectricityPriceInterval]) -> Dict[str, Dict[str, float]]:
         """
@@ -798,6 +971,48 @@ class DatabaseHandler:
 
         return results
 
+    def store_battery_data(self, battery_data: Dict[str, Any]) -> bool:
+        """
+        Stores a single battery data record unconditionally.
+        Returns True if the DB insert/update affected rows, False on failure.
+        """
+        if not battery_data:
+            logger.warning("Battery data: missing data for DB storage.")
+            return False
+
+        # Map API keys to DB columns
+        values = (
+            battery_data.get('battery_name'),
+            battery_data.get('timestamp_utc_iso'),
+            battery_data.get('energy_import_kwh'),
+            battery_data.get('energy_export_kwh'),
+            battery_data.get('state_of_charge_pct'),
+            battery_data.get('battery_mode'),
+            battery_data.get('cycles')
+        )
+
+        sql = """
+            INSERT OR REPLACE INTO battery_log (
+                battery_name, timestamp_utc, energy_import_kwh, energy_export_kwh, state_of_charge_pct,
+                battery_mode, cycles
+            ) VALUES (?, ?, ?, ?, ?, ?, ?); 
+        """
+
+        try:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            cursor.execute(sql, values)
+            conn.commit()
+            if cursor.rowcount > 0:
+                logger.debug(f"Battery data: Successfully stored data in DB.")
+                return True
+            else:
+                logger.warning(f"Battery data: Data was not stored.")
+                return False
+        except sqlite3.Error as e:
+            logger.error(f"Battery data: Error storing data in database: {e}", exc_info=True)
+            return False
+
     def save_setting(self, key: str, value: Any) -> bool:
         """Saves or updates a single application setting in the database."""
         now_utc_str = datetime.now(timezone.utc).isoformat()
@@ -958,6 +1173,7 @@ class DatabaseHandler:
             logger.error(f"Error loading all settings from database: {e}", exc_info=True)
         return all_settings_from_db
 
+
 # if __name__ == '__main__':
 #     logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 #     logger_main = logging.getLogger(__name__)
@@ -983,9 +1199,20 @@ class DatabaseHandler:
 #
 #     # Energy deltas
 #     nepis: List[NetElectricityPriceInterval] = \
-#         [NetElectricityPriceInterval(datetime(2025, 5, 14, 9, 0), 60, "dynamic", {}),
-#          NetElectricityPriceInterval(datetime(2025, 5, 14, 10, 0), 60, "dynamic", {})]
-#     print(db_handler.get_energy_deltas_for_intervals(nepis))
+#         [NetElectricityPriceInterval(datetime(2025, 10, 28, 11, 0), 15, "dynamic", {}),
+#          NetElectricityPriceInterval(datetime(2025, 10, 28, 11, 15), 15, "dynamic", {}),
+#          NetElectricityPriceInterval(datetime(2025, 10, 28, 11, 30), 15, "dynamic", {}),
+#          NetElectricityPriceInterval(datetime(2025, 10, 28, 11, 45), 15, "dynamic", {}),
+#          NetElectricityPriceInterval(datetime(2025, 10, 28, 12, 0), 15, "dynamic", {}),
+#          NetElectricityPriceInterval(datetime(2025, 10, 28, 12, 15), 15, "dynamic", {}),
+#          NetElectricityPriceInterval(datetime(2025, 10, 28, 12, 30), 15, "dynamic", {}),
+#          NetElectricityPriceInterval(datetime(2025, 10, 28, 12, 45), 15, "dynamic", {}),
+#          NetElectricityPriceInterval(datetime(2025, 10, 28, 13, 0), 15, "dynamic", {}),
+#          NetElectricityPriceInterval(datetime(2025, 10, 28, 13, 15), 15, "dynamic", {}),
+#          NetElectricityPriceInterval(datetime(2025, 10, 28, 13, 30), 15, "dynamic", {}),
+#          NetElectricityPriceInterval(datetime(2025, 10, 28, 13, 45), 15, "dynamic", {})
+#          ]
+#     print(db_handler.get_battery_deltas_for_intervals(nepis))
 #
 #     print(db_handler.get_energy_deltas_for_period(date(2025, 5, 1), date(2025, 5, 10)))
 #

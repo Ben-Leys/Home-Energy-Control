@@ -127,75 +127,102 @@ def display_dashboard_tab(state: Optional[Dict[str, Any]]):
         f"{app_status_str.replace('_', ' ').title()}</span></h5>",
         unsafe_allow_html=True
     )
-    # st.divider()
 
     # --- Main Figures Box ---
-    with st.container(border=True):
-        st.subheader("⚡ Live Metrics")
-        col1, col2, col3 = st.columns(3)
-
-        # P1 Meter
-        p1_live = state.get("p1_meter_data")
-        p1_power_w_str = "N/A"
-        if p1_live and isinstance(p1_live, dict):
-            p1_power_w_val = p1_live.get('active_power_w', 0)
-            if p1_power_w_val is not None:
-                p1_power_w_str = f"{p1_power_w_val:.0f} W"
-        col1.metric("Grid Power (P1)", p1_power_w_str, delta="Import > 0 > Export", delta_color="off")
-
-        # Inverter Production
-        inverter_live = state.get("inverter_data")
-        pv_power_w_str = "N/A"
-        if inverter_live and isinstance(inverter_live, dict):
-            pv_power_val = inverter_live.get('pv_power_watts', 0)
-            if pv_power_val is not None:
-                pv_power_w_str = f"{pv_power_val:.0f} W"
-        col2.metric("Solar Production", pv_power_w_str)
-
-        # EVCC Charging Current
-        evcc_lp_data = state.get("evcc_loadpoint_state")
-        ev_charge_current_str = "N/A"
-        ev_charging_status = "Not Charging"
-        if evcc_lp_data and isinstance(evcc_lp_data, dict):
-            if evcc_lp_data.get("is_charging", False):
-                ev_charging_status = "Charging"
-                charge_current_val = evcc_lp_data.get('charge_current', 0) * 230
-                if charge_current_val is not None:
-                    ev_charge_current_str = f"{charge_current_val:.0f} W"
-            else:
-                ev_charging_status = "Connected" if evcc_lp_data.get("is_connected") else "Disconnected"
-        col3.metric(f"EV Status: {ev_charging_status}", ev_charge_current_str)
-    # st.divider()
+    # with st.container(border=True):
+    #     st.subheader("⚡ Live")
+    #     col1, col2, col3 = st.columns(3)
+    #
+    #     # P1 Meter
+    #     p1_live = state.get("p1_meter_data")
+    #     p1_power_w_str = "N/A"
+    #     if p1_live and isinstance(p1_live, dict):
+    #         p1_power_w_val = p1_live.get('active_power_w', 0)
+    #         if p1_power_w_val is not None:
+    #             p1_power_w_str = f"{p1_power_w_val:.0f} W"
+    #     col1.metric("Grid Power (P1)", p1_power_w_str, delta="Import > 0 > Export", delta_color="off")
+    #
+    #     # Inverter Production
+    #     inverter_live = state.get("inverter_data")
+    #     pv_power_w_str = "N/A"
+    #     if inverter_live and isinstance(inverter_live, dict):
+    #         pv_power_val = inverter_live.get('pv_power_watts', 0)
+    #         if pv_power_val is not None:
+    #             pv_power_w_str = f"{pv_power_val:.0f} W"
+    #     col2.metric("Solar Production", pv_power_w_str)
+    #
+    #     # EVCC Charging Current
+    #     evcc_lp_data = state.get("evcc_loadpoint_state")
+    #     ev_charge_current_str = "N/A"
+    #     ev_charging_status = "Not Charging"
+    #     if evcc_lp_data and isinstance(evcc_lp_data, dict):
+    #         if evcc_lp_data.get("is_charging", False):
+    #             ev_charging_status = "Charging"
+    #             charge_current_val = evcc_lp_data.get('charge_current', 0) * 230
+    #             if charge_current_val is not None:
+    #                 ev_charge_current_str = f"{charge_current_val:.0f} W"
+    #         else:
+    #             ev_charging_status = "Connected" if evcc_lp_data.get("is_connected") else "Disconnected"
+    #     col3.metric(f"EV Status: {ev_charging_status}", ev_charge_current_str)
 
     # --- Current Electricity Price (from list) ---
-    st.subheader("💡 Current Price")
-    prices_today_list = state.get("electricity_prices_today", [])
-    now_local = datetime.now().astimezone()
-    current_price_interval_data = get_current_price_from_list(now_local, prices_today_list)
+    with st.container(border=True):
+        st.subheader("💡 Price")
+        prices_today_list = state.get("electricity_prices_today", [])
+        now_local = datetime.now().astimezone()
+        current_price_interval_data = get_current_price_from_list(now_local, prices_today_list)
 
-    if current_price_interval_data:
-        buy_price = current_price_interval_data.get('net_prices_eur_per_kwh', {}).get('dynamic', {}).get('buy', 0)
-        sell_price = current_price_interval_data.get('net_prices_eur_per_kwh', {}).get('dynamic', {}).get('sell', 0)
-        start_time_str = current_price_interval_data.get('interval_start_local', "N/A")
-        try:
-            start_dt = datetime.fromisoformat(start_time_str)
-            res_min = current_price_interval_data.get('resolution_minutes', 15)
-            end_dt = start_dt + timedelta(minutes=res_min)
-            st.caption(f"Interval: {start_dt.strftime('%H:%M')} - {end_dt.strftime('%H:%M')} (Local)")
-        except Exception as er:
-            print(f"{er}")
-            pass
+        if current_price_interval_data:
+            buy_price = current_price_interval_data.get('net_prices_eur_per_kwh', {}).get('dynamic', {}).get('buy', 0)
+            sell_price = current_price_interval_data.get('net_prices_eur_per_kwh', {}).get('dynamic', {}).get('sell', 0)
+            start_time_str = current_price_interval_data.get('interval_start_local', "N/A")
+            try:
+                start_dt = datetime.fromisoformat(start_time_str)
+                res_min = current_price_interval_data.get('resolution_minutes', 15)
+                end_dt = start_dt + timedelta(minutes=res_min)
+                st.caption(f"Interval: {start_dt.strftime('%H:%M')} - {end_dt.strftime('%H:%M')} (Local)")
+            except Exception as er:
+                print(f"{er}")
+                pass
 
-        col_p1, col_p2 = st.columns(2)
-        col_p1.metric("Net Buy Price", f"{buy_price:.4f} €/kWh" if buy_price is not None else "N/A")
-        col_p2.metric("Net Sell Price", f"{sell_price:.4f} €/kWh" if sell_price is not None else "N/A")
-    else:
-        st.warning("Current electricity price data not available.")
-    # st.divider()
+            col_p1, col_p2 = st.columns(2)
+            col_p1.metric("Net Buy Price", f"{buy_price:.4f} €/kWh" if buy_price is not None else "N/A")
+            col_p2.metric("Net Sell Price", f"{sell_price:.4f} €/kWh" if sell_price is not None else "N/A")
+        else:
+            st.warning("Current electricity price data not available.")
+
+    # --- Battery info ---
+    with st.container(border=True):
+        st.subheader("🔋 Batteries")
+
+        battery_state = state.get("battery_data", {})
+        battery_mode = battery_state.get('mode', 'UNKNOWN')
+
+        st.markdown(f"Mode: **{battery_mode}**")
+
+        battery_records = state.get("battery_records", [])
+        if battery_records:
+            # Create columns dynamically based on the number of batteries
+            num_batteries = len(battery_records)
+            cols = st.columns(num_batteries)
+
+            for i, record in enumerate(battery_records):
+                with cols[i]:
+                    name = record.get("battery_name", f"Battery {i + 1}")
+                    soc = record.get("state_of_charge_pct")
+
+                    # Display the data in this column
+                    st.metric(
+                        label=f"**{name}**",
+                        value=f"{soc}%" if soc is not None else "N/A",
+                        delta_color="off"
+                    )
+        else:
+            st.info("No detailed battery records available yet.")
 
     # --- Controls Box ---
     with st.container(border=True):
-        st.subheader("⚙️ System Controls")
+        st.subheader("⚙️ Controls")
 
         # Application Operating Mode
         cur_str = state.get("app_operating_mode", c.OperatingMode.MODE_AUTO.value)
@@ -218,10 +245,9 @@ def display_dashboard_tab(state: Optional[Dict[str, Any]]):
         if new_val != cur_str:
             selected_enum = c.MediatorGoal(new_val)
             send_setting_update("app_mediator_goal", selected_enum.name)
-        st.markdown("---")
 
         # Inverter Controls
-        st.markdown("##### Inverter Manual Control")
+        # st.markdown("##### Inverter Manual Control")
         cur_str = state.get("inverter_manual_state", c.InverterManualState.INV_CMD_LIMIT_STANDARD.value)
         inv_options = [mode.value for mode in c.InverterManualState]
 
@@ -243,10 +269,8 @@ def display_dashboard_tab(state: Optional[Dict[str, Any]]):
             if new_limit_val != current_limit_val:
                 send_setting_update("inverter_manual_limit", new_limit_val)
 
-        st.markdown("---")
-
         # EVCC Controls
-        st.markdown("##### EVCC Manual Control")
+        # st.markdown("##### EVCC Manual Control")
         cur_str = state.get("evcc_manual_state", c.EVCCManualState.EVCC_CMD_STATE_OFF.value)
         evcc_options = [cmd.value for cmd in c.EVCCManualState]
 
@@ -256,6 +280,24 @@ def display_dashboard_tab(state: Optional[Dict[str, Any]]):
         if new_val != cur_str:
             selected_enum = c.EVCCManualState(new_val)
             send_setting_update("evcc_manual_state", selected_enum.name)
+
+        # Show and handle manual amp input if in manual mode
+        current_limit_val = state.get("evcc_manual_limit", 32)
+        current_limit_val = 32 if current_limit_val is None else int(current_limit_val)
+        new_limit_val = st.number_input(
+            "EVCC amperage limit:", min_value=6, max_value=32,
+            value=current_limit_val, step=1, key="evcc_fixed_limit_val"
+        )
+        if new_limit_val != current_limit_val:
+            send_setting_update("evcc_manual_limit", new_limit_val)
+
+    # Reboot button
+    if st.button("🔄 Reboot System", type="primary"):
+        send_setting_update("reboot_request", True)
+
+    # Daily summary button
+    if st.button("Daily summary", type="secondary"):
+        send_setting_update("summary_request", True)
 
 
 # --- Log Tab ---
@@ -287,7 +329,7 @@ st.subheader("🏠 Home Energy Control Dashboard")
 if 'api_call_inflight' not in st.session_state:
     st.session_state.api_call_inflight = False
 
-tab1, tab2 = st.tabs(["📊 Dashboard & Controls", "📜 Logs"])
+tab1, tab2 = st.tabs(["📊 Dashboard", "📜 Logs"])
 
 with tab1:
     @st.fragment(run_every=refresh_interval)
