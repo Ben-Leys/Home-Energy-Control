@@ -146,7 +146,7 @@ def update_app_setting_api():
                     # Add range validation
                     if key_to_update == "inverter_manual_limit" and not (0 <= final_value_to_set <= 7000):
                         raise ValueError(f"Inverter limit out of range 0-7000")
-                    if key_to_update == "evcc_manual_limit_amps" and not (0 <= final_value_to_set <= 32):
+                    if key_to_update == "evcc_manual_limit_amps" and not (6 <= final_value_to_set <= 32):
                         raise ValueError("Amps out of range 0-32")
                 except (ValueError, TypeError):
                     conversion_successful = False

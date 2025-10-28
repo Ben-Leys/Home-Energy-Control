@@ -56,3 +56,9 @@ class EVCCManualState(Enum):
     EVCC_CMD_STATE_PV = "pv"        # Charge with PV only
     EVCC_CMD_STATE_MINPV = "minpv"  # Charge with PV, supplement with grid if PV not enough to start/maintain
     EVCC_CMD_STATE_NOW = "now"      # Charge with max power from any source
+
+
+class BatteryState(Enum):
+    BATTERY_OFF = "standby"
+    BATTERY_ON = "zero"
+    BATTERY_FORCE_CHARGE = "to_full"

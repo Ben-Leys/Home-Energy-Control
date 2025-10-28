@@ -13,7 +13,7 @@ from dotenv import load_dotenv
 from hec.controllers import modbus_sma_inverter
 from hec.controllers.api_evcc import EvccApiClient
 from hec.core import constants as c
-from hec.data_sources import api_p1_meter_homewizard
+from hec.data_sources import api_p1_meter_homewizard, api_battery_homewizard
 from hec.database_ops.db_handler import DatabaseHandler
 from hec.logic_engine.data_processors import populate_appstate_with_forecast_data, populate_appstate_with_price_data
 from hec.logic_engine.scheduled_tasks import task_poll_evcc_state
@@ -95,10 +95,11 @@ def initialize_external_clients(app_config: dict):
     try:
         p1_conf = app_config.get("p1_meter", {})
         host = p1_conf.get("host")
+        token = p1_conf.get("token")
         if not host:
             logger.warning("P1 meter host not configured. P1 data source will be disabled.")
         else:
-            client = api_p1_meter_homewizard.P1MeterHomewizardClient(host=host)
+            client = api_p1_meter_homewizard.P1MeterHomewizardClient(host=host, token=token)
             if client.is_initialized:
                 p1_client = client
                 logger.info("P1 meter client initialized successfully.")
@@ -152,7 +153,32 @@ def initialize_external_clients(app_config: dict):
     except Exception as e:
         logger.error(f"Error initializing EVCC API client: {e}", exc_info=True)
 
-    return p1_client, inverter_client, evcc_client
+    # --- Battery ---
+    battery_clients = {}
+    try:
+        battery_config = app_config.get('batteries', {})
+        if not battery_config:
+            logger.warning("No batteries configured in app_config.")
+        else:
+            for b in battery_config:
+                name = b.get("name")
+                host = b.get("host")
+                token = b.get("token")
+
+                if not all([name, host, token]):
+                    logger.warning(f"Skipping incomplete battery config: {b}")
+                    continue
+
+                client = api_battery_homewizard.BatteryHomeWizard(name=name, host=host, token=token)
+                if client.is_initialized:
+                    battery_clients[name] = client
+                    logger.info(f"Battery '{name}' initialized successfully.")
+                else:
+                    logger.warning(f"Battery '{name}' failed to initialize.")
+    except Exception as e:
+        logger.error(f"Error initializing battery clients: {e}", exc_info=True)
+
+    return p1_client, inverter_client, evcc_client, battery_clients
 
 
 def setup_scheduler(config: dict, run_in_background: bool = False):

@@ -9,7 +9,7 @@ from hec.core.app_state import GLOBAL_APP_STATE
 from hec.core.models import NetElectricityPriceInterval
 from hec.core.tariff_manager import TariffManager
 from hec.database_ops.db_handler import DatabaseHandler
-from hec.logic_engine.cost_calculator import calculate_total_costs_for_period
+from hec.logic_engine.cost_calculator import calculate_total_costs_for_period, calculate_battery_saving_for_period
 from hec.logic_engine.price_predictor import EnergyPricePredictor
 from hec.reporting.plot_generator import generate_price_solar_plot, generate_future_price_plot
 from hec.utils.utils import send_email_with_attachments
@@ -231,6 +231,22 @@ class DailySummaryGenerator:
             f"<tr><td>Fixed: € {data.get('d_costs').get('fixed').get('total_bill'):.2f}</td>"
             f"<td>Fixed: € {data.get('m_costs').get('fixed').get('total_bill'):.2f}</td>"
             f"<td>Fixed: € {data.get('y_costs').get('fixed').get('total_bill'):.2f}</td></tr>"
+            f"<tr><td><u>Battery savings</u></td><td><u>Battery savings</u></td><td><u>Battery savings</u></td></tr>"
+            f"<tr><td>Import avoided: € {data.get('d_savings').get('total_avoided_cost_eur'):.2f} "
+            f"({data.get('d_savings').get('total_export_kwh'):.2f} kWh)</td>"
+            f"<td>Import avoided: € {data.get('m_savings').get('total_avoided_cost_eur'):.2f} "
+            f"({data.get('m_savings').get('total_export_kwh'):.2f} kWh)</td>"
+            f"<td>Import avoided: € {data.get('y_savings').get('total_avoided_cost_eur'):.2f} "
+            f"({data.get('y_savings').get('total_export_kwh'):.2f} kWh)</td></tr>"
+            f"<tr><td>Export missed: € {data.get('d_savings').get('total_opportunity_cost_eur'):.2f} "
+            f"({data.get('d_savings').get('total_import_kwh'):.2f} kWh)</td>"
+            f"<td>Export missed: € {data.get('m_savings').get('total_opportunity_cost_eur'):.2f} "
+            f"({data.get('m_savings').get('total_import_kwh'):.2f} kWh)</td>"
+            f"<td>Export missed: € {data.get('y_savings').get('total_opportunity_cost_eur'):.2f} "
+            f"({data.get('y_savings').get('total_import_kwh'):.2f} kWh)</td></tr>"
+            f"<tr><td>Total: € {data.get('d_savings').get('total_savings_eur'):.2f}</td>"
+            f"<td>Total: € {data.get('m_savings').get('total_savings_eur'):.2f}</td>"
+            f"<td>Total: € {data.get('y_savings').get('total_savings_eur'):.2f}</td></tr>"
             "</table>"
         )
 
@@ -351,6 +367,15 @@ class DailySummaryGenerator:
         n_year_costs = calculate_total_costs_for_period(first_day_of_year, end_date, self.app_config,
                                                         self.db_handler, self.tariff_manager)
 
+        # --- 5.B Calculate battery savings ---
+        y_date_savings = calculate_battery_saving_for_period(y_date, y_date, self.app_config,
+                                                             self.db_handler, self.tariff_manager)
+        n_month_savings = calculate_battery_saving_for_period(start_date, end_date, self.app_config,
+                                                              self.db_handler, self.tariff_manager)
+        n_year_savings = calculate_battery_saving_for_period(first_day_of_year, end_date, self.app_config,
+                                                             self.db_handler, self.tariff_manager)
+        total_savings = calculate_battery_saving_for_period(date(2025, 10, 28), end_date,
+                                                            self.app_config, self.db_handler, self.tariff_manager)
         # --- 6. Prepare Email Content ---
         email_data = {
             "target_day_date_str": t_date.strftime('%d-%m-%Y (%A)'),
@@ -363,6 +388,10 @@ class DailySummaryGenerator:
             "d_costs": y_date_costs,
             "m_costs": n_month_costs,
             "y_costs": n_year_costs,
+            "d_savings": y_date_savings,
+            "m_savings": n_month_savings,
+            "y_savings": n_year_savings,
+            "t_savings": total_savings,
         }
         html_body = self._generate_html_content(email_data)
 

@@ -20,6 +20,8 @@ class AppState:
             "app_state": c.AppStatus.STARTING,
             "app_operating_mode": c.OperatingMode.MODE_MANUAL,
             "app_mediator_goal": c.MediatorGoal.NO_CHARGING,
+            "reboot_request": False,
+            "summary_request": False,
             # P1 meter data, recent import/export samples and averages
             "p1_meter_data": None,
             "p1_meter_last_stored_boundary_slot_utc_iso": None,
@@ -43,7 +45,11 @@ class AppState:
             # EVCC data
             "evcc_overall_state": None,
             "evcc_loadpoint_state": None,
-            "evcc_manual_state": None
+            "evcc_manual_state": None,
+            "evcc_manual_limit": None,
+            # Battery control
+            "battery_data": None,
+            "battery_records": []
         }
 
         self.db_handler: Optional[db_handler] = None

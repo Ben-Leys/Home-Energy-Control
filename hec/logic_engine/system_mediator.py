@@ -26,6 +26,8 @@ class SystemMediator:
         # Controllers
         self.evcc_client: Optional[EvccApiClient] = None
         self.inverter_client: Optional[InverterSmaModbusClient] = None
+        self.db_handler: Optional[DatabaseHandler] = None
+        self.tariff_manager: Optional[TariffManager] = None
         # General
         self.app_config = app_config
         self.standard_max_peak_consumption_kw: float = 2.5
@@ -99,6 +101,9 @@ class SystemMediator:
 
     def _prepare_data(self) -> bool:
         try:
+            if not GLOBAL_APP_STATE:
+                return False
+
             # Retrieve app state price data if last interval finished
             if (not self.next_price_interval_at or not self.cur_buy_price or not self.cur_sell_price or
                     self.next_price_interval_at < datetime.now().astimezone()):
@@ -498,6 +503,7 @@ class SystemMediator:
         If none, calculates optimal state of the controllers to achieve maximum cost saving or profit.
         """
         logger.debug(f"Running system mediation logic")
+
         # Prepare price data
         if not self._prepare_data():
             logger.error('Mediator encountered an error while preparing essential data and is skipping.')
@@ -510,6 +516,7 @@ class SystemMediator:
             # If mode manual, just set app states to be set to controllers
             self.new_evcc_state = GLOBAL_APP_STATE.get('evcc_manual_state')
             self.new_inv_state = GLOBAL_APP_STATE.get('inverter_manual_state')
+            self.new_max_amps = GLOBAL_APP_STATE.get('evcc_manual_limit')
         elif app_mode == c.OperatingMode.MODE_AUTO:
             # If mode auto: app decides controller states based on mediator goal
             self._handle_auto_mode()

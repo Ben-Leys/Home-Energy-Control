@@ -127,6 +127,180 @@ def calculate_net_intervals_for_day(db: DatabaseHandler, app_config, target_date
         return []
 
 
+def calculate_battery_saving_for_period(start_date: date, end_date: date, app_config,
+                                        db: 'DatabaseHandler', tm: 'TariffManager') -> Dict[str, Any]:
+    """
+    Calculates the total savings from battery operation for a given period,
+    based on dynamic (day-ahead) prices.
+
+    The savings logic is:
+    - "Avoided Cost" (Profit): Discharging the battery avoids buying from the grid.
+                               Calculated as: battery_export_kwh * dynamic_buy_price
+    - "Opportunity Cost" (Loss): Charging the battery uses energy that could have been sold.
+                               Calculated as: battery_import_kwh * dynamic_sell_price
+
+    Args:
+        start_date (local date): start date for calculation
+        end_date (local date): end date for calculation (inclusive)
+        app_config: Dict with application configuration data.
+        db (DatabaseHandler): database handler
+        tm (TariffManager): tariff manager
+
+    Returns a dict with:
+      - total_savings_eur: Net total (Avoided Cost - Opportunity Cost)
+      - total_avoided_cost_eur: Gross savings from discharging
+      - total_opportunity_cost_eur: Gross losses from charging
+      - details_by_day: A list of per-day breakdowns
+      - details_by_battery: A dict with per-battery breakdowns
+    """
+    logger.debug(f"Calculating battery savings for period: {start_date} to {end_date}")
+
+    # --- 1. Initialize Results Structure ---
+    results: Dict[str, Any] = {
+        "total_savings_eur": 0.0,
+        "total_avoided_cost_eur": 0.0,  # Total profit from discharging
+        "total_opportunity_cost_eur": 0.0,  # Total "loss" from charging
+        "total_import_kwh": 0.0,
+        "total_export_kwh": 0.0,
+        "details_by_day": [],
+        "details_by_battery": {}  # type: Dict[str, Dict[str, float]]
+    }
+
+    day = start_date
+    while day <= end_date:
+        midnight = datetime.combine(day, time.min)
+        debug_logger.debug(f"Calculating battery savings for {midnight}")
+
+        # --- 2. Fetch Price Intervals ---
+        intervals: List['NetElectricityPriceInterval'] = calculate_net_intervals_for_day(db, app_config, midnight)
+        if not intervals:
+            logger.warning(f"No net intervals found for {day}. Skipping calculation.")
+            day += timedelta(days=1)
+            continue
+
+        # --- 3. Fetch Battery Deltas for all Intervals ---
+        battery_deltas_by_name = db.get_battery_deltas_for_intervals(intervals)
+
+        if not battery_deltas_by_name:
+            logger.warning(f"No battery deltas found for {day}. Skipping calculation.")
+            day += timedelta(days=1)
+            continue
+
+        # --- 4. Process Savings for the Day ---
+        day_total_export = 0.0
+        day_total_import = 0.0
+        day_total_savings = 0.0
+        day_avoided_cost = 0.0
+        day_opportunity_cost = 0.0
+
+        # Loop through each battery that reported data
+        for battery_name, interval_deltas in battery_deltas_by_name.items():
+
+            # Initialize per-battery tracking if not seen before
+            if battery_name not in results["details_by_battery"]:
+                results["details_by_battery"][battery_name] = {
+                    "total_import_kwh": 0.0,
+                    "total_export_kwh": 0.0,
+                    "total_savings_eur": 0.0,
+                    "total_avoided_cost_eur": 0.0,
+                    "total_opportunity_cost_eur": 0.0
+                }
+
+            total_import_kwh = 0.0
+            total_export_kwh = 0.0
+            battery_day_savings = 0.0
+            battery_day_avoided = 0.0
+            battery_day_opportunity = 0.0
+
+            # Loop through the 96 intervals of the day
+            for iv in intervals:
+                key = iv.interval_start_local.isoformat()
+
+                # Get the battery's delta for this interval
+                delta = interval_deltas.get(key, {"imported_kwh": 0.0, "exported_kwh": 0.0})
+                batt_import = delta["imported_kwh"]
+                batt_export = delta["exported_kwh"]
+
+                # Get the dynamic prices for this interval
+                buy_dyn = iv.net_prices_eur_per_kwh["dynamic"]["buy"]
+                sell_dyn = iv.net_prices_eur_per_kwh["dynamic"]["sell"]
+
+                # --- Apply Savings Logic ---
+
+                # Profit: Battery exported (discharged), avoiding a grid purchase
+                avoided_cost = batt_export * buy_dyn
+
+                # Loss: Battery imported (charged), missing a grid sale
+                opportunity_cost = batt_import * sell_dyn
+
+                # Net saving for this interval for this battery
+                interval_saving = avoided_cost - opportunity_cost
+
+                # Accumulate for this battery for this day
+                total_import_kwh += batt_import
+                total_export_kwh += batt_export
+                battery_day_savings += interval_saving
+                battery_day_avoided += avoided_cost
+                battery_day_opportunity += opportunity_cost
+
+            # End of intervals loop for this battery
+
+            # Accumulate day's totals for this battery into its overall results
+            results["details_by_battery"][battery_name]["total_import_kwh"] += total_import_kwh
+            results["details_by_battery"][battery_name]["total_export_kwh"] += total_export_kwh
+            results["details_by_battery"][battery_name]["total_savings_eur"] += battery_day_savings
+            results["details_by_battery"][battery_name]["total_avoided_cost_eur"] += battery_day_avoided
+            results["details_by_battery"][battery_name]["total_opportunity_cost_eur"] += battery_day_opportunity
+
+            # Add this battery's daily totals to the overall day totals
+            day_total_import += total_import_kwh
+            day_total_export += total_export_kwh
+            day_total_savings += battery_day_savings
+            day_avoided_cost += battery_day_avoided
+            day_opportunity_cost += battery_day_opportunity
+
+        # End of batteries loop for this day
+
+        # --- 5. Accumulate Daily Totals ---
+        results["total_import_kwh"] += day_total_import
+        results["total_export_kwh"] += day_total_export
+        results["total_savings_eur"] += day_total_savings
+        results["total_avoided_cost_eur"] += day_avoided_cost
+        results["total_opportunity_cost_eur"] += day_opportunity_cost
+
+        # Store per-day breakdown
+        results["details_by_day"].append({
+            "date": day.isoformat(),
+            "total_import_kwh": day_total_import,
+            "total_export_kwh": day_total_export,
+            "total_savings_eur": round(day_total_savings, 3),
+            "avoided_cost_eur": round(day_avoided_cost, 3),
+            "opportunity_cost_eur": round(day_opportunity_cost, 3)
+        })
+
+        day += timedelta(days=1)
+
+    # --- 6. Final Rounding ---
+    results["total_import_kwh"] = round(results["total_import_kwh"], 3)
+    results["total_export_kwh"] = round(results["total_export_kwh"], 3)
+    results["total_savings_eur"] = round(results["total_savings_eur"], 3)
+    results["total_avoided_cost_eur"] = round(results["total_avoided_cost_eur"], 3)
+    results["total_opportunity_cost_eur"] = round(results["total_opportunity_cost_eur"], 3)
+    for battery_name in results["details_by_battery"]:
+        results["details_by_battery"][battery_name]["total_import_kwh"] = round(
+            results["details_by_battery"][battery_name]["total_import_kwh"], 3)
+        results["details_by_battery"][battery_name]["total_export_kwh"] = round(
+            results["details_by_battery"][battery_name]["total_export_kwh"], 3)
+        results["details_by_battery"][battery_name]["total_savings_eur"] = round(
+            results["details_by_battery"][battery_name]["total_savings_eur"], 3)
+        results["details_by_battery"][battery_name]["total_avoided_cost_eur"] = round(
+            results["details_by_battery"][battery_name]["total_avoided_cost_eur"], 3)
+        results["details_by_battery"][battery_name]["total_opportunity_cost_eur"] = round(
+            results["details_by_battery"][battery_name]["total_opportunity_cost_eur"], 3)
+
+    return results
+
+
 def calculate_total_costs_for_period(start_date: date, end_date: date, app_config,
                                      db: DatabaseHandler, tm: TariffManager) -> Dict[str, Any]:
     """
@@ -317,26 +491,29 @@ def calculate_total_costs_for_period(start_date: date, end_date: date, app_confi
 
 
 # For testing only
-# if __name__ == "__main__":
-#     from hec.core.tariff_manager import initialize_tariff_manager
-#     from hec.core.app_initializer import load_app_config, initialize_database_handler
-#
-#     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-#     debug_logger = logging.getLogger('Calc Debug')
-#
-#     prepare_time = datetime.now()
-#     app_config = load_app_config()
-#     db = initialize_database_handler(app_config)
-#     tm = initialize_tariff_manager(app_config)
-#
-#     print(calculate_total_costs_for_period(date(2025, 1, 15), date(2025, 5, 15), app_config, db, tm))
-#     exit(0)
-#     start_time = datetime.now()
-#     net_prices = []
-#     t_date = datetime.now()
-#     for i in range(365):
-#         net_prices += calculate_net_intervals_for_day(db, tm, t_date - timedelta(days=365 - i))
-#     end_time = datetime.now()
-#     for nepi in net_prices:
-#         print(nepi)
-#     print(f"Calc time: {end_time - start_time}")
+if __name__ == "__main__":
+    from hec.core.tariff_manager import initialize_tariff_manager
+    from hec.core.app_initializer import load_app_config, initialize_database_handler
+
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    debug_logger = logging.getLogger('Calc Debug')
+
+    prepare_time = datetime.now()
+    app_config = load_app_config()
+    db = initialize_database_handler(app_config)
+    tm = initialize_tariff_manager(app_config)
+
+    # print(calculate_total_costs_for_period(date(2025, 1, 15), date(2025, 5, 15), app_config, db, tm))
+    # exit(0)
+    start_time = datetime.now()
+    print(calculate_battery_saving_for_period(start_time, start_time, app_config, db, tm))
+
+    exit(0)
+    net_prices = []
+    t_date = datetime.now()
+    for i in range(365):
+        net_prices += calculate_net_intervals_for_day(db, tm, t_date - timedelta(days=365 - i))
+    end_time = datetime.now()
+    for nepi in net_prices:
+        print(nepi)
+    print(f"Calc time: {end_time - start_time}")

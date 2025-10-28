@@ -1,5 +1,8 @@
 # hec/logic_engine/scheduled_tasks.py
 import logging
+import os
+import signal
+import sys
 from time import sleep
 from datetime import datetime, timedelta, timezone, time, date
 from typing import Optional, List, Dict, Any
@@ -15,6 +18,7 @@ from hec.core.tariff_manager import TariffManager
 from hec.data_sources.api_elia import fetch_and_process_forecast
 from hec.data_sources.api_entsoe import fetch_entsoe_prices
 from hec.data_sources.api_p1_meter_homewizard import P1MeterHomewizardClient
+from hec.data_sources.api_battery_homewizard import BatteryHomeWizard
 from hec.database_ops.db_handler import DatabaseHandler
 from hec.logic_engine.data_processors import populate_appstate_with_price_data, populate_appstate_with_forecast_data, \
     update_rolling_averages
@@ -37,6 +41,8 @@ INVERTER_FOR_MEDIATOR_JOB_ID = "inverter_update_for_mediator"
 POLL_EVCC_JOB_ID = "evcc_update"
 DAILY_SUMMARY_EMAIL_JOB_ID = "daily_summary_email"
 MEDIATOR_LOGIC_JOB_ID = "mediator_logic"
+BATTERY_UPDATE_FOR_DB_JOB_ID = "battery_update_for_db"
+BATTERY_UPDATE_JOB_ID = "battery_update"
 
 
 def task_fetch_and_store_day_ahead_prices(scheduler: BaseScheduler, db_handler: DatabaseHandler, app_config: dict,
@@ -111,11 +117,17 @@ def task_poll_p1_meter(db_handler: DatabaseHandler, p1_client: Optional[P1MeterH
 
     logger.debug("P1 Meter polling task: Fetching data...")
     p1_data = p1_client.refresh_data()
+    battery_data = p1_client.refresh_batteries_data()
 
     if not p1_data or "timestamp_utc_iso" not in p1_data:
         logger.warning("P1 Meter task: no valid data fetched.")
         GLOBAL_APP_STATE.set("p1_meter_data", None)
         return
+    if not battery_data:
+        logger.info("P1 Meter task: no battery data.")
+        GLOBAL_APP_STATE.set("battery_data", None)
+    else:
+        GLOBAL_APP_STATE.set("battery_data", battery_data)
 
     ts = datetime.fromisoformat(p1_data["timestamp_utc_iso"])
 
@@ -258,6 +270,49 @@ def task_poll_evcc_state(evcc_client: Optional[EvccApiClient]):
         GLOBAL_APP_STATE.set("evcc_overall_state", None)
 
 
+def task_poll_battery_for_db_logging(db_handler: DatabaseHandler,
+                                     battery_clients: Optional[Dict[str, BatteryHomeWizard]], store_to_db=False):
+    all_battery_records = []
+
+    # --- Get overall battery mode from P1 meter ---
+    battery_data = GLOBAL_APP_STATE.get("battery_data", {})
+    battery_mode = battery_data.get("mode", "UNKNOWN")
+
+    # --- Poll each configured battery ---
+    if not battery_clients:
+        logger.info("No battery clients available to poll.")
+        GLOBAL_APP_STATE.set("battery_records", all_battery_records)
+        return
+
+    for name, client in battery_clients.items():
+        data = client.refresh_data()
+        if not data:
+            logger.warning(f"Skipping battery '{name}': no data received.")
+            continue
+
+        # Merge the mode from P1 meter with the battery-specific data
+        battery_record = {
+            "battery_name": data.get("battery_name", name),
+            "timestamp_utc_iso": data.get("timestamp_utc_iso"),
+            "energy_import_kwh": data.get("energy_import_kwh"),
+            "energy_export_kwh": data.get("energy_export_kwh"),
+            "state_of_charge_pct": data.get("state_of_charge_pct"),
+            "battery_mode": battery_mode,
+            "cycles": data.get("cycles")
+        }
+
+        # Store in database
+        if store_to_db:
+            success = db_handler.store_battery_data(battery_record)
+            if success:
+                logger.info(f"Battery data for '{name}' stored successfully.")
+            else:
+                logger.error(f"Failed to store battery data for '{name}'.")
+
+        all_battery_records.append(battery_record)
+        GLOBAL_APP_STATE.set("battery_records", all_battery_records)
+
+
 def task_fetch_elia_forecasts(db_handler: DatabaseHandler, app_config: dict):
     """
     Scheduled task to fetch various forecasts from Elia Open Data,
@@ -354,7 +409,19 @@ def fetch_historic_elia_data(db_handler: DatabaseHandler, app_config: dict, hist
     logger.info(f"Fetched and stored {total_lines_added} Elia forecast records.")
 
 
-def task_system_mediator(system_mediator: SystemMediator):
+def task_system_mediator(system_mediator: SystemMediator, app_config, scheduler,
+                         db_handler: DatabaseHandler, tariff_manager: TariffManager):
+    # System reboot asked
+    if GLOBAL_APP_STATE.get('reboot_request', False):
+        logger.warning('Reboot requested')
+        pid = os.getpid()
+        os.kill(pid, signal.SIGINT)
+    # Daily summary e-mail requested
+    if GLOBAL_APP_STATE.get('summary_request', False):
+        logger.info('Summary e-mail requested')
+        GLOBAL_APP_STATE.set('summary_request', False)
+        task_send_daily_energy_summary_email(app_config, db_handler, tariff_manager)
+
     system_mediator.run_system_mediation_logic()
 
 
@@ -364,6 +431,7 @@ def register_all_jobs(scheduler: BaseScheduler, db_handler: DatabaseHandler, app
                       evcc_client: Optional[EvccApiClient],
                       tariff_manager: Optional[TariffManager],
                       system_mediator: SystemMediator,
+                      battery_clients: Optional[Dict[str, BatteryHomeWizard]],
                       fetch_entsoe=False, fetch_elia=False):
     """Registers all defined scheduled jobs with the provided scheduler instance."""
 
@@ -402,7 +470,7 @@ def register_all_jobs(scheduler: BaseScheduler, db_handler: DatabaseHandler, app
                 "task_function": task_system_mediator,
                 "trigger": "cron",
                 "trigger_args": "",
-                "job_args": [system_mediator],
+                "job_args": [system_mediator, app_config, scheduler, db_handler, tariff_manager],
                 "name": "System Mediator",
                 "misfire_grace_time": 10,
             }
@@ -516,6 +584,33 @@ def register_all_jobs(scheduler: BaseScheduler, db_handler: DatabaseHandler, app
                 trigger_args={"run_date": datetime.now() + timedelta(seconds=140)},
                 job_args=[db_handler, app_config, hist_start_date],
                 name="Fetch historical elia data",
+                grace_time=10,
+            )
+
+        # Register battery job if available
+        if battery_clients and p1_client:
+            inverter_schedule = tasks_config.get(BATTERY_UPDATE_FOR_DB_JOB_ID, {})
+            minute = inverter_schedule.get('minute', '*/15')
+            register_job(
+                scheduler,
+                job_id=BATTERY_UPDATE_FOR_DB_JOB_ID,
+                func=task_poll_battery_for_db_logging,
+                trigger="cron",
+                trigger_args={"minute": minute},
+                job_args=[db_handler, battery_clients, True],
+                name="Poll battery for DB logging",
+                grace_time=600,
+            )
+            inverter_schedule = tasks_config.get(BATTERY_UPDATE_JOB_ID, {})
+            second = inverter_schedule.get('second', '*/15')
+            register_job(
+                scheduler,
+                job_id=BATTERY_UPDATE_JOB_ID,
+                func=task_poll_battery_for_db_logging,
+                trigger="cron",
+                trigger_args={"second": second},
+                job_args=[db_handler, battery_clients, False],
+                name="Poll battery for display",
                 grace_time=10,
             )
 
