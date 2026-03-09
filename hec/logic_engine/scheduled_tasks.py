@@ -116,7 +116,7 @@ def task_poll_p1_meter(db_handler: DatabaseHandler, p1_client: Optional[P1MeterH
         return
 
     logger.debug("P1 Meter polling task: Fetching data...")
-    p1_data = p1_client.refresh_data()
+    p1_data = p1_client.refresh_meter_data()
     battery_data = p1_client.refresh_batteries_data()
 
     if not p1_data or "timestamp_utc_iso" not in p1_data:
@@ -260,7 +260,8 @@ def task_poll_evcc_state(evcc_client: Optional[EvccApiClient]):
                                     limit_energy=lp_data.get('limitEnergy'),
                                     mode=lp_data.get('mode'),
                                     session_energy=lp_data.get('sessionEnergy'),
-                                    smart_cost_active=lp_data.get('smartCostActive'))
+                                    smart_cost_active=lp_data.get('smartCostActive'),
+                                    plan_active=lp_data.get('planActive'))
         GLOBAL_APP_STATE.set("evcc_overall_state", cur_state.to_dict())
         GLOBAL_APP_STATE.set("evcc_loadpoint_state", cur_lp.to_dict())
         logger.debug(f"EVCC: AppState updated. Mode: {cur_lp.mode}, Charging: {cur_lp.is_charging}")
@@ -275,8 +276,7 @@ def task_poll_battery_for_db_logging(db_handler: DatabaseHandler,
     all_battery_records = []
 
     # --- Get overall battery mode from P1 meter ---
-    battery_data = GLOBAL_APP_STATE.get("battery_data", {})
-    battery_mode = battery_data.get("mode", "UNKNOWN")
+    battery_mode = (GLOBAL_APP_STATE.get("battery_data") or {}).get("mode", "UNKNOWN")
 
     # --- Poll each configured battery ---
     if not battery_clients:
@@ -409,7 +409,7 @@ def fetch_historic_elia_data(db_handler: DatabaseHandler, app_config: dict, hist
     logger.info(f"Fetched and stored {total_lines_added} Elia forecast records.")
 
 
-def task_system_mediator(system_mediator: SystemMediator, app_config, scheduler,
+def task_system_mediator(system_mediator: SystemMediator, app_config,
                          db_handler: DatabaseHandler, tariff_manager: TariffManager):
     # System reboot asked
     if GLOBAL_APP_STATE.get('reboot_request', False):
@@ -470,7 +470,7 @@ def register_all_jobs(scheduler: BaseScheduler, db_handler: DatabaseHandler, app
                 "task_function": task_system_mediator,
                 "trigger": "cron",
                 "trigger_args": "",
-                "job_args": [system_mediator, app_config, scheduler, db_handler, tariff_manager],
+                "job_args": [system_mediator, app_config, db_handler, tariff_manager],
                 "name": "System Mediator",
                 "misfire_grace_time": 10,
             }

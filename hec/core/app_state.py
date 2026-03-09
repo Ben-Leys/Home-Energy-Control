@@ -49,7 +49,8 @@ class AppState:
             "evcc_manual_limit": None,
             # Battery control
             "battery_data": None,
-            "battery_records": []
+            "battery_records": [],
+            "battery_manual_mode": None
         }
 
         self.db_handler: Optional[db_handler] = None

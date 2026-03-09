@@ -1,5 +1,6 @@
 # hec/logic_engine/system_mediator.py
 import logging
+import time
 from datetime import datetime, timedelta
 from typing import List, Optional
 
@@ -8,6 +9,9 @@ from hec.controllers.modbus_sma_inverter import InverterSmaModbusClient
 from hec.core import constants as c
 from hec.core.app_state import GLOBAL_APP_STATE
 from hec.core.models import EVCCLoadpointState, NetElectricityPriceInterval
+from hec.core.tariff_manager import TariffManager
+from hec.data_sources.api_p1_meter_homewizard import P1MeterHomewizardClient
+from hec.database_ops.db_handler import DatabaseHandler
 from hec.utils.utils import convert_power, get_interval_from_list, is_daylight, send_email_with_attachments
 
 logger = logging.getLogger(__name__)
@@ -22,12 +26,13 @@ _SHORTAGE_CONFIG = {
 class SystemMediator:
 
     def __init__(self, app_config, evcc_client: Optional[EvccApiClient],
-                 inverter_client: Optional[InverterSmaModbusClient]):
+                 inverter_client: Optional[InverterSmaModbusClient], p1_client: Optional[P1MeterHomewizardClient]):
         # Controllers
         self.evcc_client: Optional[EvccApiClient] = None
         self.inverter_client: Optional[InverterSmaModbusClient] = None
         self.db_handler: Optional[DatabaseHandler] = None
         self.tariff_manager: Optional[TariffManager] = None
+        self.p1_client: Optional[P1MeterHomewizardClient] = None
         # General
         self.app_config = app_config
         self.standard_max_peak_consumption_kw: float = 2.5
@@ -42,6 +47,8 @@ class SystemMediator:
         self.state_before_charging_stopped: Optional[c.EVCCManualState] = None
         self.new_evcc_state: Optional[c.EVCCManualState] = None
         self.new_max_amps: Optional[int] = None
+        self.last_max_amps: int = 10
+        self.last_amps_push: int = int(time.time())
         self.car_was_connected: bool = False
         self.car_start_deadline: Optional[datetime] = datetime.now() - timedelta(days=999)
         self.force_charge_pushed: bool = False
@@ -53,9 +60,9 @@ class SystemMediator:
         # Peak consumption
         self.last_email_sent_time: datetime | None = None
 
-        self._prepare_mediator_prerequisites(evcc_client, inverter_client)
+        self._prepare_mediator_prerequisites(evcc_client, inverter_client, p1_client)
 
-    def _prepare_mediator_prerequisites(self, evcc_client, inverter_client):
+    def _prepare_mediator_prerequisites(self, evcc_client, inverter_client, p1_client):
         def degrade_app(reason):
             logger.warning(f'{reason}. Mediator functionality degraded.')
             GLOBAL_APP_STATE.set('app_state', c.AppStatus.DEGRADED)
@@ -80,6 +87,9 @@ class SystemMediator:
                 self.inverter_client = inverter_client
             else:
                 degrade_app('No valid inverter_client provided.')
+
+            if p1_client and p1_client.is_initialized:
+                self.p1_client = p1_client
 
             # App_state data
             if not GLOBAL_APP_STATE.get('app_state') == c.AppStatus.STARTING:
@@ -175,11 +185,14 @@ class SystemMediator:
         """Determines the new controller state based on the mediator goal."""
         goal = self.app_mediator_goal
         max_amps = self.evcc_client.max_current
+        lp = EVCCLoadpointState.from_dict(GLOBAL_APP_STATE.get('evcc_loadpoint_state'))
 
         # EVCC state
         if goal == c.MediatorGoal.NO_CHARGING:
             return c.EVCCManualState.EVCC_CMD_STATE_OFF, max_amps
         elif goal == c.MediatorGoal.CHARGE_WITH_MINIMUM_SOLAR_POWER:
+            if not is_daylight(self.app_config) or lp.smart_cost_active or lp.plan_active:
+                max_amps = 10
             return c.EVCCManualState.EVCC_CMD_STATE_MINPV, max_amps
         elif goal == c.MediatorGoal.CHARGE_WITH_ONLY_EXCESS_SOLAR_POWER:
             return c.EVCCManualState.EVCC_CMD_STATE_PV, max_amps
@@ -229,17 +242,18 @@ class SystemMediator:
         try:
             # Load point state
             lp = EVCCLoadpointState.from_dict(GLOBAL_APP_STATE.get('evcc_loadpoint_state'))
-            self.new_max_amps = lp.max_current if self.new_max_amps is None else self.new_max_amps
+            # self.new_max_amps = self.last_max_amps if self.new_max_amps is None else self.last_max_amps
 
             # 2. Only when charging, about to charge or temporarily stopped AND not in CHARGE_NOW_NO_CAPACITY_RATE
             cur_state = GLOBAL_APP_STATE.get('evcc_manual_state', None)
             is_about_to_charge = self.new_evcc_state != cur_state
-            if ((lp.is_charging or self.temp_charging_stopped_by_capacity or is_about_to_charge) and
-                    self.app_mediator_goal != c.MediatorGoal.CHARGE_NOW_NO_CAPACITY_RATE) and lp.smart_cost_active:
+            if (((lp.is_charging or self.temp_charging_stopped_by_capacity or is_about_to_charge) and
+                    self.app_mediator_goal != c.MediatorGoal.CHARGE_NOW_NO_CAPACITY_RATE) and
+                    (lp.smart_cost_active or lp.plan_active)):
 
                 # 3. Base available kW
                 grid_kw = GLOBAL_APP_STATE.get('p1_meter_data', {}).get('active_power_w', 0) / 1000
-                threshold_kw = self.current_max_peak_consumption_kw - 0.125
+                threshold_kw = self.current_max_peak_consumption_kw - 0.175
                 base_avail_kw = threshold_kw - grid_kw
                 logger.debug(f"Grid power: {grid_kw:.2f} kW. Base available for charging: {base_avail_kw:.2f} kW")
 
@@ -262,19 +276,19 @@ class SystemMediator:
                         avail_kw = min(avail_kw, adjusted)
 
                 # 5. Compute new max_amp
-                delta_amp = min(10, int(round(convert_power(power_kw=avail_kw))))  # Steps of 10 A
-                max_amp = int(min(self.evcc_client.max_current, lp.charge_current + delta_amp))
+                delta_amp = min(10, int(round(convert_power(power_kw=avail_kw))))  # Steps of 5 A
+                max_amp = int(min(self.evcc_client.max_current, self.last_max_amps + delta_amp))
                 logger.debug(f"Computed avail: {avail_kw:.2f} kW → ΔA={delta_amp}, max_amp={max_amp}")
 
                 # 6. Apply or stop
                 if max_amp >= self.evcc_client.min_current:
-                    # Only adjust if it’s a new value
+                    self.new_max_amps = max_amp
                     if max_amp != lp.max_current:
-                        self.new_max_amps = max_amp
                         logger.debug(f"Charging amp changed to {max_amp} kW")
                     if self.temp_charging_stopped_by_capacity:
                         self.temp_charging_stopped_by_capacity = False
-                        self.new_evcc_state.value = self.state_before_charging_stopped
+                        self.new_evcc_state = self.state_before_charging_stopped
+                        self.new_max_amps = 10
                         logger.debug(f"Charging resumed.")
 
                 elif not self.temp_charging_stopped_by_capacity:
@@ -441,11 +455,13 @@ class SystemMediator:
             logger.info(f"Inverter changes not pushed because outside of daylight.")
 
     def _execute_evcc_state(self) -> None:
+        self.last_amps_push = int(time.time())
         if self.new_evcc_state is not None:
             self.evcc_client.set_charge_mode(self.new_evcc_state)
             GLOBAL_APP_STATE.set('evcc_manual_state', self.new_evcc_state)
         if self.new_max_amps is not None:
             self.evcc_client.set_max_current(self.new_max_amps)
+            self.last_max_amps = self.new_max_amps
 
     def _calculate_peak_consumption(self) -> bool:
         avg_import_watts = GLOBAL_APP_STATE.get('average_grid_import_watts', {})
@@ -528,7 +544,7 @@ class SystemMediator:
         evcc_changes = False
         if not peak_safety_override:
             evcc_changes = self._recalculate_charging_amperage()
-        if evcc_changes or peak_safety_override:
+        if peak_safety_override or (evcc_changes and int(time.time()) - self.last_amps_push > 20):
             logger.info(f"Evcc changes: {evcc_changes}. To push: {self.new_evcc_state} with {self.new_max_amps} A")
             self._execute_evcc_state()
 
@@ -540,11 +556,39 @@ class SystemMediator:
                 f"Inverter changes: {inverter_changes}. To push: {self.new_inv_state} with {self.new_inv_limit} W")
             self._execute_inverter_state()
 
+        logger.debug(f"Battery mediator part.")
+        manual = GLOBAL_APP_STATE.get("battery_manual_mode")
+        battery_data = GLOBAL_APP_STATE.get("battery_data", {})
+        actual = battery_data.get("mode", "UNKNOWN")
+
+        is_charging = GLOBAL_APP_STATE.get('evcc_loadpoint_state').get('is_charging', False)
+        new_battery_value = actual
+        battery_stop_for_car_charge = False
+
+        if is_charging and not is_daylight(self.app_config):
+            # Charging without solar energy should never come from battery
+            battery_stop_for_car_charge = True
+            logger.debug(f"Battery stop for car charge without sunlight.")
+
+        if battery_stop_for_car_charge:
+            new_battery_value = c.BatteryState.BATTERY_OFF.value
+        else:
+            if manual is not None and manual is not c.BatteryState.BATTERY_AUTO:
+                logger.debug(f"Battery manual state: {manual.value}")
+                new_battery_value = manual.value
+            elif manual is c.BatteryState.BATTERY_AUTO or manual is None:
+                new_battery_value = c.BatteryState.BATTERY_ON.value
+
+        if new_battery_value != actual:
+            logger.debug(f"Pushing new battery state: {new_battery_value}")
+            self.p1_client.set_battery_mode(new_battery_value)
+
         # Charge car grace period: force start
         car_charge_grace_period = (datetime.now() - self.car_start_deadline).total_seconds() < 0
         if car_charge_grace_period and not self.force_charge_pushed:
             logger.info(f"Car charge grace period active. Force pv charging.")
-            self.evcc_client.sequence_force_pv_charging()
+            # Temporary disabled
+            # self.evcc_client.sequence_force_pv_charging()
             self.force_charge_pushed = True
         self.force_charge_pushed = car_charge_grace_period
 

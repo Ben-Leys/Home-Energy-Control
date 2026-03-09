@@ -31,7 +31,8 @@ def get_app_state_api():
                 isinstance(value, c.InverterStatus) or \
                 isinstance(value, c.InverterManualState) or \
                 isinstance(value, c.EVChargeStatus) or \
-                isinstance(value, c.EVCCManualState):
+                isinstance(value, c.EVCCManualState) or \
+                isinstance(value, c.BatteryState):
             serializable_state[key] = value.value
         elif isinstance(value, list):
             new_list = []
@@ -136,6 +137,17 @@ def update_app_setting_api():
                 conversion_successful = False
                 logger.warning(
                     f"API /settings/update: Invalid value '{raw_value_from_ui}' for evcc_manual_state.")
+
+        elif key_to_update == "battery_manual_mode":
+            try:
+                if raw_value_from_ui is None:
+                    final_value_to_set = None
+                else:
+                    final_value_to_set = c.BatteryState[raw_value_from_ui]
+            except KeyError:
+                conversion_successful = False
+                logger.warning(
+                    f"API /settings/update: Invalid value '{raw_value_from_ui}' for battery_manual_mode.")
 
         elif key_to_update in ["inverter_manual_limit", "evcc_manual_limit_amps"]:
             if raw_value_from_ui is None:  # Allow None

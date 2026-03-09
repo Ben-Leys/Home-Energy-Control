@@ -62,3 +62,4 @@ class BatteryState(Enum):
     BATTERY_OFF = "standby"
     BATTERY_ON = "zero"
     BATTERY_FORCE_CHARGE = "to_full"
+    BATTERY_AUTO = "auto"

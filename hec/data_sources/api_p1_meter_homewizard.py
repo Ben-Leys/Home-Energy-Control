@@ -4,7 +4,7 @@ import logging
 import requests
 import time
 from datetime import datetime, timezone
-from typing import Optional, Dict, Any
+from typing import Literal, Optional, Dict, Any
 
 logger = logging.getLogger(__name__)
 
@@ -53,7 +53,7 @@ class P1MeterHomewizardClient:
             logger.error("P1 Meter: Not initialized. No host IP provided and MAC discovery failed.")
             self.is_initialized = False
 
-    def refresh_data(self) -> Optional[Dict[str, Any]]:
+    def refresh_meter_data(self) -> Optional[Dict[str, Any]]:
         """
         Fetches the latest data from the HomeWizard P1 meter API.
 
@@ -132,27 +132,89 @@ class P1MeterHomewizardClient:
             logger.debug(f"P1 Meter: Raw response content: {response.text if response else 'N/A'}")
             return None
 
+    def set_battery_mode(self, mode: Literal["to_full", "zero", "standby"]) -> bool:
+        """
+        Sends a command to the battery group to change the operating mode.
+
+        Args:
+            mode: New mode ('to_full', 'zero', or 'standby').
+
+        Returns:
+            True if the mode was changed, False otherwise.
+        """
+        if not self.is_initialized:
+            logger.warning("P1 Meter: Not initialized, skipping set_battery_mode.")
+            return False
+
+        if not self.battery_url:
+            logger.error(
+                "P1 Meter: Battery command URL is not set. "
+            )
+            return False
+
+        valid_modes = {"to_full", "zero", "standby"}
+        if mode not in valid_modes:
+            logger.warning(f"P1 Meter: Invalid battery mode '{mode}' requested.")
+            return False
+
+        headers = {
+            "Authorization": f"Bearer {self.token}",
+            "X-Api-Version": "2",
+            "Content-Type": "application/json",
+        }
+        payload = {"mode": mode}
+
+        try:
+            response = requests.put(
+                self.battery_url,
+                headers=headers,
+                json=payload,
+                verify=False,
+                timeout=self.request_timeout,
+            )
+
+            response.raise_for_status()
+
+            logger.info(f"P1 Meter: Battery mode successfully set to '{mode}'.")
+            return True
+
+        except requests.exceptions.Timeout:
+            logger.warning(f"P1 Meter: Request timed out while setting battery mode '{mode}'.")
+            return False
+        except requests.exceptions.ConnectionError:
+            logger.warning(f"P1 Meter: Connection error while setting battery mode '{mode}'.")
+            return False
+        except requests.exceptions.HTTPError as e:
+            logger.warning(f"P1 Meter: HTTP error while setting battery mode '{mode}': {e}")
+            return False
+        except (requests.exceptions.RequestException, json.JSONDecodeError) as e:
+            logger.error(
+                f"P1 Meter: Error while setting battery mode '{mode}': {e}",
+                exc_info=True
+            )
+            return False
+
 
 # Example standalone test (if needed, but better to test via scheduled task)
-if __name__ == '__main__':
-    logging.basicConfig(level=logging.DEBUG)
-    test_p1_host = "192.168.0.150"  # Actual IP for testing
-
-    if test_p1_host:
-        print(f"--- Testing P1MeterHomeWizard with host: {test_p1_host} ---")
-        p1_meter = P1MeterHomewizardClient(host=test_p1_host)
-
-        if p1_meter.is_initialized:
-            for _ in range(20):
-                test_data = p1_meter.refresh_data()
-                if test_data:
-                    print(f"Fetched at {test_data['timestamp_utc_iso']}:\n"
-                          f"   Active Power: {test_data.get('active_power_w')} W\n"
-                          f"   Total Import: {test_data.get('total_power_import_kwh')} kWh\n"
-                          f"   L1 Voltage: {test_data.get('active_voltage_l1_v')} V")
-                    print(test_data)
-                else:
-                    print("Failed to fetch P1 data in this attempt.")
-                time.sleep(15)
-        else:
-            print(f"P1 Meter client could not be initialized with host {test_p1_host}. Check IP and network.")
+# if __name__ == '__main__':
+#     logging.basicConfig(level=logging.DEBUG)
+#     test_p1_host = "192.168.0.150"  # Actual IP for testing
+#
+#     if test_p1_host:
+#         print(f"--- Testing P1MeterHomeWizard with host: {test_p1_host} ---")
+#         p1_meter = P1MeterHomewizardClient(host=test_p1_host)
+#
+#         if p1_meter.is_initialized:
+#             for _ in range(20):
+#                 test_data = p1_meter.refresh_data()
+#                 if test_data:
+#                     print(f"Fetched at {test_data['timestamp_utc_iso']}:\n"
+#                           f"   Active Power: {test_data.get('active_power_w')} W\n"
+#                           f"   Total Import: {test_data.get('total_power_import_kwh')} kWh\n"
+#                           f"   L1 Voltage: {test_data.get('active_voltage_l1_v')} V")
+#                     print(test_data)
+#                 else:
+#                     print("Failed to fetch P1 data in this attempt.")
+#                 time.sleep(15)
+#         else:
+#             print(f"P1 Meter client could not be initialized with host {test_p1_host}. Check IP and network.")

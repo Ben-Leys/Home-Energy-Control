@@ -6,7 +6,7 @@ from time import sleep
 from datetime import datetime, timezone, timedelta, time, date
 from enum import Enum
 from pathlib import Path
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Tuple
 from hec.core import constants as c
 
 from hec.core.models import PricePoint, NetElectricityPriceInterval
@@ -680,27 +680,55 @@ class DatabaseHandler:
             iv_end_utc = (iv.interval_start_local + timedelta(minutes=iv.resolution_minutes)).astimezone(timezone.utc)
 
             # Find start reading: last reading <= iv_start_utc
-            start_imp = start_exp = None
-            while read_idx < n and readings[read_idx][0] <= iv_start_utc:
+            start_imp = start_exp = start_ts = None
+            while read_idx < n and readings[read_idx][0] <= iv_start_utc + buf:
                 start_ts, start_imp, start_exp = readings[read_idx]
                 read_idx += 1
             # If we never found a ≤ start, use the first reading
             if start_imp is None:
-                start_ts, start_imp, start_exp = readings[0]
+                start_ts, start_imp, start_exp = readings[min(read_idx, n) - 1]  # readings[0]
 
             # Find end reading: first reading ≥ iv_end_utc
             end_idx = read_idx
-            while end_idx < n and readings[end_idx][0] < iv_end_utc:
+            while end_idx < n and readings[end_idx][0] < iv_end_utc - buf:
                 end_idx += 1
             if end_idx < n:
-                _, end_imp, end_exp = readings[end_idx]
+                end_ts, end_imp, end_exp = readings[end_idx]
             else:
                 # No reading ≥ end—use last available
-                _, end_imp, end_exp = readings[-1]
+                end_ts, end_imp, end_exp = readings[-1]
+            if start_ts is None:
+                start_ts = end_ts
 
-            # Compute deltas (clamped at 0)
-            imported = max(0.0, end_imp - start_imp)
-            exported = max(0.0, end_exp - start_exp)
+            # # Compute deltas (clamped at 0)
+            # imported = max(0.0, end_imp - start_imp)
+            # exported = max(0.0, end_exp - start_exp)
+            #
+            # result[iv.interval_start_local.isoformat()] = {
+            #     "imported_kwh": round(imported, 3),
+            #     "exported_kwh": round(exported, 3)
+            # }
+
+            # 1. Calculate the actual time gap between the readings used
+            gap_delta = end_ts - start_ts
+            gap_minutes = gap_delta.total_seconds() / 60
+            interval_minutes = iv.resolution_minutes
+
+            # 2. Compute raw deltas
+            raw_imported = max(0.0, end_imp - start_imp)
+            raw_exported = max(0.0, end_exp - start_exp)
+
+            # 3. Check if the gap is significantly larger than the resolution
+            # We use a small multiplier (e.g., 1.1) to allow for minor jitter in sensor timing
+            if gap_minutes > (interval_minutes * 1.1):
+                # Scale the energy to match exactly one interval's worth of time
+                scaling_factor = interval_minutes / gap_minutes
+                imported = raw_imported * scaling_factor
+                exported = raw_exported * scaling_factor
+            else:
+                # Normal behavior: use the raw delta
+                imported = raw_imported
+                exported = raw_exported
 
             result[iv.interval_start_local.isoformat()] = {
                 "imported_kwh": round(imported, 3),
@@ -1174,48 +1202,64 @@ class DatabaseHandler:
         return all_settings_from_db
 
 
-# if __name__ == '__main__':
-#     logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-#     logger_main = logging.getLogger(__name__)
-#
-#     # Initialize
-#     app_config = {"database": {"type": "sqlite", "path": "home_energy.db"}}
-#     db_handler = DatabaseHandler(app_config['database'])
-#     db_handler.initialize_database()
-#     today_local = datetime.combine(datetime.now(), time.min)
-#     tomorrow_local = today_local + timedelta(days=1)
-#     fall_dst = datetime(2024, 10, 27, 0, 0, 0)
-#
-#     # Retrieve solar forecast
-#     solar_forecast = db_handler.get_elia_forecasts("solar", fall_dst, fall_dst + timedelta(days=1))
-#     print(solar_forecast)
-#     exit(0)
-#     # Inverter data
-#     print(db_handler.get_inverter__data(start_date_local=today_local,
-#                                         end_date_local=datetime.combine(today_local, time.max)))
-#
-#     # Power peak avg
-#     print(db_handler.get_avg_monthly_peak_w_last_12m(date(2025, 5, 1), 2500))
-#
-#     # Energy deltas
-#     nepis: List[NetElectricityPriceInterval] = \
-#         [NetElectricityPriceInterval(datetime(2025, 10, 28, 11, 0), 15, "dynamic", {}),
-#          NetElectricityPriceInterval(datetime(2025, 10, 28, 11, 15), 15, "dynamic", {}),
-#          NetElectricityPriceInterval(datetime(2025, 10, 28, 11, 30), 15, "dynamic", {}),
-#          NetElectricityPriceInterval(datetime(2025, 10, 28, 11, 45), 15, "dynamic", {}),
-#          NetElectricityPriceInterval(datetime(2025, 10, 28, 12, 0), 15, "dynamic", {}),
-#          NetElectricityPriceInterval(datetime(2025, 10, 28, 12, 15), 15, "dynamic", {}),
-#          NetElectricityPriceInterval(datetime(2025, 10, 28, 12, 30), 15, "dynamic", {}),
-#          NetElectricityPriceInterval(datetime(2025, 10, 28, 12, 45), 15, "dynamic", {}),
-#          NetElectricityPriceInterval(datetime(2025, 10, 28, 13, 0), 15, "dynamic", {}),
-#          NetElectricityPriceInterval(datetime(2025, 10, 28, 13, 15), 15, "dynamic", {}),
-#          NetElectricityPriceInterval(datetime(2025, 10, 28, 13, 30), 15, "dynamic", {}),
-#          NetElectricityPriceInterval(datetime(2025, 10, 28, 13, 45), 15, "dynamic", {})
-#          ]
-#     print(db_handler.get_battery_deltas_for_intervals(nepis))
-#
-#     print(db_handler.get_energy_deltas_for_period(date(2025, 5, 1), date(2025, 5, 10)))
-#
-#     # Retrieve electricity prices
-#     prices_today_from_db = db_handler.get_da_prices(today_local)
-#     print(prices_today_from_db)
+if __name__ == '__main__':
+    logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    logger_main = logging.getLogger(__name__)
+
+    # Initialize
+    app_config = {"database": {"type": "sqlite", "path": "home_energy.db"}}
+    db_handler = DatabaseHandler(app_config['database'])
+    db_handler.initialize_database()
+    today_local = datetime.combine(datetime.now(), time.min)
+    tomorrow_local = today_local + timedelta(days=1)
+    fall_dst = datetime(2024, 10, 27, 0, 0, 0)
+
+    # Retrieve solar forecast
+    # solar_forecast = db_handler.get_elia_forecasts("solar", fall_dst, fall_dst + timedelta(days=1))
+    # print(solar_forecast)
+    # exit(0)
+    # Inverter data
+    # print(db_handler.get_inverter__data(start_date_local=today_local, end_date_local=datetime.combine(today_local, time.max)))
+
+    # Power peak avg
+    # print(db_handler.get_avg_monthly_peak_w_last_12m(date(2025, 5, 1), 2500))
+
+    # Energy deltas
+    nepis: List[NetElectricityPriceInterval] = \
+        [NetElectricityPriceInterval(datetime(2025, 12, 3, 22, 0), 15, "dynamic", {}),
+         NetElectricityPriceInterval(datetime(2025, 12, 3, 22, 15), 15, "dynamic", {}),
+         NetElectricityPriceInterval(datetime(2025, 12, 3, 22, 30), 15, "dynamic", {}),
+         NetElectricityPriceInterval(datetime(2025, 12, 3, 22, 45), 15, "dynamic", {}),
+         NetElectricityPriceInterval(datetime(2025, 12, 3, 23, 0), 15, "dynamic", {}),
+         NetElectricityPriceInterval(datetime(2025, 12, 3, 23, 15), 15, "dynamic", {}),
+         NetElectricityPriceInterval(datetime(2025, 12, 3, 23, 30), 15, "dynamic", {}),
+         NetElectricityPriceInterval(datetime(2025, 12, 3, 23, 45), 15, "dynamic", {}),
+         NetElectricityPriceInterval(datetime(2025, 12, 4, 0, 0), 15, "dynamic", {}),
+         NetElectricityPriceInterval(datetime(2025, 12, 4, 0, 15), 15, "dynamic", {}),
+         NetElectricityPriceInterval(datetime(2025, 12, 4, 0, 30), 15, "dynamic", {}),
+         NetElectricityPriceInterval(datetime(2025, 12, 4, 0, 45), 15, "dynamic", {}),
+         NetElectricityPriceInterval(datetime(2025, 12, 4, 1, 0), 15, "dynamic", {}),
+         NetElectricityPriceInterval(datetime(2025, 12, 4, 1, 15), 15, "dynamic", {}),
+         NetElectricityPriceInterval(datetime(2025, 12, 4, 1, 30), 15, "dynamic", {}),
+         NetElectricityPriceInterval(datetime(2025, 12, 4, 1, 45), 15, "dynamic", {}),
+         NetElectricityPriceInterval(datetime(2025, 12, 4, 2, 0), 15, "dynamic", {}),
+         NetElectricityPriceInterval(datetime(2025, 12, 4, 2, 15), 15, "dynamic", {}),
+         NetElectricityPriceInterval(datetime(2025, 12, 4, 2, 30), 15, "dynamic", {}),
+         NetElectricityPriceInterval(datetime(2025, 12, 4, 2, 45), 15, "dynamic", {}),
+         NetElectricityPriceInterval(datetime(2025, 12, 4, 3, 0), 15, "dynamic", {}),
+         NetElectricityPriceInterval(datetime(2025, 12, 4, 3, 15), 15, "dynamic", {}),
+         NetElectricityPriceInterval(datetime(2025, 12, 4, 3, 30), 15, "dynamic", {}),
+         NetElectricityPriceInterval(datetime(2025, 12, 4, 3, 45), 15, "dynamic", {}),
+         NetElectricityPriceInterval(datetime(2025, 12, 4, 4, 0), 15, "dynamic", {}),
+         NetElectricityPriceInterval(datetime(2025, 12, 4, 4, 15), 15, "dynamic", {}),
+         NetElectricityPriceInterval(datetime(2025, 12, 4, 4, 30), 15, "dynamic", {}),
+         NetElectricityPriceInterval(datetime(2025, 12, 4, 4, 45), 15, "dynamic", {})
+         ]
+    # print(db_handler.get_battery_deltas_for_intervals(nepis))
+    print(db_handler.get_energy_deltas_for_intervals(nepis))
+
+    # print(db_handler.get_energy_deltas_for_period(date(2025, 5, 1), date(2025, 5, 10)))
+
+    # Retrieve electricity prices
+    # prices_today_from_db = db_handler.get_da_prices(today_local)
+    # print(prices_today_from_db)
