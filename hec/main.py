@@ -50,7 +50,7 @@ def run_application():
     populate_app_state(db_handler, APP_CONFIG, evcc_client)
 
     # --- INITIALIZE SYSTEM MEDIATOR ---
-    system_mediator = SystemMediator(APP_CONFIG, evcc_client, inverter_client)
+    system_mediator = SystemMediator(APP_CONFIG, evcc_client, inverter_client, p1_meter_client)
 
     # --- START API SERVER ---
     api_thread = None

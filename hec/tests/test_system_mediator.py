@@ -10,6 +10,7 @@ from hec.logic_engine.system_mediator import SystemMediator
 from hec.core.app_state import GLOBAL_APP_STATE
 from hec.core import constants as c
 from hec.core.models import NetElectricityPriceInterval, EVCCLoadpointState
+from hec.data_sources import api_p1_meter_homewizard
 
 # --- Configure a logger for the module being tested ---
 logger_mediator = logging.getLogger('hec.logic_engine.system_mediator')
@@ -76,6 +77,8 @@ class TestSystemMediatorFunctional(unittest.TestCase):
         self.mock_inverter_client.get_operational_status.return_value = c.InverterStatus.NORMAL
         self.mock_inverter_client.standard_power_limit = self.mock_app_config["inverter"]["standard_power_limit"]
 
+        self.mock_p1_client = MagicMock(spec=api_p1_meter_homewizard)
+
         # Reset GLOBAL_APP_STATE for each test or mock its get/set
         GLOBAL_APP_STATE.current_values = {"app_state": c.AppStatus.STARTING,
                                            "app_operating_mode": c.OperatingMode.MODE_MANUAL,
@@ -104,7 +107,8 @@ class TestSystemMediatorFunctional(unittest.TestCase):
         self.mediator = SystemMediator(
             self.mock_app_config,
             self.mock_evcc_client,
-            self.mock_inverter_client
+            self.mock_inverter_client,
+            self.mock_p1_client
         )
         # Reset mediator's internal state directly if needed
         self.mediator.next_price_interval_at = datetime.now().astimezone() - timedelta(hours=1)  # Force price fetch

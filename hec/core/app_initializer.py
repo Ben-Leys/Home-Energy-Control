@@ -1,5 +1,6 @@
 # hec/core/app_initializer.py
 import logging
+import os
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 from typing import Dict, Optional
@@ -95,7 +96,7 @@ def initialize_external_clients(app_config: dict):
     try:
         p1_conf = app_config.get("p1_meter", {})
         host = p1_conf.get("host")
-        token = p1_conf.get("token")
+        token = os.getenv("P1_METER")
         if not host:
             logger.warning("P1 meter host not configured. P1 data source will be disabled.")
         else:
@@ -163,13 +164,12 @@ def initialize_external_clients(app_config: dict):
             for b in battery_config:
                 name = b.get("name")
                 host = b.get("host")
-                token = b.get("token")
 
-                if not all([name, host, token]):
+                if not all([name, host]):
                     logger.warning(f"Skipping incomplete battery config: {b}")
                     continue
 
-                client = api_battery_homewizard.BatteryHomeWizard(name=name, host=host, token=token)
+                client = api_battery_homewizard.BatteryHomeWizard(name=name, host=host)
                 if client.is_initialized:
                     battery_clients[name] = client
                     logger.info(f"Battery '{name}' initialized successfully.")

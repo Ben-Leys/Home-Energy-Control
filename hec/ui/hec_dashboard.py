@@ -224,80 +224,110 @@ def display_dashboard_tab(state: Optional[Dict[str, Any]]):
     with st.container(border=True):
         st.subheader("⚙️ Controls")
 
-        # Application Operating Mode
-        cur_str = state.get("app_operating_mode", c.OperatingMode.MODE_AUTO.value)
-        mode_options = [mode.value for mode in c.OperatingMode]
+        cols = st.columns(2)
+        with cols[0]:
+            # Application Operating Mode
+            cur_str = state.get("app_operating_mode", c.OperatingMode.MODE_AUTO.value)
+            mode_options = [mode.value for mode in c.OperatingMode]
 
-        mode_idx = mode_options.index(cur_str) if cur_str in mode_options else 0
-        new_val = st.radio("Application Mode:", mode_options, index=mode_idx, key="app_op_mode", horizontal=True)
+            mode_idx = mode_options.index(cur_str) if cur_str in mode_options else 0
+            new_val = st.radio("Application Mode:", mode_options, index=mode_idx, key="app_op_mode", horizontal=True)
 
-        if new_val != cur_str:
-            selected_enum = c.OperatingMode(new_val)
-            send_setting_update("app_operating_mode", selected_enum.name)
+            if new_val != cur_str:
+                selected_enum = c.OperatingMode(new_val)
+                send_setting_update("app_operating_mode", selected_enum.name)
 
-        # Application Mediator Goal
-        cur_str = state.get("app_mediator_goal", c.MediatorGoal.NO_CHARGING.value)
-        goal_options = [goal.value for goal in c.MediatorGoal]
+            # Application Mediator Goal
+            cur_str = state.get("app_mediator_goal", c.MediatorGoal.NO_CHARGING.value)
+            goal_options = [goal.value for goal in c.MediatorGoal]
 
-        goal_idx = goal_options.index(cur_str) if cur_str in goal_options else 0
-        new_val = st.selectbox("Mediator Goal:", goal_options, index=goal_idx, key="app_mediator_goal")
+            goal_idx = goal_options.index(cur_str) if cur_str in goal_options else 0
+            new_val = st.selectbox("Mediator Goal:", goal_options, index=goal_idx, key="app_mediator_goal")
 
-        if new_val != cur_str:
-            selected_enum = c.MediatorGoal(new_val)
-            send_setting_update("app_mediator_goal", selected_enum.name)
+            if new_val != cur_str:
+                selected_enum = c.MediatorGoal(new_val)
+                send_setting_update("app_mediator_goal", selected_enum.name)
 
-        # Inverter Controls
-        # st.markdown("##### Inverter Manual Control")
-        cur_str = state.get("inverter_manual_state", c.InverterManualState.INV_CMD_LIMIT_STANDARD.value)
-        inv_options = [mode.value for mode in c.InverterManualState]
+            # Inverter Controls
+            # st.markdown("##### Inverter Manual Control")
+            cur_str = state.get("inverter_manual_state", c.InverterManualState.INV_CMD_LIMIT_STANDARD.value)
+            inv_options = [mode.value for mode in c.InverterManualState]
 
-        mode_idx = inv_options.index(cur_str) if cur_str in inv_options else 0
-        new_val = st.selectbox("Inverter Manual Action:", inv_options, index=mode_idx, key="inv_man_cmd_select")
+            mode_idx = inv_options.index(cur_str) if cur_str in inv_options else 0
+            new_val = st.selectbox("Inverter Manual Action:", inv_options, index=mode_idx, key="inv_man_cmd_select")
 
-        if new_val != cur_str:
-            selected_enum = c.InverterManualState(new_val)
-            send_setting_update("inverter_manual_state", selected_enum.name)
+            if new_val != cur_str:
+                selected_enum = c.InverterManualState(new_val)
+                send_setting_update("inverter_manual_state", selected_enum.name)
 
-        # Show and handle manual limit input if in manual mode
-        if new_val == c.InverterManualState.INV_CMD_LIMIT_MANUAL.value:
-            current_limit_val = state.get("inverter_manual_limit", 0)
-            current_limit_val = 0 if current_limit_val is None else int(current_limit_val)
+            # Show and handle manual limit input if in manual mode
+            if new_val == c.InverterManualState.INV_CMD_LIMIT_MANUAL.value:
+                current_limit_val = state.get("inverter_manual_limit", 0)
+                current_limit_val = 0 if current_limit_val is None else int(current_limit_val)
+                new_limit_val = st.number_input(
+                    "Inverter Fixed Limit (Watts):", min_value=0, max_value=7000,
+                    value=current_limit_val, step=100, key="inv_fixed_limit_val"
+                )
+                if new_limit_val != current_limit_val:
+                    send_setting_update("inverter_manual_limit", new_limit_val)
+
+            # EVCC Controls
+            # st.markdown("##### EVCC Manual Control")
+            cur_str = state.get("evcc_manual_state", c.EVCCManualState.EVCC_CMD_STATE_OFF.value)
+            evcc_options = [cmd.value for cmd in c.EVCCManualState]
+
+            evcc_cmd_idx = evcc_options.index(cur_str) if cur_str in evcc_options else 0
+            new_val = st.selectbox("EVCC Manual Action:", options=evcc_options, index=evcc_cmd_idx, key="evcc_select")
+
+            if new_val != cur_str:
+                selected_enum = c.EVCCManualState(new_val)
+                send_setting_update("evcc_manual_state", selected_enum.name)
+
+            # Show and handle manual amp input if in manual mode
+            current_limit_val = state.get("evcc_manual_limit", 32)
+            current_limit_val = 32 if current_limit_val is None else int(current_limit_val)
             new_limit_val = st.number_input(
-                "Inverter Fixed Limit (Watts):", min_value=0, max_value=7000,
-                value=current_limit_val, step=100, key="inv_fixed_limit_val"
+                "EVCC amperage limit:", min_value=6, max_value=32,
+                value=current_limit_val, step=1, key="evcc_fixed_limit_val"
             )
             if new_limit_val != current_limit_val:
-                send_setting_update("inverter_manual_limit", new_limit_val)
+                send_setting_update("evcc_manual_limit", new_limit_val)
 
-        # EVCC Controls
-        # st.markdown("##### EVCC Manual Control")
-        cur_str = state.get("evcc_manual_state", c.EVCCManualState.EVCC_CMD_STATE_OFF.value)
-        evcc_options = [cmd.value for cmd in c.EVCCManualState]
+        with cols[1]:
+            # Battery Control
+            # st.markdown("##### Battery Manual Control")
+            battery_options = [mode.value for mode in c.BatteryState]
 
-        evcc_cmd_idx = evcc_options.index(cur_str) if cur_str in evcc_options else 0
-        new_val = st.selectbox("EVCC Manual Action:", options=evcc_options, index=evcc_cmd_idx, key="evcc_select")
+            default_value = c.BatteryState.BATTERY_ON.value
+            current_value = state.get("battery_manual_mode", None)
 
-        if new_val != cur_str:
-            selected_enum = c.EVCCManualState(new_val)
-            send_setting_update("evcc_manual_state", selected_enum.name)
+            try:
+                mode_index = battery_options.index(current_value)
+            except ValueError:
+                current_value = default_value
+                mode_index = battery_options.index(current_value)
 
-        # Show and handle manual amp input if in manual mode
-        current_limit_val = state.get("evcc_manual_limit", 32)
-        current_limit_val = 32 if current_limit_val is None else int(current_limit_val)
-        new_limit_val = st.number_input(
-            "EVCC amperage limit:", min_value=6, max_value=32,
-            value=current_limit_val, step=1, key="evcc_fixed_limit_val"
-        )
-        if new_limit_val != current_limit_val:
-            send_setting_update("evcc_manual_limit", new_limit_val)
+            new_value = st.selectbox(
+                "Battery Manual Mode:",
+                options=battery_options,
+                index=mode_index,
+                key="battery_mode_select"
+            )
 
+            if new_value != current_value:
+                selected_enum_member = c.BatteryState(new_value)
+                send_setting_update("battery_manual_mode", selected_enum_member.name)
+
+    cols = st.columns(2)
     # Reboot button
-    if st.button("🔄 Reboot System", type="primary"):
-        send_setting_update("reboot_request", True)
+    with cols[0]:
+        if st.button("Shutdown system", type="primary"):
+            send_setting_update("reboot_request", True)
 
     # Daily summary button
-    if st.button("Daily summary", type="secondary"):
-        send_setting_update("summary_request", True)
+    with cols[1]:
+        if st.button("Daily summary", type="secondary"):
+            send_setting_update("summary_request", True)
 
 
 # --- Log Tab ---

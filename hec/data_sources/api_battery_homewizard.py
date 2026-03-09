@@ -1,6 +1,8 @@
 # hec/data_sources/api_battery_homewizard.py
 import json
 import logging
+import os
+
 import requests
 import time
 from datetime import datetime, timezone
@@ -10,7 +12,7 @@ logger = logging.getLogger(__name__)
 
 
 class BatteryHomeWizard:
-    def __init__(self, name: str, host: str, token: str, request_timeout: int = 10):
+    def __init__(self, name: str, host: str, token: str = "", request_timeout: int = 10):
         """
         Initializes the HomeWizard Battery.
 
@@ -33,6 +35,7 @@ class BatteryHomeWizard:
     def _initialize_connection(self):
         """Attempts to verify connection to the battery API."""
         logger.info(f"Battery [{self.name}]: Initializing connection at {self.api_url}")
+        self.token = os.getenv(f"BATTERY_{self.name.upper()}")
         try:
             response = requests.get(
                 self.api_url,
@@ -114,3 +117,4 @@ class BatteryHomeWizard:
         except (requests.exceptions.RequestException, json.JSONDecodeError) as e:
             logger.error(f"Battery [{self.name}]: Error while fetching data: {e}", exc_info=True)
             return None
+

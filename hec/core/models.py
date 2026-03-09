@@ -84,6 +84,7 @@ class EVCCLoadpointState:
     mode: str = 'off'
     session_energy: int = 0
     smart_cost_active: bool = False
+    plan_active: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
         d = asdict(self)
