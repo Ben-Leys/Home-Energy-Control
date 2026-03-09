@@ -78,6 +78,8 @@ class TestSystemMediatorFunctional(unittest.TestCase):
         self.mock_inverter_client.standard_power_limit = self.mock_app_config["inverter"]["standard_power_limit"]
 
         self.mock_p1_client = MagicMock(spec=api_p1_meter_homewizard)
+        self.mock_p1_client.is_initialized = True
+        self.mock_p1_client.set_battery_mode = MagicMock(return_value=True)
 
         # Reset GLOBAL_APP_STATE for each test or mock its get/set
         GLOBAL_APP_STATE.current_values = {"app_state": c.AppStatus.STARTING,
