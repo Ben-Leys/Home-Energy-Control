@@ -1,7 +1,7 @@
 # tests/logic_engine/test_system_mediator.py
 import unittest
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from unittest.mock import MagicMock, patch
 
 from hec.controllers.api_evcc import EvccApiClient
@@ -170,7 +170,7 @@ class TestSystemMediatorFunctional(unittest.TestCase):
         GLOBAL_APP_STATE.set('evcc_loadpoint_state',
                              EVCCLoadpointState(is_connected=True, is_charging=False, charge_current=0, max_current=32,
                                                 mode="off").to_dict())
-        GLOBAL_APP_STATE.set('p1_meter_data', {"active_power_w": -2300, "monthly_power_peak_w": 2500})  # Exporting 2.3kW
+        GLOBAL_APP_STATE.set('p1_meter_data', {"active_power_w": -2300, "monthly_power_peak_w": 2500}) # Exporting 2.3kW
         GLOBAL_APP_STATE.set('inverter_data', {"active_power_limit_watts": 7000, "pv_power_watts": 2500})
 
         # --- Run mediator logic ---
@@ -301,7 +301,7 @@ class TestSystemMediatorFunctional(unittest.TestCase):
         self.assertEqual(self.mediator.force_charge_pushed, True)
         GLOBAL_APP_STATE.set('inverter_data', {"active_power_limit_watts": 7000, "pv_power_watts": 7000})
 
-        # 2. within 2 min window: still should not revert
+        # 2. within 2-min window: still should not revert
         mock_datetime.now.return_value = base_time + timedelta(minutes=1)
         self.mock_inverter_client.set_active_power_limit.reset_mock()
         self.mediator.run_system_mediation_logic()
