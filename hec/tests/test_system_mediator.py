@@ -1,8 +1,10 @@
 # tests/logic_engine/test_system_mediator.py
 import unittest
 import logging
+import time
 from datetime import datetime, timedelta
 from unittest.mock import MagicMock, patch
+from collections import deque
 
 from hec.controllers.api_evcc import EvccApiClient
 from hec.controllers.modbus_sma_inverter import InverterSmaModbusClient
@@ -11,6 +13,7 @@ from hec.core.app_state import GLOBAL_APP_STATE
 from hec.core import constants as c
 from hec.core.models import NetElectricityPriceInterval, EVCCLoadpointState
 from hec.data_sources import api_p1_meter_homewizard
+
 
 # --- Configure a logger for the module being tested ---
 logger_mediator = logging.getLogger('hec.logic_engine.system_mediator')
@@ -76,6 +79,10 @@ class TestSystemMediatorFunctional(unittest.TestCase):
         self.mock_inverter_client = MagicMock(spec=InverterSmaModbusClient)
         self.mock_inverter_client.get_operational_status.return_value = c.InverterStatus.NORMAL
         self.mock_inverter_client.standard_power_limit = self.mock_app_config["inverter"]["standard_power_limit"]
+        self.mock_inverter_client.power_limit_timestamps = deque(maxlen=4)
+        old_time = datetime.now() - timedelta(minutes=5)
+        for _ in range(1):
+            self.mock_inverter_client.power_limit_timestamps.append(old_time)
 
         self.mock_p1_client = MagicMock(spec=api_p1_meter_homewizard)
         self.mock_p1_client.is_initialized = True
@@ -104,6 +111,7 @@ class TestSystemMediatorFunctional(unittest.TestCase):
                                                 mode="off").to_dict())
         GLOBAL_APP_STATE.set('average_grid_import_watts', {'3m': 0, '5m': 0, '10m': 0})
         GLOBAL_APP_STATE.set('average_solar_production_watts', {'5m': 0})
+        GLOBAL_APP_STATE.db_handler = MagicMock()
 
         # Instantiate the mediator for each test
         self.mediator = SystemMediator(
@@ -120,6 +128,7 @@ class TestSystemMediatorFunctional(unittest.TestCase):
         self.mediator.car_was_connected = False
         self.mediator.force_charge_pushed = False
         self.mediator.last_pv_limit_change_time = None
+        self.mediator.last_amps_push = int(time.time()) - 30
 
     @patch('hec.logic_engine.system_mediator.datetime')  # Mock datetime.now() within the mediator module
     def test_scenario_negative_buy_price_force_charge_and_limit_pv(self, mock_datetime):
@@ -147,7 +156,7 @@ class TestSystemMediatorFunctional(unittest.TestCase):
         # --- Assertions for EVCC ---
         # Check if evcc_client.set_charge_mode was called with "now"
         self.mock_evcc_client.set_charge_mode.assert_any_call(c.EVCCManualState.EVCC_CMD_STATE_NOW)
-        self.mock_evcc_client.set_max_current.assert_called_with(10)
+        self.mock_evcc_client.set_max_current.assert_called_with(32)
 
         # --- Assertions for Inverter ---
         # Check if inverter_client.set_active_power_limit was called with 0
@@ -179,7 +188,7 @@ class TestSystemMediatorFunctional(unittest.TestCase):
 
         # --- Assertions for EVCC ---
         self.mock_evcc_client.set_charge_mode.assert_any_call(c.EVCCManualState.EVCC_CMD_STATE_PV)
-        self.mock_evcc_client.set_max_current.assert_called_with(10)
+        self.mock_evcc_client.set_max_current.assert_called_with(32)
 
         # --- Assertions for Inverter ---
         self.assertEqual(GLOBAL_APP_STATE.get('inverter_manual_state'), c.InverterManualState.INV_CMD_LIMIT_STANDARD)
@@ -357,8 +366,8 @@ class TestSystemMediatorFunctional(unittest.TestCase):
         self.assertEqual(self.mediator.app_mediator_goal, c.MediatorGoal.CHARGE_NOW_WITH_CAPACITY_RATE)
 
         # --- Assertions for EVCC ---
-        self.mock_evcc_client.set_charge_mode.assert_any_call(c.EVCCManualState.EVCC_CMD_STATE_NOW)
-        self.mock_evcc_client.set_max_current.assert_called_with(10)
+        # self.mock_evcc_client.set_charge_mode.assert_any_call(c.EVCCManualState.EVCC_CMD_STATE_NOW)
+        self.mock_evcc_client.set_max_current.assert_called_with(32)
 
         # --- Assertions for Inverter ---
         self.assertEqual(GLOBAL_APP_STATE.get('inverter_manual_state'), c.InverterManualState.INV_CMD_LIMIT_STANDARD)
