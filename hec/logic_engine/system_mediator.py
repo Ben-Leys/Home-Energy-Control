@@ -47,7 +47,7 @@ class SystemMediator:
         self.state_before_charging_stopped: Optional[c.EVCCManualState] = None
         self.new_evcc_state: Optional[c.EVCCManualState] = None
         self.new_max_amps: Optional[int] = None
-        self.last_max_amps: int = 10
+        self.last_max_amps: int = 0
         self.last_amps_push: int = int(time.time())
         self.car_was_connected: bool = False
         self.car_start_deadline: Optional[datetime] = datetime.now() - timedelta(days=999)
@@ -191,10 +191,10 @@ class SystemMediator:
         if goal == c.MediatorGoal.NO_CHARGING:
             return c.EVCCManualState.EVCC_CMD_STATE_OFF, max_amps
         elif goal == c.MediatorGoal.CHARGE_WITH_MINIMUM_SOLAR_POWER:
-            if not is_daylight(self.app_config) or lp.smart_cost_active or lp.plan_active:
-                max_amps = 10
             return c.EVCCManualState.EVCC_CMD_STATE_MINPV, max_amps
         elif goal == c.MediatorGoal.CHARGE_WITH_ONLY_EXCESS_SOLAR_POWER:
+            if not is_daylight(self.app_config) or lp.smart_cost_active or lp.plan_active:
+                max_amps = 11
             return c.EVCCManualState.EVCC_CMD_STATE_PV, max_amps
         elif goal == c.MediatorGoal.CHARGE_WHEN_SELL_PRICE_NEGATIVE:
             # State is PV when sell price negative (charge with excess), if not OFF
@@ -210,6 +210,7 @@ class SystemMediator:
             return c.EVCCManualState.EVCC_CMD_STATE_NOW, max_amps
         elif goal == c.MediatorGoal.CHARGE_NOW_NO_CAPACITY_RATE:
             return c.EVCCManualState.EVCC_CMD_STATE_NOW, max_amps
+        return c.EVCCManualState.EVCC_CMD_STATE_OFF, max_amps
 
     def _determine_inverter_state(self) -> c.InverterManualState:
         """Determines the new controller state based on the mediator goal."""
@@ -276,7 +277,7 @@ class SystemMediator:
                         avail_kw = min(avail_kw, adjusted)
 
                 # 5. Compute new max_amp
-                delta_amp = min(10, int(round(convert_power(power_kw=avail_kw))))  # Steps of 5 A
+                delta_amp = min(10, int(round(convert_power(power_kw=avail_kw))))  # Steps of 10 A
                 max_amp = int(min(self.evcc_client.max_current, self.last_max_amps + delta_amp))
                 logger.debug(f"Computed avail: {avail_kw:.2f} kW → ΔA={delta_amp}, max_amp={max_amp}")
 
@@ -288,7 +289,6 @@ class SystemMediator:
                     if self.temp_charging_stopped_by_capacity:
                         self.temp_charging_stopped_by_capacity = False
                         self.new_evcc_state = self.state_before_charging_stopped
-                        self.new_max_amps = 10
                         logger.debug(f"Charging resumed.")
 
                 elif not self.temp_charging_stopped_by_capacity:
@@ -296,6 +296,7 @@ class SystemMediator:
                     self.new_evcc_state = c.EVCCManualState.EVCC_CMD_STATE_OFF
                     self.temp_charging_stopped_by_capacity = True
                     self.new_max_amps = self.evcc_client.max_current
+                    self.last_max_amps = 0
                     logger.debug(f"Charging stopped because {max_amp} below minimum of {self.evcc_client.min_current}")
 
             if self.new_evcc_state:
@@ -478,7 +479,6 @@ class SystemMediator:
                 (avg_5m > self.current_max_peak_consumption_kw * 1.1 or
                  avg_10m > self.current_max_peak_consumption_kw or
                  avg_15m > self.current_max_peak_consumption_kw)
-                and not water_heater_on
         )
 
         if peak_exceeded:
@@ -486,13 +486,13 @@ class SystemMediator:
                     self.last_email_sent_time is not None
                     and now - self.last_email_sent_time < timedelta(minutes=5)
             )
-            if not too_soon:
+            if not too_soon and not water_heater_on:
                 # Send notification email
                 smtp_cfg = self.app_config.get('smtp', {})
-                html_body = (f"\nCurrent month peak is {self.current_max_peak_consumption_kw:.2f} kWh"
-                             f"\n{avg_5m:.2f} kWh over the last 5 minutes"
-                             f"\n{avg_10m:.2f} kWh over the last 10 minutes"
-                             f"\n{avg_15m:.2f} kWh over the last 15 minutes")
+                html_body = (f"<br>Current month peak is {self.current_max_peak_consumption_kw:.2f} kWh"
+                             f"<br>{avg_5m:.2f} kWh over the last 5 minutes"
+                             f"<br>{avg_10m:.2f} kWh over the last 10 minutes"
+                             f"<br>{avg_15m:.2f} kWh over the last 15 minutes")
                 send_email_with_attachments(
                     smtp_config=smtp_cfg,
                     sender_email=smtp_cfg.get('sender_email'),
@@ -504,11 +504,13 @@ class SystemMediator:
                 self.last_email_sent_time = now  # update timestamp
 
             # Adjust EVCC and inverter states
-            if (avg_10m > self.current_max_peak_consumption_kw * 1.05 or
+            if (avg_5m > self.current_max_peak_consumption_kw * 1.5 or
+                    avg_10m > self.current_max_peak_consumption_kw * 1.05 or
                     avg_15m > self.current_max_peak_consumption_kw):
                 self.new_evcc_state = c.EVCCManualState.EVCC_CMD_STATE_OFF
                 self.new_inv_state = c.InverterManualState.INV_CMD_LIMIT_STANDARD
                 self.new_inv_limit = self.inverter_client.standard_power_limit
+                self.last_max_amps = 0
                 return True
 
         return False
