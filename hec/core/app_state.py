@@ -50,7 +50,8 @@ class AppState:
             # Battery control
             "battery_data": None,
             "battery_records": [],
-            "battery_manual_mode": None
+            "battery_manual_mode": None,
+            "prediction_plan": None
         }
 
         self.db_handler: Optional[db_handler] = None
