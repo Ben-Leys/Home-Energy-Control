@@ -953,7 +953,7 @@ class DatabaseHandler:
                 return False
         logger.error("Inverter Log: Failed to store data after multiple attempts.")
 
-    def get_inverter__data(self, start_date_local: datetime, end_date_local: datetime) -> List[Dict[str, Any]]:
+    def get_inverter_data(self, start_date_local: datetime, end_date_local: datetime) -> List[Dict[str, Any]]:
         """
         Retrieves inverter log data for a given UTC ISO datetime period (inclusive start, exclusive end).
 
@@ -1200,6 +1200,47 @@ class DatabaseHandler:
         except sqlite3.Error as e:
             logger.error(f"Error loading all settings from database: {e}", exc_info=True)
         return all_settings_from_db
+
+    def get_p1_meter_data_for_period(self, start_utc: datetime, end_utc: datetime) -> List[Dict[str, Any]]:
+        query = """
+                SELECT timestamp_utc, \
+                       total_power_import_kwh, \
+                       total_power_export_kwh
+                FROM p1_meter_log
+                WHERE timestamp_utc >= ? \
+                  AND timestamp_utc < ?
+                ORDER BY timestamp_utc ASC \
+                """
+        try:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            cursor.execute(query, (start_utc.isoformat(), end_utc.isoformat()))
+            rows = cursor.fetchall()
+            return [dict(row) for row in rows]
+        except Exception as e:
+            logger.error(f"DBHandler: Error retrieving p1 meter data: {e}", exc_info=True)
+            return []
+
+    def get_battery_data_for_period(self, start_utc: datetime, end_utc: datetime) -> List[Dict[str, Any]]:
+        query = """
+                SELECT timestamp_utc, \
+                       battery_name, \
+                       energy_import_kwh, \
+                       energy_export_kwh
+                FROM battery_log
+                WHERE timestamp_utc >= ? \
+                  AND timestamp_utc < ?
+                ORDER BY timestamp_utc ASC \
+                """
+        try:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            cursor.execute(query, (start_utc.isoformat(), end_utc.isoformat()))
+            rows = cursor.fetchall()
+            return [dict(row) for row in rows]
+        except Exception as e:
+            logger.error(f"DBHandler: Error retrieving battery data: {e}", exc_info=True)
+            return []
 
 
 if __name__ == '__main__':

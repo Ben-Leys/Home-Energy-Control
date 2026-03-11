@@ -28,7 +28,7 @@ class ConsumptionPredictor:
         periods.append((start_last_year, end_last_year))
 
         for i in [1, 2, 3]:
-            start_prev_day = forecast_start_date - timedelta(days=i+1)
+            start_prev_day = forecast_start_date - timedelta(days=i)
             end_prev_day = start_prev_day + timedelta(days=1, hours=1)
             periods.append((start_prev_day, end_prev_day))
 
@@ -68,7 +68,7 @@ class ConsumptionPredictor:
 
             # 3. Inverter data
             if not inv_data:
-                logger.warning(f"Geen inverter data voor {start_utc}, neem 0 aan.")
+                logger.warning(f"No inverter data for {start_utc}, assume 0")
                 solar_kwh = pd.Series(0, index=idx_15min)
             else:
                 inv_df = pd.DataFrame(inv_data)
@@ -121,7 +121,7 @@ class ConsumptionPredictor:
             house_consumption_kwh = solar_kwh + net_grid_kwh + net_battery_kwh
 
             # Return data but shifted to show future consumption at the requested time
-            return house_consumption_kwh.iloc[1:]
+            return house_consumption_kwh.iloc[2:]
 
         except Exception as e:
             logger.error(f"Error calculating baseline for {start_utc}: {e}", exc_info=True)
@@ -140,42 +140,45 @@ class ConsumptionPredictor:
         Returns:
             pd.Series: Forecast home usage in 15 minute intervals.
         """
-        logger.info(f"Start home usage forecast generation for {forecast_start_date.date()}...")
 
-        # Periods to analyse
-        forecast_start_date = forecast_start_date - timedelta(minutes=15)
-        hist_periods = self._get_historical_periods(forecast_start_date)
+        # 1. Calculate how many 15-minute intervals we actually need
+        total_seconds = (forecast_end_date - forecast_start_date).total_seconds()
+        num_periods = int(total_seconds / (15 * 60)) + 1
+
+        logger.info(f"Start home usage forecast generation for {num_periods} intervals...")
+
+        # 2. Adjust historical fetching
+        query_start_date = forecast_start_date - timedelta(minutes=15)
+        hist_periods = self._get_historical_periods(query_start_date)
 
         historical_data = []
         for start, end in hist_periods:
             baseline = self._calculate_period_baseline(start, end)
+
             if baseline is not None:
-                # 'baseline' heeft nu een index van de *historische* dag.
-                # We moeten de index 'resetten' zodat ze overeenkomen.
-                # We nemen de eerste 96 kwartieren (24 uur)
-                baseline_24h = baseline.head(96).values
-                if len(baseline_24h) == 96:
-                    historical_data.append(baseline_24h)
+                baseline_segment = baseline.head(num_periods).values
+                if len(baseline_segment) == num_periods:
+                    historical_data.append(baseline_segment)
                 else:
-                    logger.warning(f"Insufficient data for {start.date()}, period ignored.")
+                    logger.warning(f"Insufficient data for {start.date()}: expected {num_periods}, got {len(baseline_segment)}")
 
         if not historical_data:
             logger.error("Insufficient historical data found. Unable to forecast.")
             return None
 
-        # Make average forecast
+        # 3. Make average forecast
         data_matrix = np.array(historical_data)
         mean_forecast_values = np.mean(data_matrix, axis=0)
+
         forecast_index = pd.date_range(
             start=forecast_start_date,
-            periods=96,
+            periods=num_periods,
             freq='15min',
             tz='UTC'
         )
 
         # Return requested period
         final_forecast = pd.Series(mean_forecast_values, index=forecast_index)
-        final_forecast = final_forecast.truncate(before=forecast_start_date + timedelta(minutes=15), after=forecast_end_date)
 
         logger.info("Successful home consumption forecast")
         return final_forecast
@@ -192,8 +195,8 @@ if __name__ == '__main__':
 
     cd = ConsumptionPredictor(db_handler)
 
-    start_dt = datetime(2026, 3, 9, 23, 0, 0, tzinfo=pytz.UTC)
-    end_dt = datetime(2026, 3, 10, 23, 0, 0, tzinfo=pytz.UTC)
+    start_dt = datetime(2026, 3, 10, 23, 0, 0, tzinfo=pytz.UTC)
+    end_dt = datetime(2026, 3, 11, 22, 45, 0, tzinfo=pytz.UTC)
 
     ff = cd.generate_consumption_forecast(start_dt, end_dt)
     with pd.option_context('display.max_rows', None, 'display.max_columns', None):
