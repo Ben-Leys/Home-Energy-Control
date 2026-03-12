@@ -45,6 +45,7 @@ class BatteryPredictor:
         self.max_discharge_kw = 0
         self.dt_hours = 0.25
         self.eff = 0.9
+        self.cur_dt = None
 
         for battery in app_config.get("batteries"):
             self.capacity_kwh += battery.get("capacity_kwh", 0)
@@ -146,7 +147,7 @@ class BatteryPredictor:
         # Optional: Grid interaction after battery
         df_plan['grid_in'] = np.clip(
             np.where(df_plan['net_kwh'] < 0,
-                     df_plan['net_kwh'] + df_plan['charge_kwh'],
+                     abs(df_plan['net_kwh']) + df_plan['charge_kwh'],
                      0),
             a_min=0, a_max=None
         )
@@ -185,16 +186,16 @@ class BatteryPredictor:
 
         for idx, row in df.iterrows():
             # 1. Handle Inverter Limit (limit_i) on Solar
-            # limit_i is in Watts, so we convert to kWh per 15-min block
             max_solar_kwh = (row['limit_i'] / 1000.0) * self.dt_hours
             effective_solar = min(row['solar_kwh'], max_solar_kwh)
 
             # Recalculate net based on restricted solar vs original consumption
             effective_net = effective_solar - row['cons_kwh']
 
-            # 2. Base Logic: Start with the default charge_kwh or the effective_net
-            # If no flags are set, we follow the net energy flow
-            new_c = min(effective_net, row['charge_kwh'])
+            # 2. Base Logic: default charge_kwh or the effective_net
+            rem_c = max(row['charge_kwh'], row['grid_out'])
+            max_c = min(rem_c, self.max_charge_kw * self.dt_hours)
+            new_c = min(effective_net, max_c)
 
             # 3. Apply Block Flags
             if row['block_d'] and new_c < 0:
@@ -203,8 +204,7 @@ class BatteryPredictor:
             if row['block_c'] and new_c > 0:
                 new_c = 0.0
 
-            # 4. Apply Force Charge (Grid-to-Battery)
-            # force_time is in minutes. We calculate energy based on max_charge_kw
+            # 4. Apply Force Charge
             if row['force_c'] and row['force_time'] > 0:
                 # Energy = Power (kW) * Time (hours)
                 forced_energy_kwh = self.max_charge_kw * (row['force_time'] / 60.0)
@@ -235,11 +235,13 @@ class BatteryPredictor:
         return df
 
     def optimize_plan(self, df_plan, cur_dt, actual_soc, state: Dict) -> pd.DataFrame:
-        opt_plan = df_plan[df_plan.index > cur_dt].copy()
+        self.cur_dt = cur_dt
+        opt_plan = df_plan[df_plan.index > self.cur_dt].copy()
 
-        # 1. Extract and align prices from global_app_state
+        # Extract and align prices from global_app_state
         opt_plan = add_prices_to_plan(opt_plan, state)
 
+        # Assign empty calculation columns
         opt_plan = opt_plan.assign(
             block_d=False,
             block_c=False,
@@ -250,7 +252,16 @@ class BatteryPredictor:
             new_pct=0.0
         )
 
-        self.calculate_impact(opt_plan, cur_dt)
+        # Apply rule: block charge when charging later is cheaper while still achieving max capacity
+        opt_plan = self.apply_rule_block_charge(opt_plan)
+        self.calculate_impact(opt_plan, self.cur_dt)
+
+        # Clean up: remove block_c when battery is full
+        opt_plan.loc[opt_plan['new_pct'] >= 98, 'block_c'] = False
+
+        # Apply rule: block discharge if later buy_price is higher
+        opt_plan = self.apply_rule_block_discharge(opt_plan)
+        # self.calculate_impact(opt_plan, self.cur_dt)
 
         return opt_plan
 
@@ -361,7 +372,7 @@ class BatteryPredictor:
             df_opt.at[current_time, 'new_soc'] = current_soc
             df_opt.at[current_time, 'new_pct'] = (current_soc / self.capacity_kwh) * 100 \
                 if self.capacity_kwh > 0 else 0
-        
+
         return df_opt
 
     def apply_rule_block_charge(self, df_opt: pd.DataFrame) -> pd.DataFrame:
@@ -369,10 +380,6 @@ class BatteryPredictor:
         Blocks charging during the most expensive export periods of the day
         if solar production exceeds battery capacity.
         """
-        df_opt['block_c'] = False
-        dt_hours = 0.25
-        eff = 0.9
-
         # Process each day independently
         for date in df_opt.index.normalize().unique():
             day_mask = df_opt.index.normalize() == date
@@ -395,8 +402,8 @@ class BatteryPredictor:
                 if theoretical_soc >= self.capacity_kwh:
                     break
 
-                potential_charge = min(row['net_kwh'], self.max_charge_kw * dt_hours)
-                actual_added = min(potential_charge * eff, self.capacity_kwh - theoretical_soc)
+                potential_charge = min(row['net_kwh'], self.max_charge_kw * self.dt_hours)
+                actual_added = min(potential_charge * self.eff, self.capacity_kwh - theoretical_soc)
 
                 theoretical_soc += actual_added
                 allowed_timestamps.append(ts)
@@ -416,6 +423,59 @@ class BatteryPredictor:
                 blocked_candidates = []
 
             df_opt.loc[blocked_candidates, 'block_c'] = True
+
+        return df_opt
+
+    def apply_rule_block_discharge(self, df_opt: pd.DataFrame, min_price_diff: float = 0.02) -> pd.DataFrame:
+        """
+        Continuous optimization: For every interval, checks if the energy currently
+        being used would be more valuable at a future more expensive peak.
+        """
+        # We loop through every interval except the very last one
+        for i in range(len(df_opt) - 1):
+            current_ts = df_opt.index[i]
+            current_row = df_opt.iloc[i]
+
+            # 1. Skip if the battery is already essentially empty
+            if current_row['new_pct'] <= 5.0:
+                continue
+
+            current_buy_price = current_row['buy_price']
+
+            # 2. Look ahead: Find future intervals where the price is higher
+            # and the battery is projected to be empty (the 'need' window)
+            future_df = df_opt.iloc[i + 1:]
+
+            # Criteria for a "better" future slot:
+            # - Price is significantly higher
+            # - The battery is projected to be empty (< 5%) or we are buying from grid
+            expensive_needs = future_df[
+                (future_df['buy_price'] >= current_buy_price + min_price_diff) &
+                ((future_df['new_pct'] <= 5.5) | (future_df['grid_in'] > 0))
+                ]
+
+            if expensive_needs.empty:
+                continue
+
+            # 3. Check for "The Sun Trap":
+            # If the battery hits 100% between 'now' and the 'future peak',
+            # blocking discharge now is useless because the sun will refill it anyway.
+            peak_ts = expensive_needs.index[0]  # Look at the first upcoming peak
+            intervening_df = future_df.loc[:peak_ts]
+
+            if (intervening_df['new_pct'] >= 98.0).any():
+                # Battery will overflow before we reach the expensive price; no point in saving.
+                continue
+
+            # 4. If we passed the checks, block discharge for this interval
+            # This "saves" the energy for that future expensive_needs window.
+            df_opt.at[current_ts, 'block_d'] = True
+
+            # Optional: We should ideally update a 'virtual' SOC to let the
+            # next iteration in this loop know we just saved energy.
+            # But for simplicity, the sequential calculate_impact handles this perfectly.
+
+        self.calculate_impact(df_opt, self.cur_dt)
 
         return df_opt
 
@@ -439,8 +499,8 @@ if __name__ == "__main__":
     cd = ConsumptionPredictor(db_handler)
 
     # Fill app_state with NEPIs from PricePoints in database
-    first_day_start = datetime(2026, 3, 10, 23, 0, 0, tzinfo=pytz.UTC)
-    first_day_end = datetime(2026, 3, 11, 22, 45, 0, tzinfo=pytz.UTC)
+    first_day_start = datetime(2026, 3, 11, 23, 0, 0, tzinfo=pytz.UTC)
+    first_day_end = datetime(2026, 3, 12, 22, 45, 0, tzinfo=pytz.UTC)
     price_points = db_handler.get_da_prices(first_day_start.astimezone(local_tz))
     process_price_points_to_app_state(price_points, first_day_start, "electricity_prices_today", config, db_handler)
 
@@ -450,8 +510,8 @@ if __name__ == "__main__":
     last_soc_day1 = first_plan_df['soc_pct'].iloc[-1]
 
     # Fill app_state with NEPIs
-    second_day_start = datetime(2026, 3, 11, 23, 0, 0, tzinfo=pytz.UTC)
-    second_day_end = datetime(2026, 3, 12, 22, 45, 0, tzinfo=pytz.UTC)
+    second_day_start = datetime(2026, 3, 12, 23, 0, 0, tzinfo=pytz.UTC)
+    second_day_end = datetime(2026, 3, 13, 22, 45, 0, tzinfo=pytz.UTC)
     price_points = db_handler.get_da_prices(second_day_start.astimezone(local_tz))
     process_price_points_to_app_state(price_points, second_day_start, "electricity_prices_tomorrow", config, db_handler)
 
@@ -461,7 +521,7 @@ if __name__ == "__main__":
 
     plan_df = pd.concat([first_plan_df, second_plan_df])
 
-    time_stamp = datetime(2026, 3, 12, 7, 55, 0, tzinfo=pytz.UTC)
+    time_stamp = datetime(2026, 3, 11, 7, 55, 0, tzinfo=pytz.UTC)
     opt_plan_df = bp.optimize_plan(plan_df, time_stamp, 2, GLOBAL_APP_STATE)
 
     with pd.option_context(
