@@ -361,7 +361,7 @@ class BatteryPredictor:
             df_opt.at[current_time, 'new_soc'] = current_soc
             df_opt.at[current_time, 'new_pct'] = (current_soc / self.capacity_kwh) * 100 \
                 if self.capacity_kwh > 0 else 0
-        
+
         return df_opt
 
     def apply_rule_block_charge(self, df_opt: pd.DataFrame) -> pd.DataFrame:
