@@ -32,7 +32,7 @@ def populate_app_state(db_handler: DatabaseHandler, app_config: dict, evcc_clien
         populate_appstate_with_price_data(db_handler, app_config, True)
 
         # Populate forecast data
-        populate_appstate_with_forecast_data(db_handler)
+        # populate_appstate_with_forecast_data(db_handler)
 
         # Populate evcc data
         task_poll_evcc_state(evcc_client)

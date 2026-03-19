@@ -1,10 +1,11 @@
 import logging
+import os
 from collections import deque
 from datetime import datetime
 from enum import Enum
 from typing import Any
 
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, request, send_from_directory
 
 from hec.core import constants as c
 from hec.core.app_state import GLOBAL_APP_STATE
@@ -209,6 +210,12 @@ def update_app_setting_api():
     except Exception as e:
         logger.error(f"API /settings/update: Error processing request: {e}", exc_info=True)
         return jsonify({"error": "Internal server error processing update"}), 500
+
+
+@api_app.route('/')
+def serve_dashboard():
+    base_dir = os.path.dirname(os.path.realpath(__file__))
+    return send_from_directory(base_dir, 'vue_dashboard.html')
 
 
 def run_api_server(app_config: dict):

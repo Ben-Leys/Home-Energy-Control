@@ -68,7 +68,8 @@ def populate_appstate_with_forecast_data(db_handler: DatabaseHandler):
         f_type: db_handler.get_elia_forecasts(f_type, local_now, local_now + timedelta(days=days))
         for f_type, days in forecast_days.items()
     }
-    GLOBAL_APP_STATE.set("forecasts", forecasts)
+    # GLOBAL_APP_STATE.set("forecasts", forecasts)
+    return forecasts
 
 
 def _initialize_rolling_average_structures_if_needed():

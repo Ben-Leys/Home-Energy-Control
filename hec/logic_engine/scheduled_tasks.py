@@ -102,7 +102,7 @@ def task_midnight_rollover(db_handler: DatabaseHandler, app_config: dict):
     else:  # No prices for tomorrow, try fetch from API
         populate_appstate_with_price_data(db_handler, app_config, True)
 
-    populate_appstate_with_forecast_data(db_handler)
+    # populate_appstate_with_forecast_data(db_handler)
 
 
 def task_poll_p1_meter(db_handler: DatabaseHandler, p1_client: Optional[P1MeterHomewizardClient], boundary: int = 5):
@@ -356,8 +356,9 @@ def task_send_daily_energy_summary_email(app_config, db_handler, tariff_manager)
     """
     Scheduled task to generate and send the daily energy summary email.
     """
+    forecasts = populate_appstate_with_forecast_data(db_handler)
 
-    summary_generator = DailySummaryGenerator(app_config, db_handler, tariff_manager)
+    summary_generator = DailySummaryGenerator(app_config, db_handler, tariff_manager, forecasts)
     logger.info("Running task: Send Daily Energy Summary Email.")
 
     t_date_prices = GLOBAL_APP_STATE.get("electricity_prices_tomorrow")

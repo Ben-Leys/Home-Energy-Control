@@ -18,11 +18,12 @@ logger = logging.getLogger(__name__)
 
 
 class DailySummaryGenerator:
-    def __init__(self, app_config: dict, db_handler: DatabaseHandler, tariff_manager: TariffManager):
+    def __init__(self, app_config: dict, db_handler: DatabaseHandler, tariff_manager: TariffManager, forecasts: Dict):
         self.app_config = app_config
         self.db_handler = db_handler
         self.tariff_manager = tariff_manager
         self.price_predictor = EnergyPricePredictor(db_handler)  # Init predictor
+        self.forecasts = forecasts
 
     def _get_elia_forecasts_for_days(self, start_date_local: date, num_days: int) -> Dict[str, List[Dict[str, Any]]]:
         """Helper to fetch Elia forecasts for multiple days, keyed by forecast_type."""
@@ -273,7 +274,7 @@ class DailySummaryGenerator:
         t_date_start = datetime.combine(t_date, datetime.min.time(), tzinfo=local_tz).astimezone(timezone.utc)
         t_date_end = t_date_start + timedelta(days=1)
 
-        elia_solar_fc_raw = [f for f in GLOBAL_APP_STATE.get("forecasts").get("solar")
+        elia_solar_fc_raw = [f for f in self.forecasts.get("solar")
                              if t_date_start <= f["timestamp_utc"] < t_date_end]
 
         forecast_resolution = 15
