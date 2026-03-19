@@ -1,8 +1,8 @@
 import pandas as pd
 import numpy as np
 import logging
-from typing import Dict, Any
-from datetime import datetime
+from typing import Dict, Any, List
+from datetime import datetime, timezone, timedelta
 
 from hec.core.app_state import GLOBAL_APP_STATE
 from hec.logic_engine.consumption_predictor import ConsumptionPredictor
@@ -12,7 +12,27 @@ from hec.utils.utils import process_price_points_to_app_state
 logger = logging.getLogger(__name__)
 
 
+def add_prices_to_plan(df_plan: pd.DataFrame, state: Dict) -> pd.DataFrame:
+    prices_today = state.get("electricity_prices_today", [])
+    prices_tomorrow = state.get("electricity_prices_tomorrow", [])
+    all_prices = prices_today + prices_tomorrow
 
+    price_map = {}
+    for p in all_prices:
+        try:
+            contract = p.active_contract_type
+            buy_price = p.net_prices_eur_per_kwh[contract]['buy']
+            sell_price = p.net_prices_eur_per_kwh[contract]['sell']
+            price_map[p.interval_start_local] = {'buy_price': buy_price, 'sell_price': sell_price}
+        except (KeyError, TypeError):
+            pass
+
+    df_prices = pd.DataFrame.from_dict(price_map, orient='index')
+    df = df_plan.merge(df_prices, left_index=True, right_index=True, how='left')
+    df['buy_price'] = df['buy_price'].ffill()
+    df['sell_price'] = df['sell_price'].ffill()
+
+    return df
 
 
 class BatteryPredictor:
