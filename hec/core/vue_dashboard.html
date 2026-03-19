@@ -1,0 +1,324 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Home Energy Controller</title>
+    <script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
+    <style>
+        :root {
+            --bg-color: #0e1117;
+            --card-bg: #262730;
+            --text-color: #fafafa;
+            --accent: #ff4b4b;
+            --border-radius: 8px;
+            --border-color: #444;
+        }
+        body { font-family: 'Segoe UI', sans-serif; background-color: var(--bg-color); color: var(--text-color); margin: 0; padding: 20px; }
+        h2, h3, h5 { margin-top: 0; }
+
+        /* Tabs */
+        .tabs { border-bottom: 2px solid var(--border-color); margin-bottom: 20px; }
+        .tab { background: none; border: none; color: #888; font-size: 1.1rem; padding: 10px 20px; cursor: pointer; }
+        .tab.active { color: var(--text-color); border-bottom: 3px solid var(--accent); font-weight: bold; }
+
+        /* Grid System */
+        .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+        .grid-3 { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 20px; }
+
+        /* Cards */
+        .card { background: var(--card-bg); border: 1px solid var(--border-color); border-radius: var(--border-radius); padding: 20px; margin-bottom: 20px; }
+        .card h3 { font-size: 1.2rem; margin-bottom: 15px; border-bottom: 1px solid var(--border-color); padding-bottom: 10px; }
+
+        /* Metrics */
+        .metric { display: flex; flex-direction: column; }
+        .metric-label { font-size: 0.9rem; color: #aaa; }
+        .metric-value { font-size: 1.8rem; font-weight: bold; margin: 5px 0; }
+
+        /* Forms & Controls */
+        .control-group { margin-bottom: 15px; }
+        label { display: block; margin-bottom: 5px; font-size: 0.9rem; color: #ccc; }
+        select, input[type="number"] { width: 100%; padding: 8px; border-radius: 4px; border: 1px solid var(--border-color); background: #1e1e1e; color: white; }
+        select:focus, input:focus { outline: 2px solid var(--accent); }
+
+        /* Buttons */
+        button.btn { background: #333; color: white; border: 1px solid #555; padding: 10px 15px; border-radius: 4px; cursor: pointer; transition: 0.2s; }
+        button.btn:hover { background: #444; }
+        button.btn-primary { background: var(--accent); border: none; }
+        button.btn-primary:hover { background: #ff3333; }
+
+        /* Toasts */
+        .toast { position: fixed; bottom: 20px; right: 20px; background: #4CAF50; color: white; padding: 15px; border-radius: 4px; box-shadow: 0 4px 6px rgba(0,0,0,0.3); transition: opacity 0.5s; opacity: 1; }
+        .toast-hide { opacity: 0; pointer-events: none; }
+    </style>
+</head>
+<body>
+
+<div id="app">
+    <h2>🏠 Home Energy Control Dashboard</h2>
+
+    <div class="tabs">
+        <button class="tab" :class="{active: currentTab === 'dashboard'}" @click="currentTab = 'dashboard'">📊 Dashboard</button>
+        <button class="tab" :class="{active: currentTab === 'logs'}" @click="currentTab = 'logs'">📜 Logs</button>
+    </div>
+
+    <div v-show="currentTab === 'dashboard'">
+
+        <div v-if="!state" style="color: #ff4b4b;">
+            🚨 Main application state not available. Loading...
+        </div>
+
+        <div v-else>
+            <h5>Application Status:
+                <span :style="{ color: statusColor, fontWeight: 'bold' }">
+                    {{ (state.app_state || 'UNKNOWN').replace('_', ' ').toUpperCase() }}
+                </span>
+            </h5>
+
+            <div class="card">
+                <h2>💡 Price</h2>
+                <div v-if="currentPrice" class="grid-2">
+                    <div class="metric">
+                        <span class="metric-label">Net Buy Price</span>
+                        <span class="metric-value">{{ currentPrice.buy !== null ? currentPrice.buy.toFixed(4) + ' €/kWh' : 'N/A' }}</span>
+                    </div>
+                    <div class="metric">
+                        <span class="metric-label">Net Sell Price</span>
+                        <span class="metric-value">{{ currentPrice.sell !== null ? currentPrice.sell.toFixed(4) + ' €/kWh' : 'N/A' }}</span>
+                    </div>
+                    <div style="grid-column: span 2; font-size: 0.8rem; color: #888;">
+                        Interval: {{ formatTime(currentPrice.start) }} - {{ formatTime(currentPrice.end) }} (Local)
+                    </div>
+                </div>
+                <div v-else style="color: #ffaa00;">Current electricity price data not available.</div>
+            </div>
+
+            <div class="card">
+                <h2>🔋 Batteries</h2>
+                <p>Mode: <strong>{{ state.battery_data?.mode || 'UNKNOWN' }}</strong></p>
+
+                <div class="grid-3" v-if="state.battery_records && state.battery_records.length > 0">
+                    <div class="metric" v-for="(bat, idx) in state.battery_records" :key="idx">
+                        <span class="metric-label"><strong>{{ bat.battery_name || 'Battery ' + (idx+1) }}</strong></span>
+                        <span class="metric-value">{{ bat.state_of_charge_pct !== null ? bat.state_of_charge_pct + '%' : 'N/A' }}</span>
+                    </div>
+                </div>
+                <div v-else style="color: #888;">No detailed battery records available yet.</div>
+            </div>
+
+            <div class="card">
+                <h3>⚙️ Controls</h3>
+                <div class="grid-2">
+                    <div>
+                        <div class="control-group">
+                            <label>Application Mode:</label>
+                            <select v-model="state.app_operating_mode" @change="updateSetting('app_operating_mode', state.app_operating_mode)">
+                                <option v-for="opt in enums.OperatingMode" :value="opt.name">{{ opt.value }}</option>
+                            </select>
+                        </div>
+
+                        <div class="control-group">
+                            <label>Mediator Goal:</label>
+                            <select v-model="state.app_mediator_goal" @change="updateSetting('app_mediator_goal', state.app_mediator_goal)">
+                                <option v-for="opt in enums.MediatorGoal" :value="opt.name">{{ opt.value }}</option>
+                            </select>
+                        </div>
+
+                        <div class="control-group">
+                            <label>Inverter Manual Action:</label>
+                            <select v-model="state.inverter_manual_state" @change="updateSetting('inverter_manual_state', state.inverter_manual_state)">
+                                <option v-for="opt in enums.InverterManualState" :value="opt.name">{{ opt.value }}</option>
+                            </select>
+                        </div>
+
+                        <div class="control-group" v-if="state.inverter_manual_state === 'INV_CMD_LIMIT_MANUAL'">
+                            <label>Inverter Fixed Limit (Watts):</label>
+                            <input type="number" min="0" max="7000" step="100" v-model.number="state.inverter_manual_limit"
+                                   @change="updateSetting('inverter_manual_limit', state.inverter_manual_limit)">
+                        </div>
+
+                        <div class="control-group">
+                            <label>EVCC Manual Action:</label>
+                            <select v-model="state.evcc_manual_state" @change="updateSetting('evcc_manual_state', state.evcc_manual_state)">
+                                <option v-for="opt in enums.EVCCManualState" :key="opt.value" :value="opt.name">{{ opt.value }}</option>
+                            </select>
+                        </div>
+
+                        <div class="control-group">
+                            <label>EVCC Amperage Limit:</label>
+                            <input type="number" min="6" max="32" step="1" v-model.number="state.evcc_manual_limit"
+                                   @change="updateSetting('evcc_manual_limit', state.evcc_manual_limit)">
+                        </div>
+                    </div>
+
+                    <div>
+                        <div class="control-group">
+                            <label>Battery Manual Mode:</label>
+                            <select v-model="state.battery_manual_mode" @change="updateSetting('battery_manual_mode', state.battery_manual_mode)">
+                                <option v-for="opt in enums.BatteryState" :value="opt.name">{{ opt.value }}</option>
+                            </select>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="grid-2">
+                <button class="btn btn-primary" @click="updateSetting('reboot_request', true)">Shutdown system</button>
+                <button class="btn" @click="updateSetting('summary_request', true)">Daily summary</button>
+            </div>
+
+            <p style="color: #666; font-size: 0.8rem; margin-top: 20px;">Last sync: {{ lastSync }}</p>
+        </div>
+    </div>
+
+    <div v-show="currentTab === 'logs'">
+        <h3>Application Logs</h3>
+        <p style="color: #888;">Log viewing functionality: To be implemented.</p>
+    </div>
+
+    <div class="toast" :class="{'toast-hide': !toast.show}">
+        ✅ {{ toast.message }}
+    </div>
+
+</div>
+
+<script>
+    const { createApp, ref, computed, onMounted, onUnmounted } = Vue
+
+    createApp({
+        setup() {
+            // -- State variables --
+            const currentTab = ref('dashboard');
+            const state = ref(null);
+            const lastSync = ref('');
+            const toast = ref({ show: false, message: '' });
+            let refreshTimer = null;
+
+            // API URLs (Assumes this page is served from the same server. If not, voeg "http://ip:8213" toe)
+            const API_STATE = '/api/v1/state';
+            const API_UPDATE = '/api/v1/settings/update';
+
+            // --- ENUMS CONFIGURATION ---
+            // Aangezien Vue de python imports niet kent, mappen we hier wat de UI toont (.value) naar wat de API verwacht (.name)
+            // PAS DEZE AAN naar de exacte namen/values in je c.py constanten!
+            const enums = {
+                OperatingMode: [
+                    { name: 'MODE_AUTO', value: 'Auto' },
+                    { name: 'MODE_MANUAL', value: 'Manual' }
+                ],
+                MediatorGoal: [
+                    { name: 'NO_CHARGING', value: 'No charging' },
+                    { name: 'CHARGE_WITH_ONLY_EXCESS_SOLAR_POWER', value: 'Charge with excess solar power' },
+                    { name: 'CHARGE_WHEN_SELL_PRICE_NEGATIVE', value: 'Charge when sell price negative' },
+                ],
+                InverterManualState: [
+                    { name: 'INV_CMD_LIMIT_STANDARD', value: 'Standard power limit' },
+                    { name: 'INV_CMD_LIMIT_ZERO', value: 'Power limit zero' },
+                    { name: 'INV_CMD_LIMIT_MANUAL', value: 'Manual power limit' },
+                    { name: 'INV_CMD_LIMIT_TO_USE', value: 'Power limited to home consumption' }
+                ],
+                EVCCManualState: [
+                    { name: 'EVCC_CMD_STATE_OFF', value: 'off' },
+                    { name: 'EVCC_CMD_STATE_PV', value: 'pv' },
+                    { name: 'EVCC_CMD_STATE_MINPV', value: 'minpv' },
+                    { name: 'EVCC_CMD_STATE_NOW', value: 'now' }
+                ],
+                BatteryState: [
+                    { name: 'BATTERY_ON', value: 'zero' },
+                    { name: 'BATTERY_OFF', value: 'standby' },
+                    { name: 'BATTERY_FORCE_CHARGE', value: 'to_full' },
+                    { name: 'BATTERY_AUTO', value: 'auto' }
+                ]
+            };
+
+            // --- Computed Properties (Logica) ---
+            const statusColor = computed(() => {
+                if (!state.value || !state.value.app_state) return 'white';
+                const s = state.value.app_state;
+                const map = { NORMAL: '#4CAF50', STARTING: '#2196F3', DEGRADED: '#9E9E9E', WARNING: '#FF9800', ALARM: '#f44336', SHUTDOWN: '#000000' };
+                return map[s] || 'white';
+            });
+
+            const currentPrice = computed(() => {
+                if (!state.value || !state.value.electricity_prices_today) return null;
+                const now = new Date();
+
+                for (let data of state.value.electricity_prices_today) {
+                    try {
+                        // De python code doet json.loads, dus we parsen de string
+                        const interval = typeof data === 'string' ? JSON.parse(data) : data;
+                        const start = new Date(interval.interval_start_local);
+                        const end = new Date(start.getTime() + (interval.resolution_minutes * 60000));
+
+                        if (now >= start && now < end) {
+                            return {
+                                buy: interval.net_prices_eur_per_kwh?.dynamic?.buy ?? null,
+                                sell: interval.net_prices_eur_per_kwh?.dynamic?.sell ?? null,
+                                start: start,
+                                end: end
+                            };
+                        }
+                    } catch (e) { console.error("Fout bij parsen prijs:", e); }
+                }
+                return null;
+            });
+
+            // --- Helper Functions ---
+            const formatTime = (dateObj) => {
+                return dateObj.toLocaleTimeString('nl-BE', { hour: '2-digit', minute: '2-digit' });
+            };
+
+            const showToast = (msg) => {
+                toast.value = { show: true, message: msg };
+                setTimeout(() => { toast.value.show = false; }, 3000);
+            };
+
+            // --- API Calls ---
+            const fetchState = async () => {
+                try {
+                    const res = await fetch(API_STATE);
+                    if (res.ok) {
+                        state.value = await res.json();
+                        lastSync.value = new Date().toLocaleTimeString();
+                    }
+                } catch (error) {
+                    console.error("Fout bij ophalen state:", error);
+                }
+            };
+
+            const updateSetting = async (key, value) => {
+                try {
+                    const res = await fetch(API_UPDATE, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ key: key, value: value })
+                    });
+                    const result = await res.json();
+
+                    if (result.success) {
+                        showToast(`Setting '${key}' updated.`);
+                        fetchState(); // Direct refreshen na update
+                    } else {
+                        alert(`Fout bij updaten: ${result.error}`);
+                    }
+                } catch (error) {
+                    alert(`API fout: ${error.message}`);
+                }
+            };
+
+            // --- Lifecycle Hooks ---
+            onMounted(() => {
+                fetchState();
+                refreshTimer = setInterval(fetchState, 15000); // 15 seconden zoals in config
+            });
+
+            onUnmounted(() => {
+                clearInterval(refreshTimer);
+            });
+
+            return { currentTab, state, lastSync, enums, statusColor, currentPrice, formatTime, updateSetting, toast }
+        }
+    }).mount('#app')
+</script>
+</body>
+</html>
