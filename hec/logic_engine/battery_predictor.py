@@ -209,7 +209,6 @@ class BatteryPredictor:
 
         # Storage for results
         new_c_list = []
-        new_soc_kwh_list = []
         new_pct_list = []
         new_grid_list = []
 
@@ -269,7 +268,6 @@ class BatteryPredictor:
                 current_soc_kwh -= actual_removed
 
             # 7. Update SoC Percentage
-            new_soc_kwh_list.append(current_soc_kwh)
             soc_pct = (current_soc_kwh / self.capacity_kwh) * 100 if self.capacity_kwh > 0 else 0
 
             # 8. New grid
@@ -280,7 +278,6 @@ class BatteryPredictor:
             new_grid_list.append(new_grid)
 
         df['new_c'] = new_c_list
-        df['new_soc_kwh'] = new_soc_kwh_list
         df['new_pct'] = new_pct_list
         df['new_grid'] = new_grid_list
 
@@ -470,55 +467,6 @@ class BatteryPredictor:
                 blocked_candidates = []
 
             df_opt.loc[blocked_candidates, 'block_c'] = True
-
-        return df_opt
-
-    def old_apply_rule_block_discharge(self, df_opt: pd.DataFrame, min_price_diff: float = 0.02) -> pd.DataFrame:
-        """
-        Continuous optimization: For every interval, checks if the energy currently
-        being used would be more valuable at a future more expensive peak.
-        """
-        # We loop through every interval except the very last one
-        for i in range(len(df_opt) - 1):
-            current_ts = df_opt.index[i]
-            current_row = df_opt.iloc[i]
-
-            # 1. Skip if the battery is already essentially empty
-            if current_row['new_pct'] <= 2.0:
-                continue
-
-            current_buy_price = current_row['buy_price']
-
-            # 2. Look ahead: Find future intervals where the price is higher
-            # and the battery is projected to be empty (the 'need' window)
-            future_df = df_opt.iloc[i + 1:]
-
-            # Criteria for a "better" future slot:
-            # - Price is significantly higher
-            # - The battery is projected to be empty (< 5%) or we are buying from grid
-            expensive_needs = future_df[
-                (future_df['buy_price'] >= current_buy_price + min_price_diff) &
-                ((future_df['new_pct'] <= 5.5) | (future_df['grid_in'] > 0))
-                ]
-
-            if expensive_needs.empty:
-                continue
-
-            # 3. Check for "The Sun Trap":
-            # If the battery hits 100% between 'now' and the 'future peak',
-            # blocking discharge now is useless because the sun will refill it anyway.
-            peak_ts = expensive_needs.index[0]  # Look at the first upcoming peak
-            intervening_df = future_df.loc[:peak_ts]
-
-            if (intervening_df['new_pct'] >= 98.0).any():
-                # Battery will overflow before we reach the expensive price; no point in saving.
-                continue
-
-            # 4. If we passed the checks, block discharge for this interval
-            # This "saves" the energy for that future expensive_needs window.
-            df_opt.at[current_ts, 'block_d'] = True
-
-            df_opt = self.calculate_impact(df_opt)
 
         return df_opt
 
