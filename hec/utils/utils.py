@@ -256,7 +256,7 @@ def convert_power(current_a: Optional[float] = None, power_kw: Optional[float] =
 #                                              'region_name_for_astral_optional': 'Belgium'}}}
 #     print(is_daylight(test_config))
 #     test_config = {"host": "smtp.gmail.com", "port": 465,
-#                    "user": "***REMOVED***", "sender_email": "***REMOVED***",
-#                    "default_recipients": ["***REMOVED***", "***REMOVED***"]}
+#                    "user": "", "sender_email": "",
+#                    "default_recipients": ["", ""]}
 #     print(send_email_with_attachments(test_config, test_config['sender_email'], test_config['default_recipients'],
 #                                       'Test Email', html_body='<html><body></body></html>'))
