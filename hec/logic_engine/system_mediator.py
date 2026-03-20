@@ -489,10 +489,16 @@ class SystemMediator:
             if not too_soon and not water_heater_on:
                 # Send notification email
                 smtp_cfg = self.app_config.get('smtp', {})
-                html_body = (f"<br>Current month peak is {self.current_max_peak_consumption_kw:.2f} kWh"
-                             f"<br>{avg_5m:.2f} kWh over the last 5 minutes"
-                             f"<br>{avg_10m:.2f} kWh over the last 10 minutes"
-                             f"<br>{avg_15m:.2f} kWh over the last 15 minutes")
+                html_body = (f"<br>Month peak before this email was: {self.current_max_peak_consumption_kw:.2f} kW"
+                             f"<br><br>{avg_5m:.2f} kW over the last 5 minutes"
+                             f"<br>{avg_10m:.2f} kW over the last 10 minutes"
+                             f"<br>{avg_15m:.2f} kW over the last 15 minutes<br><br>")
+                if avg_15m > self.current_max_peak_consumption_kw:
+                    html_body += f"Month peak exceeded!"
+                elif avg_10m > self.current_max_peak_consumption_kw:
+                    html_body += f"Month peak will exceed in 5 minutes"
+                elif avg_5m > self.current_max_peak_consumption_kw:
+                    html_body += f"Month peak will exceed in 10 minutes"
                 send_email_with_attachments(
                     smtp_config=smtp_cfg,
                     sender_email=smtp_cfg.get('sender_email'),

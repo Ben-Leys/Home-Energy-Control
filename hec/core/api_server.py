@@ -3,7 +3,6 @@ import os
 from collections import deque
 from datetime import datetime
 from enum import Enum
-from typing import Any
 
 from flask import Flask, jsonify, request, send_from_directory
 
@@ -18,7 +17,7 @@ logger = logging.getLogger(__name__)
 def get_app_state_api():
     """API endpoint to get the current application state."""
     # GLOBAL_APP_STATE.get_all() returns a JSON-serializable dict
-    # datetime objects need to be converted to ISO strings, Enums to their values/names
+    # datetime objects need to be converted to ISO strings, Enums to their names
     current_raw_state = GLOBAL_APP_STATE.get_all()
 
     # Make a copy to modify for serialization
@@ -34,7 +33,7 @@ def get_app_state_api():
                 isinstance(value, c.EVChargeStatus) or \
                 isinstance(value, c.EVCCManualState) or \
                 isinstance(value, c.BatteryState):
-            serializable_state[key] = value.value
+            serializable_state[key] = value.name
         elif isinstance(value, list):
             new_list = []
             for item in value:
@@ -79,133 +78,64 @@ def update_app_setting_api():
             logger.warning("API /settings/update: Missing 'key' or 'value' in request JSON.")
             return jsonify({"error": "Missing 'key' or 'value' in request body"}), 400
 
-        key_to_update = data['key']
-        raw_value_from_ui = data['value']  # This value might be a string from UI toggles/inputs
+        key = data['key']
+        raw_val = data['value']
 
-        logger.info(f"API /settings/update: Received request to update '{key_to_update}' to '{raw_value_from_ui}'")
-
-        # --- Type Conversion and Validation ---
-        final_value_to_set: Any = None
-        conversion_successful = True
+        logger.info(f"API /settings/update: Received request to update '{key}' to '{raw_val}'")
 
         # Check if the key is even valid in AppState
-        if key_to_update not in GLOBAL_APP_STATE.current_values:
-            logger.warning(f"API /settings/update: Attempt to update unknown AppState key '{key_to_update}'.")
-            return jsonify({"error": f"Unknown setting key: {key_to_update}"}), 400
+        if key not in GLOBAL_APP_STATE.current_values:
+            logger.warning(f"API /settings/update: Attempt to update unknown AppState key '{key}'.")
+            return jsonify({"error": f"Unknown setting key: {key}"}), 400
 
-        # Get the expected type from the default value in AppState if possible
-        default_value = GLOBAL_APP_STATE.current_values[key_to_update]  # Initial value as type hint
+        # Key map to Enum
+        TYPE_MAP = {
+            "app_operating_mode": c.OperatingMode,
+            "app_mediator_goal": c.MediatorGoal,
+            "inverter_manual_state": c.InverterManualState,
+            "evcc_manual_state": c.EVCCManualState,
+            "battery_manual_mode": c.BatteryState,
+            "inverter_manual_limit": int,
+            "evcc_manual_limit_amps": int,
+        }
 
-        if key_to_update == "app_operating_mode":
+        final_value = raw_val
+
+        if raw_val is not None:
+            target_type = TYPE_MAP.get(key)
+
             try:
-                if raw_value_from_ui is None:
-                    final_value_to_set = None
-                else:
-                    final_value_to_set = c.OperatingMode[raw_value_from_ui]
-            except KeyError:
-                conversion_successful = False
-                logger.warning(
-                    f"API /settings/update: Invalid value '{raw_value_from_ui}' for Application OperatingMode.")
+                if target_type is None:
+                    default_val = GLOBAL_APP_STATE.current_values[key]
+                    if isinstance(default_val, bool) and not isinstance(raw_val, bool):
+                        final_value = str(raw_val).lower() in ['true', '1', 'yes']
+                    else:
+                        final_value = raw_val
 
-        elif key_to_update == "app_mediator_goal":
-            try:
-                if raw_value_from_ui is None:
-                    final_value_to_set = None
-                else:
-                    final_value_to_set = c.MediatorGoal[raw_value_from_ui]
-            except KeyError:
-                conversion_successful = False
-                logger.warning(f"API /settings/update: Invalid value '{raw_value_from_ui}' for MediatorGoal.")
+                elif issubclass(target_type, Enum):
+                    # Enum via Name (eg. 'BATTERY_ON')
+                    final_value = target_type[raw_val]
 
-        elif key_to_update == "inverter_manual_state":
-            try:
-                if raw_value_from_ui is None:
-                    final_value_to_set = None
-                else:
-                    final_value_to_set = c.InverterManualState[raw_value_from_ui]
-            except KeyError:
-                conversion_successful = False
-                logger.warning(
-                    f"API /settings/update: Invalid value '{raw_value_from_ui}' for inverter_manual_state.")
+                elif target_type == int:
+                    final_value = int(raw_val)
+                    # Range validation
+                    if key == "inverter_manual_limit" and not (0 <= final_value <= 7000):
+                        return jsonify({"error": "Inverter limit 0-7000"}), 400
+                    if key == "evcc_manual_limit_amps" and not (6 <= final_value <= 32):
+                        return jsonify({"error": "EVCC amps 6-32"}), 400
 
-        elif key_to_update == "evcc_manual_state":
-            try:
-                if raw_value_from_ui is None:
-                    final_value_to_set = None
-                else:
-                    final_value_to_set = c.EVCCManualState[raw_value_from_ui]
-            except KeyError:
-                conversion_successful = False
-                logger.warning(
-                    f"API /settings/update: Invalid value '{raw_value_from_ui}' for evcc_manual_state.")
+            except (KeyError, ValueError, TypeError) as e:
+                logger.warning(f"Conversion failed for {key} with value {raw_val}: {e}")
+                return jsonify({"error": f"Invalid value '{raw_val}' for {key}"}), 400
 
-        elif key_to_update == "battery_manual_mode":
-            try:
-                if raw_value_from_ui is None:
-                    final_value_to_set = None
-                else:
-                    final_value_to_set = c.BatteryState[raw_value_from_ui]
-            except KeyError:
-                conversion_successful = False
-                logger.warning(
-                    f"API /settings/update: Invalid value '{raw_value_from_ui}' for battery_manual_mode.")
+        # Update and confirm
+        GLOBAL_APP_STATE.set(key, final_value)
+        confirmed = GLOBAL_APP_STATE.get(key)
 
-        elif key_to_update in ["inverter_manual_limit", "evcc_manual_limit_amps"]:
-            if raw_value_from_ui is None:  # Allow None
-                final_value_to_set = None
-            else:
-                try:
-                    final_value_to_set = int(raw_value_from_ui)
-                    # Add range validation
-                    if key_to_update == "inverter_manual_limit" and not (0 <= final_value_to_set <= 7000):
-                        raise ValueError(f"Inverter limit out of range 0-7000")
-                    if key_to_update == "evcc_manual_limit_amps" and not (6 <= final_value_to_set <= 32):
-                        raise ValueError("Amps out of range 0-32")
-                except (ValueError, TypeError):
-                    conversion_successful = False
-                    logger.warning(
-                        f"API /settings/update: Invalid integer value '{raw_value_from_ui}' for '{key_to_update}'.")
+        json_val = confirmed.name if isinstance(confirmed, Enum) else confirmed
 
-        # Add more specific type conversions when developed
-        # Default if no specific conversion matched
-        elif isinstance(default_value, str) and isinstance(raw_value_from_ui, str):
-            final_value_to_set = raw_value_from_ui
-        elif isinstance(default_value, bool) and isinstance(raw_value_from_ui, bool):
-            final_value_to_set = raw_value_from_ui
-        else:  # Fallback or unknown key type for conversion
-            if key_to_update in GLOBAL_APP_STATE.persisted_keys:
-                logger.warning(f"API /settings/update: No specific type conversion defined for persisted key "
-                               f"'{key_to_update}' with value '{raw_value_from_ui}'. Assuming string or direct type "
-                               f"if matches default.")
-                if isinstance(raw_value_from_ui, type(default_value)) or default_value is None:
-                    final_value_to_set = raw_value_from_ui
-                else:
-                    conversion_successful = False  # Reject if types don't match and no rule
-            else:
-                final_value_to_set = raw_value_from_ui
-
-        if not conversion_successful:
-            return jsonify(
-                {"error": f"Invalid value or type for setting '{key_to_update}': '{raw_value_from_ui}'"}), 400
-
-        # --- Update AppState (which will also save to DB if key is in persisted_keys) ---
-        GLOBAL_APP_STATE.set(key_to_update, final_value_to_set)
-
-        # Read back
-        confirmed_value = GLOBAL_APP_STATE.get(key_to_update)
-        if isinstance(confirmed_value, Enum):
-            confirmed_value_for_json = confirmed_value.name
-        else:
-            confirmed_value_for_json = confirmed_value
-
-        logger.info(
-            f"API /settings/update: Setting '{key_to_update}' successfully updated to '{final_value_to_set}' "
-            f"(confirmed: {confirmed_value_for_json}).")
-        return jsonify({
-            "success": True,
-            "key": key_to_update,
-            "new_value_stored": confirmed_value_for_json
-        })
+        logger.info(f"API Update: {key} -> {json_val}")
+        return jsonify({"success": True, "key": key, "new_value_stored": json_val})
 
     except Exception as e:
         logger.error(f"API /settings/update: Error processing request: {e}", exc_info=True)

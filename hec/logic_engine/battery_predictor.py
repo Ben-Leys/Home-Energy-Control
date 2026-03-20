@@ -99,8 +99,8 @@ class BatteryPredictor:
 
         df_prices = pd.DataFrame.from_dict(price_map, orient='index')
         df = df_plan.merge(df_prices, left_index=True, right_index=True, how='left')
-        df['buy_price'] = df['buy_price'].ffill()
-        df['sell_price'] = df['sell_price'].ffill()
+        # df['buy_price'] = df['buy_price'].ffill()
+        # df['sell_price'] = df['sell_price'].ffill()
 
         return df
 
@@ -112,7 +112,7 @@ class BatteryPredictor:
         self.max_peak_kw = max_peak_kw
 
         # Ensure consumption is a Series
-        if isinstance(consumption_s, pd.DataFrame):
+        if isinstance(consumption_s, pd.DataFrame) and consumption_s:
             consumption_s = consumption_s.iloc[:, 0]
 
         solar_s = self._fetch_aligned_solar(start_dt, end_dt, db, consumption_s.index)
@@ -621,8 +621,8 @@ if __name__ == "__main__":
     cd = ConsumptionPredictor(db_handler)
 
     # Fill app_state with NEPIs from PricePoints in database
-    first_day_start = datetime(2026, 3, 16, 23, 00, 0, tzinfo=pytz.UTC)
-    first_day_end = datetime(2026, 3, 17, 22, 45, 0, tzinfo=pytz.UTC)
+    first_day_start = datetime(2026, 3, 19, 23, 00, 0, tzinfo=pytz.UTC)
+    first_day_end = datetime(2026, 3, 20, 22, 45, 0, tzinfo=pytz.UTC)
     price_points = db_handler.get_da_prices(first_day_start.astimezone(local_tz))
     process_price_points_to_app_state(price_points, first_day_start, "electricity_prices_today", config, db_handler)
 
@@ -632,8 +632,8 @@ if __name__ == "__main__":
     last_soc_day1 = first_plan_df['soc_pct'].iloc[-1]
 
     # Fill app_state with NEPIs
-    second_day_start = datetime(2026, 3, 17, 23, 00, 0, tzinfo=pytz.UTC)
-    second_day_end = datetime(2026, 3, 18, 22, 45, 0, tzinfo=pytz.UTC)
+    second_day_start = datetime(2026, 3, 20, 23, 00, 0, tzinfo=pytz.UTC)
+    second_day_end = datetime(2026, 3, 21, 22, 45, 0, tzinfo=pytz.UTC)
     price_points = db_handler.get_da_prices(second_day_start.astimezone(local_tz))
     process_price_points_to_app_state(price_points, second_day_start, "electricity_prices_tomorrow", config, db_handler)
 
@@ -643,8 +643,8 @@ if __name__ == "__main__":
 
     plan_df = pd.concat([first_plan_df, second_plan_df])
 
-    time_stamp = datetime(2026, 1, 10, 23, 0, 0, tzinfo=pytz.UTC)
-    opt_plan_df = bp.optimize_plan(plan_df, time_stamp, 2, GLOBAL_APP_STATE)
+    cur_dt = datetime(2026, 1, 10, 23, 0, 0, tzinfo=pytz.UTC)
+    opt_plan_df = bp.optimize_plan(plan_df, cur_dt, 25, GLOBAL_APP_STATE)
 
     with pd.option_context(
             'display.max_rows', None,

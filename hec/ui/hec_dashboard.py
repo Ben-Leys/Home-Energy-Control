@@ -7,6 +7,10 @@ import streamlit as st
 import requests
 from datetime import datetime, timedelta
 
+# -------------------------------------- #
+# 20/03/2026 Dashboard replaced with Vue #
+# -------------------------------------- #
+
 # Set PYTHONPATH to . (project root)
 # streamlit run hec/ui/hec_dashboard.py
 try:

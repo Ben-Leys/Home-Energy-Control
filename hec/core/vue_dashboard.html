@@ -7,38 +7,41 @@
     <script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
     <style>
         :root {
-            --bg-color: #0e1117;
-            --card-bg: #262730;
-            --text-color: #fafafa;
+            --bg-color: #fafafa;
+            --card-bg: #EBEBEB;
+            --text-color: #0e1117;
             --accent: #ff4b4b;
             --border-radius: 8px;
             --border-color: #444;
+            --info-label: #525252;
         }
-        body { font-family: 'Segoe UI', sans-serif; background-color: var(--bg-color); color: var(--text-color); margin: 0; padding: 20px; }
-        h2, h3, h5 { margin-top: 0; }
+        body { font-family: 'Segoe UI', sans-serif; background-color: var(--bg-color); color: var(--text-color); margin: 0; padding: 10px; }
+        h2, h3, h4, h5 { margin: 1px 0; line-height: 1.5; }
 
         /* Tabs */
         .tabs { border-bottom: 2px solid var(--border-color); margin-bottom: 20px; }
-        .tab { background: none; border: none; color: #888; font-size: 1.1rem; padding: 10px 20px; cursor: pointer; }
+        .tab { background: none; border: none; color: #888; font-size: 1rem; padding: 10px 20px; cursor: pointer; }
         .tab.active { color: var(--text-color); border-bottom: 3px solid var(--accent); font-weight: bold; }
 
         /* Grid System */
-        .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+        .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
         .grid-3 { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 20px; }
 
         /* Cards */
-        .card { background: var(--card-bg); border: 1px solid var(--border-color); border-radius: var(--border-radius); padding: 20px; margin-bottom: 20px; }
+        .card { background: var(--card-bg); border: 1px solid var(--border-color); border-radius: var(--border-radius); padding: 10px; margin-bottom: 10px; }
         .card h3 { font-size: 1.2rem; margin-bottom: 15px; border-bottom: 1px solid var(--border-color); padding-bottom: 10px; }
 
         /* Metrics */
         .metric { display: flex; flex-direction: column; }
-        .metric-label { font-size: 0.9rem; color: #aaa; }
-        .metric-value { font-size: 1.8rem; font-weight: bold; margin: 5px 0; }
+        .metric-label { font-size: 0.9rem; color: var(--info-label); }
+        .metric-value { font-size: 1.2rem; font-weight: bold; margin: 2px 0; }
 
         /* Forms & Controls */
-        .control-group { margin-bottom: 15px; }
-        label { display: block; margin-bottom: 5px; font-size: 0.9rem; color: #ccc; }
-        select, input[type="number"] { width: 100%; padding: 8px; border-radius: 4px; border: 1px solid var(--border-color); background: #1e1e1e; color: white; }
+        .control-group { margin-bottom: 8px; }
+        label { display: block; margin-bottom: 5px; font-size: 0.9rem; color: var(--text-color); }
+        select, input[type="number"] { box-sizing: border-box; padding: 4px; border-radius: 4px; border: 1px solid var(--border-color); background: var(--bg-color); color: var(--text-color); }
+        select { width: 100%; }
+        .input-compact { width: 80px; display: inline-block; }
         select:focus, input:focus { outline: 2px solid var(--accent); }
 
         /* Buttons */
@@ -50,12 +53,37 @@
         /* Toasts */
         .toast { position: fixed; bottom: 20px; right: 20px; background: #4CAF50; color: white; padding: 15px; border-radius: 4px; box-shadow: 0 4px 6px rgba(0,0,0,0.3); transition: opacity 0.5s; opacity: 1; }
         .toast-hide { opacity: 0; pointer-events: none; }
+
+        .sub-value {
+            font-size: 0.85rem;
+            color: var(--info-label);
+            margin-top: 5px;
+            margin-bottom: 5px;
+        }
+        .status-badge {
+            font-size: 0.7rem;
+            padding: 2px 6px;
+            border-radius: 4px;
+            background: #D4D4D4;
+            text-transform: uppercase;
+        }
+        .compact-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 10px;
+        }
+        .unit {
+            color: var(--info-label);
+            font-size: 0.8rem;
+            font-weight: normal;
+            margin-left: 4px;
+        }
     </style>
 </head>
 <body>
 
 <div id="app">
-    <h2>🏠 Home Energy Control Dashboard</h2>
+    <h3>🏠 Home Energy Control</h3>
 
     <div class="tabs">
         <button class="tab" :class="{active: currentTab === 'dashboard'}" @click="currentTab = 'dashboard'">📊 Dashboard</button>
@@ -75,88 +103,136 @@
                 </span>
             </h5>
 
-            <div class="card">
-                <h2>💡 Price</h2>
-                <div v-if="currentPrice" class="grid-2">
-                    <div class="metric">
-                        <span class="metric-label">Net Buy Price</span>
-                        <span class="metric-value">{{ currentPrice.buy !== null ? currentPrice.buy.toFixed(4) + ' €/kWh' : 'N/A' }}</span>
+            <div class="compact-grid">
+                <div class="card">
+                    <h4>💡 Price</h4>
+                    <div style="grid-column: span 2; font-size: 0.8rem; color: var(--info-label); margin-bottom: 16px">
+                        Interval: {{ formatTime(currentPrice.start) }} - {{ formatTime(currentPrice.end) }} (LT)
                     </div>
-                    <div class="metric">
-                        <span class="metric-label">Net Sell Price</span>
-                        <span class="metric-value">{{ currentPrice.sell !== null ? currentPrice.sell.toFixed(4) + ' €/kWh' : 'N/A' }}</span>
+                    <div v-if="currentPrice" class="grid-2">
+                        <div class="metric">
+                            <span class="metric-label">Net buy</span>
+                            <span v-if="currentPrice.buy !== null">
+                                <span class="metric-value">{{ currentPrice.buy.toFixed(2) }}</span>
+                                <span class="unit">€/kWh</span>
+                            </span>
+                            <span v-else class="metric-value">N/A</span>
+                        </div>
+                        <div class="metric">
+                            <span class="metric-label">Net sell</span>
+                            <span v-if="currentPrice.buy !== null">
+                                <span class="metric-value">{{ currentPrice.sell.toFixed(2) }}</span>
+                                <span class="unit">€/kWh</span>
+                            </span>
+                        </div>
                     </div>
-                    <div style="grid-column: span 2; font-size: 0.8rem; color: #888;">
-                        Interval: {{ formatTime(currentPrice.start) }} - {{ formatTime(currentPrice.end) }} (Local)
+                    <div v-else style="color: #ffaa00;">Current electricity price data not available.</div>
+                </div>
+
+                <div class="card">
+                    <h4>🔋 Batteries</h4>
+                    <div style="margin-bottom: 10px">Mode: <strong>{{ state.battery_data?.mode || 'UNKNOWN' }}</strong></div>
+
+                    <div class="grid-2" v-if="state.battery_records && state.battery_records.length > 0">
+                        <div class="metric" v-for="(bat, idx) in state.battery_records" :key="idx">
+                            <span class="metric-label">{{ bat.battery_name || 'Battery ' + (idx+1) }}</span>
+                            <span class="metric-value">{{ bat.state_of_charge_pct !== null ? bat.state_of_charge_pct + '%' : 'N/A' }}</span>
+                        </div>
+                    </div>
+                    <div v-else style="color: #888;">No detailed battery records available yet.</div>
+                </div>
+            </div>
+
+            <div class="compact-grid">
+                <div class="card">
+                    <h4>☀️ Inverter</h4>
+                    <div class="metric">
+                        <span class="metric-label">Production</span>
+                        <span class="metric-value" style="color: #48AB4C;">
+                            {{ state.inverter_data?.pv_power_watts ?? 0 }} W
+                        </span>
+                    </div>
+                    <div class="sub-value">
+                        Limit: {{ state.inverter_data?.active_power_limit_watts }} W
+                    </div>
+                    <span class="status-badge" :style="{ color: state.inverter_data?.operational_status === 'NORMAL' ? '#4CAF50' : '#FF9800' }">
+                        {{ state.inverter_data?.operational_status }}
+                    </span>
+                </div>
+
+                <div class="card">
+                    <h4>🔌 Net</h4>
+                    <div class="metric">
+                        <span class="metric-label">Current</span>
+                        <span class="metric-value" :style="{ color: state.p1_meter_data?.active_power_w > 0 ? '#AB48A8' : '#48AB4C' }">
+                            {{ state.p1_meter_data?.active_power_w ?? 0 }} W
+                        </span>
+                    </div>
+                    <div class="sub-value">
+                        Month peak: <strong>{{ state.p1_meter_data?.monthly_power_peak_w }} W</strong>
+                    </div>
+                    <div style="font-size: 0.65rem; color: #666; margin-top: 5px">
+                        at: {{ formatPeakTimestamp(state.p1_meter_data?.monthly_power_peak_timestamp) }}
                     </div>
                 </div>
-                <div v-else style="color: #ffaa00;">Current electricity price data not available.</div>
             </div>
 
             <div class="card">
-                <h2>🔋 Batteries</h2>
-                <p>Mode: <strong>{{ state.battery_data?.mode || 'UNKNOWN' }}</strong></p>
-
-                <div class="grid-3" v-if="state.battery_records && state.battery_records.length > 0">
-                    <div class="metric" v-for="(bat, idx) in state.battery_records" :key="idx">
-                        <span class="metric-label"><strong>{{ bat.battery_name || 'Battery ' + (idx+1) }}</strong></span>
-                        <span class="metric-value">{{ bat.state_of_charge_pct !== null ? bat.state_of_charge_pct + '%' : 'N/A' }}</span>
-                    </div>
-                </div>
-                <div v-else style="color: #888;">No detailed battery records available yet.</div>
-            </div>
-
-            <div class="card">
-                <h3>⚙️ Controls</h3>
+                <h4>⚙️ Controls</h4>
                 <div class="grid-2">
                     <div>
                         <div class="control-group">
-                            <label>Application Mode:</label>
+                            <label>Application mode:</label>
                             <select v-model="state.app_operating_mode" @change="updateSetting('app_operating_mode', state.app_operating_mode)">
                                 <option v-for="opt in enums.OperatingMode" :value="opt.name">{{ opt.value }}</option>
                             </select>
                         </div>
 
                         <div class="control-group">
-                            <label>Mediator Goal:</label>
+                            <label>Mediator goal:</label>
                             <select v-model="state.app_mediator_goal" @change="updateSetting('app_mediator_goal', state.app_mediator_goal)">
                                 <option v-for="opt in enums.MediatorGoal" :value="opt.name">{{ opt.value }}</option>
                             </select>
                         </div>
 
                         <div class="control-group">
-                            <label>Inverter Manual Action:</label>
+                            <label>Inverter mode:</label>
                             <select v-model="state.inverter_manual_state" @change="updateSetting('inverter_manual_state', state.inverter_manual_state)">
                                 <option v-for="opt in enums.InverterManualState" :value="opt.name">{{ opt.value }}</option>
                             </select>
                         </div>
 
-                        <div class="control-group" v-if="state.inverter_manual_state === 'INV_CMD_LIMIT_MANUAL'">
-                            <label>Inverter Fixed Limit (Watts):</label>
-                            <input type="number" min="0" max="7000" step="100" v-model.number="state.inverter_manual_limit"
-                                   @change="updateSetting('inverter_manual_limit', state.inverter_manual_limit)">
-                        </div>
 
-                        <div class="control-group">
-                            <label>EVCC Manual Action:</label>
-                            <select v-model="state.evcc_manual_state" @change="updateSetting('evcc_manual_state', state.evcc_manual_state)">
-                                <option v-for="opt in enums.EVCCManualState" :key="opt.value" :value="opt.name">{{ opt.value }}</option>
-                            </select>
-                        </div>
 
-                        <div class="control-group">
-                            <label>EVCC Amperage Limit:</label>
-                            <input type="number" min="6" max="32" step="1" v-model.number="state.evcc_manual_limit"
-                                   @change="updateSetting('evcc_manual_limit', state.evcc_manual_limit)">
-                        </div>
                     </div>
 
                     <div>
                         <div class="control-group">
-                            <label>Battery Manual Mode:</label>
+                            <label>Battery mode:</label>
                             <select v-model="state.battery_manual_mode" @change="updateSetting('battery_manual_mode', state.battery_manual_mode)">
                                 <option v-for="opt in enums.BatteryState" :value="opt.name">{{ opt.value }}</option>
                             </select>
+                        </div>
+
+                        <div class="control-group">
+                            <label>EVCC mode:</label>
+                            <select v-model="state.evcc_manual_state" @change="updateSetting('evcc_manual_state', state.evcc_manual_state)">
+                                <option v-for="opt in enums.EVCCManualState" :key="opt.name" :value="opt.name">{{ opt.value }}</option>
+                            </select>
+                        </div>
+
+                        <div class="grid-2">
+                            <div class="control-group">
+                            <label>Inverter limit:</label>
+                            <input type="number" class="input-compact" min="0" max="7000" step="100" v-model.number="state.inverter_manual_limit"
+                                   @change="updateSetting('inverter_manual_limit', state.inverter_manual_limit)">
+                            </div>
+
+                            <div class="control-group">
+                                <label>EVCC limit:</label>
+                                <input type="number" class="input-compact" min="6" max="32" step="1" v-model.number="state.evcc_manual_limit"
+                                       @change="updateSetting('evcc_manual_limit', state.evcc_manual_limit)">
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -167,7 +243,7 @@
                 <button class="btn" @click="updateSetting('summary_request', true)">Daily summary</button>
             </div>
 
-            <p style="color: #666; font-size: 0.8rem; margin-top: 20px;">Last sync: {{ lastSync }}</p>
+            <p style="color: #666; font-size: 0.8rem; margin-top: 10px;">Last sync: {{ lastSync }}</p>
         </div>
     </div>
 
@@ -273,6 +349,15 @@
                 setTimeout(() => { toast.value.show = false; }, 3000);
             };
 
+            const formatPeakTimestamp = (ts) => {
+                if (!ts) return 'N/A';
+                const s = String(ts);
+                if (s.length >= 10) {
+                    return `${s.substring(4,6)}/${s.substring(2,4)} ${s.substring(6,8)}:${s.substring(8,10)}`;
+                }
+                return s;
+            };
+
             // --- API Calls ---
             const fetchState = async () => {
                 try {
@@ -309,14 +394,14 @@
             // --- Lifecycle Hooks ---
             onMounted(() => {
                 fetchState();
-                refreshTimer = setInterval(fetchState, 15000); // 15 seconden zoals in config
+                refreshTimer = setInterval(fetchState, 10000); // 15 seconden zoals in config
             });
 
             onUnmounted(() => {
                 clearInterval(refreshTimer);
-            });
+            })
 
-            return { currentTab, state, lastSync, enums, statusColor, currentPrice, formatTime, updateSetting, toast }
+            return { currentTab, state, lastSync, enums, statusColor, currentPrice, formatTime, updateSetting, toast, formatPeakTimestamp }
         }
     }).mount('#app')
 </script>
