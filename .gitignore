@@ -17,6 +17,7 @@ venv/
 # Secrets / Config
 .env
 config.yaml
+BFGremove.txt
 
 # Data / Logs
 *.db
@@ -29,3 +30,4 @@ data/
 /classes.html
 /sql_dump/
 /hec/logfile.log*
+/bfg-1.15.0.jar
