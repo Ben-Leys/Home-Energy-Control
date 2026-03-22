@@ -1,12 +1,12 @@
 # hec/logic_engine/system_mediator.py
 import logging
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, time
 from typing import List, Optional
 
 from hec.controllers.api_evcc import EvccApiClient
 from hec.controllers.modbus_sma_inverter import InverterSmaModbusClient
-from hec.core import constants as c
+from hec.core import constants as c, market_prices
 from hec.core.app_state import GLOBAL_APP_STATE
 from hec.core.models import EVCCLoadpointState, NetElectricityPriceInterval
 from hec.core.tariff_manager import TariffManager
@@ -39,9 +39,7 @@ class SystemMediator:
         self.current_max_peak_consumption_kw: float = 2.5
         self.app_mediator_goal: Optional[c.MediatorGoal] = None
         # Prices
-        self.next_price_interval_at: datetime = datetime.now().astimezone()
-        self.cur_buy_price: Optional[float] = None
-        self.cur_sell_price: Optional[float] = None
+        self.market: Optional[market_prices] = None
         # Charging/evcc
         self.temp_charging_stopped_by_capacity: bool = False
         self.state_before_charging_stopped: Optional[c.EVCCManualState] = None
@@ -58,113 +56,87 @@ class SystemMediator:
         self.new_inv_state: Optional[c.InverterManualState] = None
         self.new_inv_limit = None
         # Peak consumption
+        self.ignore_start = time(4, 0)
+        self.ignore_end = time(4, 45)
         self.last_email_sent_time: datetime | None = None
+        self.is_peak_throttle_mode: bool = False
+        self.inv_state_before_peak: Optional[c.InverterManualState] = None
+        self.inv_limit_before_peak: Optional[int] = None
+        self.evcc_state_before_peak: Optional[c.EVCCManualState] = None
 
         self._prepare_mediator_prerequisites(evcc_client, inverter_client, p1_client)
 
+    @property
+    def is_ignore_window_active(self) -> bool:
+        """
+        Returns True if the current time falls within the
+        configured 'ignore' window (e.g., water heater window).
+        """
+        now_time = datetime.now().time()
+
+        if self.ignore_start <= now_time <= self.ignore_end:
+            return True
+
+        return False
+
     def _prepare_mediator_prerequisites(self, evcc_client, inverter_client, p1_client):
-        def degrade_app(reason):
-            logger.warning(f'{reason}. Mediator functionality degraded.')
+        """
+            Initializes hardware clients and validates configuration.
+            Sets system state to DEGRADED if critical components are missing.
+        """
+        issues = []
+
+        # Configuration
+        conf = self.app_config.get('mediator', {})
+        self.standard_max_peak_consumption_kw = conf.get('standard_max_peak_consumption_kw', 2.5)
+        self.buffer_before_pv_limit_change = conf.get('buffer_before_pv_limit_change', 3)
+
+        if not conf:
+            issues.append("Missing 'mediator' config section")
+
+        # Hardware Validation
+        # EVCC
+        if evcc_client and getattr(evcc_client, 'is_available', False):
+            self.evcc_client = evcc_client
+        else:
+            issues.append("EVCC client unavailable")
+
+        # Inverter
+        inv_status = inverter_client.get_operational_status() if inverter_client else None
+        if inverter_client and inv_status not in {c.InverterStatus.UNKNOWN, c.InverterStatus.OFFLINE}:
+            self.inverter_client = inverter_client
+        else:
+            issues.append("Inverter client offline or invalid")
+
+        # P1 Meter
+        if p1_client and getattr(p1_client, 'is_initialized', False):
+            self.p1_client = p1_client
+        else:
+            logger.warning("P1 client not initialized. Peak shaving will be disabled.")
+
+        # Final Evaluation
+        is_starting = GLOBAL_APP_STATE.get('app_state') == c.AppStatus.STARTING
+        if issues and not is_starting:
+            reason_str = ", ".join(issues)
+            logger.warning(f"Mediator functionality degraded: {reason_str}")
             GLOBAL_APP_STATE.set('app_state', c.AppStatus.DEGRADED)
-
-        try:
-            # Config variables
-            mediator_config = self.app_config.get('mediator', {})
-            self.standard_max_peak_consumption_kw = mediator_config.get('standard_max_peak_consumption_kw', 2.5)
-            self.buffer_before_pv_limit_change = mediator_config.get('buffer_before_pv_limit_change', 3)
-
-            if not mediator_config:
-                degrade_app('No mediator config provided. Falling back to default values.')
-
-            # Data sources/controllers
-            if evcc_client and evcc_client.is_available:
-                self.evcc_client = evcc_client
-            else:
-                degrade_app('No evcc_client provided.')
-
-            inverter_status = inverter_client.get_operational_status() if inverter_client else None
-            if inverter_client and inverter_status not in {c.InverterStatus.UNKNOWN, c.InverterStatus.OFFLINE}:
-                self.inverter_client = inverter_client
-            else:
-                degrade_app('No valid inverter_client provided.')
-
-            if p1_client and p1_client.is_initialized:
-                self.p1_client = p1_client
-
-            # App_state data
-            if not GLOBAL_APP_STATE.get('app_state') == c.AppStatus.STARTING:
-                if not GLOBAL_APP_STATE.get('p1_meter_data') or not GLOBAL_APP_STATE.get('electricity_prices_today'):
-                    degrade_app('AppState missing p1_data and/or electricity_prices_today.')
-
-            # Final validation
-            if all([mediator_config, evcc_client, inverter_client, GLOBAL_APP_STATE.get('p1_meter_data')]):
-                logger.info('All mediator prerequisites configured correctly.')
-
-        except AttributeError as ae:
-            logger.error(f'{ae}. Mediator prerequisites not configured correctly.')
-        except KeyError as ke:
-            logger.error(f'{ke}. Mediator prerequisites not configured correctly.')
-        except TypeError as te:
-            logger.error(f'{te}. Mediator prerequisites not configured correctly.')
-        except Exception as ex:
-            logger.error(f'{ex}. Mediator prerequisites not configured correctly.')
+        elif not issues:
+            logger.info("All mediator prerequisites configured correctly.")
 
     def _prepare_data(self) -> bool:
         try:
             if not GLOBAL_APP_STATE:
                 return False
 
-            # Retrieve app state price data if last interval finished
-            if (not self.next_price_interval_at or not self.cur_buy_price or not self.cur_sell_price or
-                    self.next_price_interval_at < datetime.now().astimezone()):
-                interval_list_today: List[NetElectricityPriceInterval] = GLOBAL_APP_STATE.get(
-                    'electricity_prices_today')
-                if not interval_list_today:
-                    logger.error("Electricity prices for today are not available.")
-                    return False
+            if not self.market.refresh_if_needed(GLOBAL_APP_STATE):
+                return False
 
-                # Determine the current price interval
-                cur_interval = get_interval_from_list(datetime.now().astimezone(), interval_list_today)
-                if not cur_interval:
-                    logger.error("Unable to determine the current interval from the price list.")
-                    return False
-
-                # Check the active contract type
-                cur_contract_type = cur_interval.active_contract_type
-                if cur_contract_type == 'fixed':
-                    logger.warning("Active contract type is set to fixed. Mediator cannot optimize.")
-                    return False
-
-                # Extract and set current buy/sell prices
-                prices = cur_interval.net_prices_eur_per_kwh.get(cur_contract_type)
-                if not prices or 'buy' not in prices or 'sell' not in prices:
-                    logger.error(f"Prices are missing or incomplete.")
-                    return False
-
-                self.cur_buy_price = prices['buy']
-                self.cur_sell_price = prices['sell']
-
-                # Calculate and set the next price interval time
-                next_price_interval_at = cur_interval.interval_start_local.astimezone() + timedelta(
-                    minutes=cur_interval.resolution_minutes)
-                self.next_price_interval_at = next_price_interval_at.replace(second=0)
-
-            # Current peak calculation based on p1 meter or standard max
-            cur_peak_kw = GLOBAL_APP_STATE.get('p1_meter_data', {}).get('monthly_power_peak_w', 0) / 1000
+            p1_data = GLOBAL_APP_STATE.get('p1_meter_data', {})
+            cur_peak_kw = p1_data.get('monthly_power_peak_w', 0) / 1000
             self.current_max_peak_consumption_kw = max(cur_peak_kw, self.standard_max_peak_consumption_kw)
 
             return True
 
-        except KeyError as ke:
-            logger.error(f"KeyError while preparing data: {ke}")
-        except AttributeError as ae:
-            logger.error(f"AttributeError while preparing data: {ae}")
-        except TypeError as te:
-            logger.error(f"TypeError while preparing data: {te.with_traceback(te.__traceback__)}")
-        except ValueError as ve:
-            logger.error(f"ValueError while preparing data: {ve}")
-        except IndexError as ie:
-            logger.error(f"IndexError while preparing data: {ie}")
         except Exception as e:
             logger.error(f"Unexpected error while preparing data: {e}")
         return False
@@ -173,13 +145,21 @@ class SystemMediator:
         """Handles auto mode by determining controller states based on the mediator's goal."""
         self.app_mediator_goal = GLOBAL_APP_STATE.get('app_mediator_goal')
 
-        # EVCC state logic
+        # EVCC
         self.new_evcc_state, self.new_max_amps = self._determine_evcc_state()
-        logger.debug(f"Auto mode: evcc decided state {self.new_evcc_state}, max amps {self.new_max_amps}")
 
-        # Inverter state logic
+        # Inverter
         self.new_inv_state = self._determine_inverter_state()
-        logger.debug(f"Auto mode: inverter state {self.new_inv_state}")
+
+        # Battery
+        # self.new_battery_mode = self._determine_battery_state()
+
+        logger.debug(
+            f"Auto Mode Logic: Goal={self.app_mediator_goal} | "
+            f"EV={self.new_evcc_state}({self.new_max_amps}A) | "
+            f"INV={self.new_inv_state} | "
+            #f"BAT={self.new_bat_state} | "
+        )
 
     def _determine_evcc_state(self) -> (c.EVCCManualState, int):
         """Determines the new controller state based on the mediator goal."""
@@ -464,60 +444,90 @@ class SystemMediator:
             self.evcc_client.set_max_current(self.new_max_amps)
             self.last_max_amps = self.new_max_amps
 
-    def _calculate_peak_consumption(self) -> bool:
-        avg_import_watts = GLOBAL_APP_STATE.get('average_grid_import_watts', {})
-        avg_5m = avg_import_watts.get('5m') / 1000 if avg_import_watts.get('5m') is not None else 0
-        avg_10m = avg_import_watts.get('10m') / 1000 if avg_import_watts.get('10m') is not None else 0
-        avg_15m = avg_import_watts.get('15m') / 1000 if avg_import_watts.get('15m') is not None else 0
+    def _handle_peak_consumption(self) -> bool:
+        metrics = GLOBAL_APP_STATE.get('average_grid_import_watts', {})
+        get_kw = lambda key: (metrics.get(key) or 0) / 1000
+        avg = {k: get_kw(k) for k in ['5m', '10m', '15m']}
 
-        # Check if water heater is on
-        now = datetime.now()
-        water_heater_on = now.hour == 4 and now.minute <= 45
+        # Detection logic
+        limit = self.current_max_peak_consumption_kw
+        peak_exceeded = (avg['5m'] > limit * 1.1 or avg['10m'] > limit or avg['15m'] > limit)
+        should_throttle = (avg['5m'] > limit * 1.5 or avg['10m'] > limit * 1.05 or avg['15m'] > limit)
 
-        # Notification conditions
-        peak_exceeded = (
-                (avg_5m > self.current_max_peak_consumption_kw * 1.1 or
-                 avg_10m > self.current_max_peak_consumption_kw or
-                 avg_15m > self.current_max_peak_consumption_kw)
-        )
-
+        # Notifications
         if peak_exceeded:
-            too_soon = (
-                    self.last_email_sent_time is not None
-                    and now - self.last_email_sent_time < timedelta(minutes=5)
-            )
-            if not too_soon and not water_heater_on:
-                # Send notification email
-                smtp_cfg = self.app_config.get('smtp', {})
-                html_body = (f"<br>Month peak before this email was: {self.current_max_peak_consumption_kw:.2f} kW"
-                             f"<br><br>{avg_5m:.2f} kW over the last 5 minutes"
-                             f"<br>{avg_10m:.2f} kW over the last 10 minutes"
-                             f"<br>{avg_15m:.2f} kW over the last 15 minutes<br><br>")
-                if avg_15m > self.current_max_peak_consumption_kw:
-                    html_body += f"Month peak exceeded!"
-                elif avg_10m > self.current_max_peak_consumption_kw:
-                    html_body += f"Month peak will exceed in 5 minutes"
-                elif avg_5m > self.current_max_peak_consumption_kw:
-                    html_body += f"Month peak will exceed in 10 minutes"
-                send_email_with_attachments(
-                    smtp_config=smtp_cfg,
-                    sender_email=smtp_cfg.get('sender_email'),
-                    recipients=smtp_cfg.get('default_recipients'),
-                    subject=f"Peak consumption detected",
-                    html_body=html_body
-                )
-                GLOBAL_APP_STATE.set('app_state', c.AppStatus.ALARM)
-                self.last_email_sent_time = now  # update timestamp
+            def _handle_peak_notifications(avg_data):
+                now = datetime.now()
 
-            # Adjust EVCC and inverter states
-            if (avg_5m > self.current_max_peak_consumption_kw * 1.5 or
-                    avg_10m > self.current_max_peak_consumption_kw * 1.05 or
-                    avg_15m > self.current_max_peak_consumption_kw):
+                if self.is_ignore_window_active:
+                    return
+
+                if self.last_email_sent_time and (now - self.last_email_sent_time).total_seconds() < 300:
+                    return
+
+                def _send_peak_email(avg_data):
+                    smtp_cfg = self.app_config.get('smtp', {})
+                    limit = self.current_max_peak_consumption_kw
+
+                    if avg_data['15m'] > limit:
+                        status_msg = "peak exceeded!"
+                    elif avg_data['10m'] > limit:
+                        status_msg = "will exceed in 5 minutes"
+                    else:
+                        status_msg = "will exceed in 10 minutes"
+
+                    html_content = [
+                        f"<h3>{status_msg.capitalize()}</h3>",
+                        f"Previous Month Peak: <b>{limit:.2f} kW</b><br><br>",
+                        f"Current Averages:",
+                        f"<ul>",
+                        f"<li>5m: {avg_data['5m']:.2f} kW</li>",
+                        f"<li>10m: {avg_data['10m']:.2f} kW</li>",
+                        f"<li>15m: {avg_data['15m']:.2f} kW</li>",
+                        f"</ul>"
+                    ]
+
+                    try:
+                        send_email_with_attachments(
+                            smtp_config=smtp_cfg,
+                            sender_email=smtp_cfg.get('sender_email'),
+                            recipients=smtp_cfg.get('default_recipients'),
+                            subject=f"Peak consumption: {status_msg}",
+                            html_body="".join(html_content)
+                        )
+                    except Exception as e:
+                        logger.error(f"Failed to send peak alert email: {e}")
+
+                _send_peak_email(avg_data)
+                self.last_email_sent_time = now
+                GLOBAL_APP_STATE.set('app_state', c.AppStatus.ALARM)
+
+            _handle_peak_notifications(avg)
+
+        # State Management
+        if should_throttle:
+            if not self.is_peak_throttle_mode:
+                # Enter peak throttle mode
+                self.is_peak_throttle_mode = True
+                s = GLOBAL_APP_STATE
+                self.inv_state_before_peak = s.get('inverter_manual_state', c.InverterManualState.INV_CMD_LIMIT_STANDARD)
+                self.inv_limit_before_peak = s.get('active_power_limit_watts', self.inverter_client.standard_power_limit)
+                self.evcc_state_before_peak = s.get('evcc_manual_state', c.EVCCManualState.EVCC_CMD_STATE_OFF)
+
                 self.new_evcc_state = c.EVCCManualState.EVCC_CMD_STATE_OFF
                 self.new_inv_state = c.InverterManualState.INV_CMD_LIMIT_STANDARD
                 self.new_inv_limit = self.inverter_client.standard_power_limit
-                self.last_max_amps = 0
-                return True
+
+                logger.warning("Peak shaving ACTIVE: Throttling EV and Inverter.")
+
+            return True
+        elif self.is_peak_throttle_mode:
+            # Exit peak throttle mode
+            self.is_peak_throttle_mode = False
+            self.new_inv_state = self.inv_state_before_peak
+            self.new_inv_limit = self.inv_limit_before_peak
+            self.new_evcc_state = self.evcc_state_before_peak
+            logger.info("Peak shaving ENDED: Restoring previous states.")
 
         return False
 
@@ -528,77 +538,81 @@ class SystemMediator:
         """
         logger.debug(f"Running system mediation logic")
 
-        # Prepare price data
+        # Prepare data
         if not self._prepare_data():
             logger.error('Mediator encountered an error while preparing essential data and is skipping.')
             return
 
-        # Check operating mode
-        app_mode = GLOBAL_APP_STATE.get('app_operating_mode', c.OperatingMode.MODE_MANUAL)
-
-        if app_mode == c.OperatingMode.MODE_MANUAL:
-            # If mode manual, just set app states to be set to controllers
-            self.new_evcc_state = GLOBAL_APP_STATE.get('evcc_manual_state')
-            self.new_inv_state = GLOBAL_APP_STATE.get('inverter_manual_state')
-            self.new_max_amps = GLOBAL_APP_STATE.get('evcc_manual_limit')
-        elif app_mode == c.OperatingMode.MODE_AUTO:
-            # If mode auto: app decides controller states based on mediator goal
-            self._handle_auto_mode()
-
-        # Peak consumption avoidance
-        peak_safety_override = self._calculate_peak_consumption()
-
-        # Check for charging amperage adjustment to avoid peak consumption
-        evcc_changes = False
-        if not peak_safety_override:
-            evcc_changes = self._recalculate_charging_amperage()
-        if peak_safety_override or (evcc_changes and int(time.time()) - self.last_amps_push > 20):
-            logger.info(f"Evcc changes: {evcc_changes}. To push: {self.new_evcc_state} with {self.new_max_amps} A")
-            self._execute_evcc_state()
-
-        inverter_changes = False
-        if not peak_safety_override:
-            inverter_changes = self._recalculate_inverter_limit()
-        if inverter_changes or peak_safety_override:
-            logger.info(
-                f"Inverter changes: {inverter_changes}. To push: {self.new_inv_state} with {self.new_inv_limit} W")
-            self._execute_inverter_state()
-
-        logger.debug(f"Battery mediator part.")
-        manual = GLOBAL_APP_STATE.get("battery_manual_mode")
-        battery_data = GLOBAL_APP_STATE.get("battery_data", {})
-        actual = battery_data.get("mode", "UNKNOWN")
-
-        is_charging = GLOBAL_APP_STATE.get('evcc_loadpoint_state').get('is_charging', False)
-        new_battery_value = actual
-        battery_stop_for_car_charge = False
-
-        if is_charging and not is_daylight(self.app_config):
-            # Charging without solar energy should never come from battery
-            battery_stop_for_car_charge = True
-            logger.debug(f"Battery stop for car charge without sunlight.")
-
-        if battery_stop_for_car_charge:
-            new_battery_value = c.BatteryState.BATTERY_OFF.value
+        if self._handle_peak_consumption():
+            pass
         else:
-            if manual is not None and manual is not c.BatteryState.BATTERY_AUTO:
-                logger.debug(f"Battery manual state: {manual.value}")
-                new_battery_value = manual.value
-            elif manual is c.BatteryState.BATTERY_AUTO or manual is None:
-                new_battery_value = c.BatteryState.BATTERY_ON.value
+            # Check operating mode
+            app_mode = GLOBAL_APP_STATE.get('app_operating_mode', c.OperatingMode.MODE_MANUAL)
 
-        if new_battery_value != actual:
-            logger.debug(f"Pushing new battery state: {new_battery_value}")
-            self.p1_client.set_battery_mode(new_battery_value)
+            if app_mode == c.OperatingMode.MODE_MANUAL:
+                # If mode manual, just set app states to be set to controllers
+                self.new_evcc_state = GLOBAL_APP_STATE.get('evcc_manual_state')
+                self.new_inv_state = GLOBAL_APP_STATE.get('inverter_manual_state')
+                self.new_max_amps = GLOBAL_APP_STATE.get('evcc_manual_limit')
 
-        # Charge car grace period: force start
-        car_charge_grace_period = (datetime.now() - self.car_start_deadline).total_seconds() < 0
-        if car_charge_grace_period and not self.force_charge_pushed:
-            logger.info(f"Car charge grace period active. Force pv charging.")
-            # Temporary disabled
-            # self.evcc_client.sequence_force_pv_charging()
-            self.force_charge_pushed = True
-        self.force_charge_pushed = car_charge_grace_period
+            elif app_mode == c.OperatingMode.MODE_AUTO:
+                # If mode auto: app decides controller states based on mediator goal
+                self._handle_auto_mode()
+
+            # Peak consumption avoidance
+            peak_safety_override = self._handle_peak_consumption()
+
+            # Check for charging amperage adjustment to avoid peak consumption
+            evcc_changes = False
+            if not peak_safety_override:
+                evcc_changes = self._recalculate_charging_amperage()
+            if peak_safety_override or (evcc_changes and int(time.time()) - self.last_amps_push > 20):
+                logger.info(f"Evcc changes: {evcc_changes}. To push: {self.new_evcc_state} with {self.new_max_amps} A")
+                self._execute_evcc_state()
+
+            inverter_changes = False
+            if not peak_safety_override:
+                inverter_changes = self._recalculate_inverter_limit()
+            if inverter_changes or peak_safety_override:
+                logger.info(
+                    f"Inverter changes: {inverter_changes}. To push: {self.new_inv_state} with {self.new_inv_limit} W")
+                self._execute_inverter_state()
+
+            logger.debug(f"Battery mediator part.")
+            manual = GLOBAL_APP_STATE.get("battery_manual_mode")
+            battery_data = GLOBAL_APP_STATE.get("battery_data", {})
+            actual = battery_data.get("mode", "UNKNOWN")
+
+            is_charging = GLOBAL_APP_STATE.get('evcc_loadpoint_state').get('is_charging', False)
+            new_battery_value = actual
+            battery_stop_for_car_charge = False
+
+            if is_charging and not is_daylight(self.app_config):
+                # Charging without solar energy should never come from battery
+                battery_stop_for_car_charge = True
+                logger.debug(f"Battery stop for car charge without sunlight.")
+
+            if battery_stop_for_car_charge:
+                new_battery_value = c.BatteryState.BATTERY_OFF.value
+            else:
+                if manual is not None and manual is not c.BatteryState.BATTERY_AUTO:
+                    logger.debug(f"Battery manual state: {manual.value}")
+                    new_battery_value = manual.value
+                elif manual is c.BatteryState.BATTERY_AUTO or manual is None:
+                    new_battery_value = c.BatteryState.BATTERY_ON.value
+
+            if new_battery_value != actual:
+                logger.debug(f"Pushing new battery state: {new_battery_value}")
+                self.p1_client.set_battery_mode(new_battery_value)
+
+            # Charge car grace period: force start
+            car_charge_grace_period = (datetime.now() - self.car_start_deadline).total_seconds() < 0
+            if car_charge_grace_period and not self.force_charge_pushed:
+                logger.info(f"Car charge grace period active. Force pv charging.")
+                # Temporary disabled
+                # self.evcc_client.sequence_force_pv_charging()
+                self.force_charge_pushed = True
+            self.force_charge_pushed = car_charge_grace_period
 
 # if __name__ == "__main__":
 #     mock_config = {'mediator': {'standard_max_peak_consumption_kw': 2.5, 'buffer_before_pv_limit_change': 3}}
