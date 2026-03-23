@@ -398,6 +398,13 @@ class BatteryPredictor:
             day_mask = pd.to_datetime(df_opt.index).normalize() == date
             day_df = df_opt[day_mask].copy()
 
+            day_excess = day_df.loc[day_df['net_kwh'] > 0, 'net_kwh'].sum()
+            if day_excess <= self.capacity_kwh * 1.2:
+                logger.debug(f"Rule Block Charge: Skipped {date.date()} - "
+                             f"Excess production ({day_excess:.1f} kWh) is insufficient "
+                             f"(threshold: {self.capacity_kwh * 1.2:.1f} kWh)")
+                continue
+
             # 1. Identify all intervals where the battery COULD charge (net_energy > 0)
             charge_intervals = day_df[day_df['net_kwh'] > 0].copy()
 
@@ -445,7 +452,7 @@ class BatteryPredictor:
 
         return df_opt
 
-    def apply_rule_block_discharge(self, df_opt: pd.DataFrame, min_price_diff: float = 0.03) -> pd.DataFrame:
+    def apply_rule_block_discharge(self, df_opt: pd.DataFrame, min_price_diff: float = 0.01) -> pd.DataFrame:
         """
         Look-ahead Peak Shaving: Finds expensive future peaks and blocks
         enough cumulative discharge slots to ensure energy is available for them.
@@ -515,7 +522,7 @@ class BatteryPredictor:
 
         return df_opt
 
-    def apply_rule_force_charge(self, df_opt: pd.DataFrame, min_price_diff: float = 0.05) -> pd.DataFrame:
+    def apply_rule_force_charge(self, df_opt: pd.DataFrame, min_price_diff: float = 0.08) -> pd.DataFrame:
         """
         Precision Force Charge: Finds the optimal number of minutes to charge
         from the grid to maximize profit.
