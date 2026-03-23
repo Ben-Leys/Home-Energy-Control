@@ -41,16 +41,18 @@ class SystemMediator:
         # Prices
         self.market: Optional[market_prices] = None
         # Charging/evcc
-        self.temp_charging_stopped_by_capacity: bool = False
-        self.state_before_charging_stopped: Optional[c.EVCCManualState] = None
         self.new_evcc_state: Optional[c.EVCCManualState] = None
         self.new_max_amps: Optional[int] = None
+
+        self.temp_charging_stopped_by_capacity: bool = False
+        self.state_before_charging_stopped: Optional[c.EVCCManualState] = None
         self.last_max_amps: int = 0
         self.last_amps_push: int = int(time.time())
         self.car_was_connected: bool = False
         self.car_start_deadline: Optional[datetime] = datetime.now() - timedelta(days=999)
         self.force_charge_pushed: bool = False
         # Inverter
+
         self.buffer_before_pv_limit_change: int = 2
         self.last_pv_limit_change_time: Optional[datetime] = None
         self.new_inv_state: Optional[c.InverterManualState] = None
@@ -146,13 +148,14 @@ class SystemMediator:
         self.app_mediator_goal = GLOBAL_APP_STATE.get('app_mediator_goal')
 
         # EVCC
-        self.new_evcc_state, self.new_max_amps = self._determine_evcc_state()
+        self._determine_evcc_state()
+        self._recalculate_charging_amperage()
 
         # Inverter
         self.new_inv_state = self._determine_inverter_state()
 
         # Battery
-        # self.new_battery_mode = self._determine_battery_state()
+        # TODO self.new_battery_mode = self._determine_battery_state()
 
         logger.debug(
             f"Auto Mode Logic: Goal={self.app_mediator_goal} | "
@@ -161,36 +164,32 @@ class SystemMediator:
             #f"BAT={self.new_bat_state} | "
         )
 
-    def _determine_evcc_state(self) -> (c.EVCCManualState, int):
-        """Determines the new controller state based on the mediator goal."""
+    def _determine_evcc_state(self):
+        """Determines the new evcc controller state based on the mediator goal."""
         goal = self.app_mediator_goal
-        max_amps = self.evcc_client.max_current
-        lp = EVCCLoadpointState.from_dict(GLOBAL_APP_STATE.get('evcc_loadpoint_state'))
 
-        # EVCC state
         if goal == c.MediatorGoal.NO_CHARGING:
-            return c.EVCCManualState.EVCC_CMD_STATE_OFF, max_amps
+            self.new_evcc_state = c.EVCCManualState.EVCC_CMD_STATE_OFF
+
         elif goal == c.MediatorGoal.CHARGE_WITH_MINIMUM_SOLAR_POWER:
-            return c.EVCCManualState.EVCC_CMD_STATE_MINPV, max_amps
+            self.new_evcc_state = c.EVCCManualState.EVCC_CMD_STATE_MINPV
+
         elif goal == c.MediatorGoal.CHARGE_WITH_ONLY_EXCESS_SOLAR_POWER:
-            if not is_daylight(self.app_config) or lp.smart_cost_active or lp.plan_active:
-                max_amps = 11
-            return c.EVCCManualState.EVCC_CMD_STATE_PV, max_amps
+            self.new_evcc_state = c.EVCCManualState.EVCC_CMD_STATE_PV
+
         elif goal == c.MediatorGoal.CHARGE_WHEN_SELL_PRICE_NEGATIVE:
-            # State is PV when sell price negative (charge with excess), if not OFF
-            return (c.EVCCManualState.EVCC_CMD_STATE_PV if self.cur_sell_price < 0 else
-                    c.EVCCManualState.EVCC_CMD_STATE_OFF), max_amps
+            self.new_evcc_state = (c.EVCCManualState.EVCC_CMD_STATE_PV
+                                   if self.market.sell_price < 0 else c.EVCCManualState.EVCC_CMD_STATE_OFF)
+
         elif goal == c.MediatorGoal.CHARGE_WHEN_BUY_PRICE_NEGATIVE:
-            # State is OFF when buy price negative (charge with grid power), if not OFF
-            return (c.EVCCManualState.EVCC_CMD_STATE_NOW if self.cur_buy_price < 0 else
-                    c.EVCCManualState.EVCC_CMD_STATE_OFF), max_amps
-        elif goal == c.MediatorGoal.CHARGE_NOW_WITH_CAPACITY_RATE:
-            amps = convert_power(power_kw=self.current_max_peak_consumption_kw)
-            max_amps = min(int(amps), self.evcc_client.max_current)
-            return c.EVCCManualState.EVCC_CMD_STATE_NOW, max_amps
-        elif goal == c.MediatorGoal.CHARGE_NOW_NO_CAPACITY_RATE:
-            return c.EVCCManualState.EVCC_CMD_STATE_NOW, max_amps
-        return c.EVCCManualState.EVCC_CMD_STATE_OFF, max_amps
+            self.new_evcc_state = (c.EVCCManualState.EVCC_CMD_STATE_NOW
+                                   if self.market.buy_price < 0 else c.EVCCManualState.EVCC_CMD_STATE_OFF)
+
+        elif goal in {c.MediatorGoal.CHARGE_NOW_WITH_CAPACITY_RATE, c.MediatorGoal.CHARGE_NOW_NO_CAPACITY_RATE}:
+            self.new_evcc_state = c.EVCCManualState.EVCC_CMD_STATE_NOW
+
+        else:
+            self.new_evcc_state = c.EVCCManualState.EVCC_CMD_STATE_OFF
 
     def _determine_inverter_state(self) -> c.InverterManualState:
         """Determines the new controller state based on the mediator goal."""
@@ -215,90 +214,80 @@ class SystemMediator:
 
         return c.InverterManualState.INV_CMD_LIMIT_STANDARD
 
-    def _recalculate_charging_amperage(self) -> bool:
+    def _recalculate_charging_amperage(self):
         """
         Recalculates state and charge amperage to avoid peak consumption.
-        Returns True if there are changes, False otherwise.
         """
-        try:
-            # Load point state
-            lp = EVCCLoadpointState.from_dict(GLOBAL_APP_STATE.get('evcc_loadpoint_state'))
-            # self.new_max_amps = self.last_max_amps if self.new_max_amps is None else self.last_max_amps
+        # Load point state
+        lp = EVCCLoadpointState.from_dict(GLOBAL_APP_STATE.get('evcc_loadpoint_state'))
+        cur_state = GLOBAL_APP_STATE.get('evcc_manual_state', None)
 
-            # 2. Only when charging, about to charge or temporarily stopped AND not in CHARGE_NOW_NO_CAPACITY_RATE
-            cur_state = GLOBAL_APP_STATE.get('evcc_manual_state', None)
-            is_about_to_charge = self.new_evcc_state != cur_state
-            if (((lp.is_charging or self.temp_charging_stopped_by_capacity or is_about_to_charge) and
-                    self.app_mediator_goal != c.MediatorGoal.CHARGE_NOW_NO_CAPACITY_RATE) and
-                    (lp.smart_cost_active or lp.plan_active)):
+        # Is amperage calculation needed?
+        is_managed_charging = (lp.smart_cost_active or lp.plan_active)
+        if not is_managed_charging or self.app_mediator_goal == c.MediatorGoal.CHARGE_NOW_NO_CAPACITY_RATE:
+            self.new_max_amps = self.evcc_client.max_current
+            return
 
-                # 3. Base available kW
-                grid_kw = GLOBAL_APP_STATE.get('p1_meter_data', {}).get('active_power_w', 0) / 1000
-                threshold_kw = self.current_max_peak_consumption_kw - 0.175
-                base_avail_kw = threshold_kw - grid_kw
-                logger.debug(f"Grid power: {grid_kw:.2f} kW. Base available for charging: {base_avail_kw:.2f} kW")
+        # Is charging, starting or paused?
+        is_starting = (self.new_evcc_state != cur_state and
+                       self.new_evcc_state != c.EVCCManualState.EVCC_CMD_STATE_OFF)
 
-                # 4. Adjust for recent shortages
-                avail_kw = base_avail_kw
-                average_import = GLOBAL_APP_STATE.get('average_grid_import_watts', 0)
-                for window, (hi_mult, (low, high)) in _SHORTAGE_CONFIG.items():
-                    avg_val = average_import.get(window)
-                    if avg_val is None:  # Not enough readings yet
-                        continue
-                    avg_kw = avg_val / 1000
-                    shortage = threshold_kw - avg_kw
-                    if low < shortage <= high:
-                        logger.debug(f"Shortage over {window}: {shortage:.2f} kW → adjust by {shortage:.2f}")
-                        avail_kw = min(avail_kw, base_avail_kw + shortage)
-                    elif shortage <= low:
-                        adjusted = base_avail_kw + shortage * hi_mult
-                        logger.debug(f"High shortage over {window}: {shortage:.2f} kW → "
-                                     f"adjust by {adjusted - base_avail_kw:.2f}")
-                        avail_kw = min(avail_kw, adjusted)
+        should_calculate = lp.is_charging or self.temp_charging_stopped_by_capacity or is_starting
+        if not should_calculate:
+            return
 
-                # 5. Compute new max_amp
-                delta_amp = min(10, int(round(convert_power(power_kw=avail_kw))))  # Steps of 10 A
-                max_amp = int(min(self.evcc_client.max_current, self.last_max_amps + delta_amp))
-                logger.debug(f"Computed avail: {avail_kw:.2f} kW → ΔA={delta_amp}, max_amp={max_amp}")
+        # Starting charging, force 6A
+        if is_starting and is_managed_charging and not lp.is_charging:
+            self.new_max_amps = self.evcc_client.min_current
+            logger.info(f"Initial charge command: Starting at {self.new_max_amps}A.")
+            return
 
-                # 6. Apply or stop
-                if max_amp >= self.evcc_client.min_current:
-                    self.new_max_amps = max_amp
-                    if max_amp != lp.max_current:
-                        logger.debug(f"Charging amp changed to {max_amp} kW")
-                    if self.temp_charging_stopped_by_capacity:
-                        self.temp_charging_stopped_by_capacity = False
-                        self.new_evcc_state = self.state_before_charging_stopped
-                        logger.debug(f"Charging resumed.")
+        # Calculate Available Power
+        grid_kw = GLOBAL_APP_STATE.get('p1_meter_data', {}).get('active_power_w', 0) / 1000
+        threshold_kw = self.current_max_peak_consumption_kw - 0.15
+        avail_kw = threshold_kw - grid_kw
+        logger.debug(f"Grid power: {grid_kw:.2f} kW. Base available for charging: {avail_kw:.2f} kW")
 
-                elif not self.temp_charging_stopped_by_capacity:
-                    self.state_before_charging_stopped = lp.mode
-                    self.new_evcc_state = c.EVCCManualState.EVCC_CMD_STATE_OFF
-                    self.temp_charging_stopped_by_capacity = True
-                    self.new_max_amps = self.evcc_client.max_current
-                    self.last_max_amps = 0
-                    logger.debug(f"Charging stopped because {max_amp} below minimum of {self.evcc_client.min_current}")
+        # Shortage Adjustments
+        average_import = GLOBAL_APP_STATE.get('average_grid_import_watts', {})
+        for window, (hi_mult, (low, high)) in _SHORTAGE_CONFIG.items():
+            avg_kw = (average_import.get(window, 0)) / 1000
+            shortage = threshold_kw - avg_kw
 
-            if self.new_evcc_state:
-                enum_member = self.new_evcc_state
-                if enum_member.value != lp.mode:
-                    return True
-            if self.new_max_amps != lp.max_current:
-                return True
-            return False
+            if shortage <= low:
+                avail_kw = min(avail_kw, (threshold_kw - grid_kw) + (shortage * hi_mult))
+                logger.debug(f"High shortage over {window}: {shortage:.2f} kW → adjust to {avail_kw:.2f}")
+            elif low < shortage <= high:
+                avail_kw = min(avail_kw, (threshold_kw - grid_kw) + shortage)
+                logger.debug(f"High shortage over {window}: {shortage:.2f} kW → adjust to {avail_kw:.2f}")
 
-        except KeyError as ke:
-            logger.error(f"KeyError during amperage calculation: {ke}")
-        except AttributeError as ae:
-            logger.error(f"AttributeError during amperage calculation: {ae} "
-                         f"(self.new_evcc_state.value: {self.new_evcc_state})")
-        except TypeError as te:
-            logger.error(f"TypeError during amperage calculation: {te}")
-        except ValueError as ve:
-            logger.error(f"ValueError during amperage calculation: {ve}")
-        except Exception as e:
-            logger.error(f"Unexpected error during amperage calculation: {e}")
-        return False
+        # Translate kW to Amps
+        delta_amp = min(10, int(round(convert_power(power_kw=avail_kw))))
+        target_amp = min(self.evcc_client.max_current, self.last_max_amps + delta_amp)
+        logger.debug(f"Avail: {avail_kw:.2f} kW → ΔA={delta_amp}, target_amp={target_amp}")
+
+        # Stop or start
+        if target_amp >= self.evcc_client.min_current:
+            self._resume_charging(target_amp, lp)
+        else:
+            self._pause_charging(target_amp, lp)
+
+    def _pause_charging(self, target_amp, lp):
+        if not self.temp_charging_stopped_by_capacity:
+            self.state_before_charging_stopped = lp.mode
+            self.new_evcc_state = c.EVCCManualState.EVCC_CMD_STATE_OFF
+            self.new_max_amps = self.evcc_client.max_current
+            self.temp_charging_stopped_by_capacity = True
+            self.last_max_amps = 0
+            logger.warning(f"Charging paused because {target_amp} below minimum.")
+
+    def _resume_charging(self, target_amp, lp):
+        self.new_max_amps = target_amp
+
+        if self.temp_charging_stopped_by_capacity:
+            self.temp_charging_stopped_by_capacity = False
+            self.new_evcc_state = self.state_before_charging_stopped
+            logger.info(f"Amperage calculator: charging resumed.")
 
     def _recalculate_inverter_limit(self) -> bool:
         """
@@ -537,82 +526,86 @@ class SystemMediator:
         If none, calculates optimal state of the controllers to achieve maximum cost saving or profit.
         """
         logger.debug(f"Running system mediation logic")
+        try:
 
-        # Prepare data
-        if not self._prepare_data():
-            logger.error('Mediator encountered an error while preparing essential data and is skipping.')
-            return
+            # Prepare data
+            if not self._prepare_data():
+                logger.error('Mediator encountered an error while preparing essential data and is skipping.')
+                return
 
-        if self._handle_peak_consumption():
-            pass
-        else:
-            # Check operating mode
-            app_mode = GLOBAL_APP_STATE.get('app_operating_mode', c.OperatingMode.MODE_MANUAL)
-
-            if app_mode == c.OperatingMode.MODE_MANUAL:
-                # If mode manual, just set app states to be set to controllers
-                self.new_evcc_state = GLOBAL_APP_STATE.get('evcc_manual_state')
-                self.new_inv_state = GLOBAL_APP_STATE.get('inverter_manual_state')
-                self.new_max_amps = GLOBAL_APP_STATE.get('evcc_manual_limit')
-
-            elif app_mode == c.OperatingMode.MODE_AUTO:
-                # If mode auto: app decides controller states based on mediator goal
-                self._handle_auto_mode()
-
-            # Peak consumption avoidance
-            peak_safety_override = self._handle_peak_consumption()
-
-            # Check for charging amperage adjustment to avoid peak consumption
-            evcc_changes = False
-            if not peak_safety_override:
-                evcc_changes = self._recalculate_charging_amperage()
-            if peak_safety_override or (evcc_changes and int(time.time()) - self.last_amps_push > 20):
-                logger.info(f"Evcc changes: {evcc_changes}. To push: {self.new_evcc_state} with {self.new_max_amps} A")
-                self._execute_evcc_state()
-
-            inverter_changes = False
-            if not peak_safety_override:
-                inverter_changes = self._recalculate_inverter_limit()
-            if inverter_changes or peak_safety_override:
-                logger.info(
-                    f"Inverter changes: {inverter_changes}. To push: {self.new_inv_state} with {self.new_inv_limit} W")
-                self._execute_inverter_state()
-
-            logger.debug(f"Battery mediator part.")
-            manual = GLOBAL_APP_STATE.get("battery_manual_mode")
-            battery_data = GLOBAL_APP_STATE.get("battery_data", {})
-            actual = battery_data.get("mode", "UNKNOWN")
-
-            is_charging = GLOBAL_APP_STATE.get('evcc_loadpoint_state').get('is_charging', False)
-            new_battery_value = actual
-            battery_stop_for_car_charge = False
-
-            if is_charging and not is_daylight(self.app_config):
-                # Charging without solar energy should never come from battery
-                battery_stop_for_car_charge = True
-                logger.debug(f"Battery stop for car charge without sunlight.")
-
-            if battery_stop_for_car_charge:
-                new_battery_value = c.BatteryState.BATTERY_OFF.value
+            if self._handle_peak_consumption():
+                logger.warning('Mediator received peak consumption and disregards other instructions.')
             else:
-                if manual is not None and manual is not c.BatteryState.BATTERY_AUTO:
-                    logger.debug(f"Battery manual state: {manual.value}")
-                    new_battery_value = manual.value
-                elif manual is c.BatteryState.BATTERY_AUTO or manual is None:
-                    new_battery_value = c.BatteryState.BATTERY_ON.value
+                # Check operating mode
+                app_mode = GLOBAL_APP_STATE.get('app_operating_mode', c.OperatingMode.MODE_MANUAL)
 
-            if new_battery_value != actual:
-                logger.debug(f"Pushing new battery state: {new_battery_value}")
-                self.p1_client.set_battery_mode(new_battery_value)
+                if app_mode == c.OperatingMode.MODE_MANUAL:
+                    # If mode manual, just set app states to be set to controllers
+                    self.new_evcc_state = GLOBAL_APP_STATE.get('evcc_manual_state')
+                    self.new_inv_state = GLOBAL_APP_STATE.get('inverter_manual_state')
+                    self.new_max_amps = GLOBAL_APP_STATE.get('evcc_manual_limit')
 
-            # Charge car grace period: force start
-            car_charge_grace_period = (datetime.now() - self.car_start_deadline).total_seconds() < 0
-            if car_charge_grace_period and not self.force_charge_pushed:
-                logger.info(f"Car charge grace period active. Force pv charging.")
-                # Temporary disabled
-                # self.evcc_client.sequence_force_pv_charging()
-                self.force_charge_pushed = True
-            self.force_charge_pushed = car_charge_grace_period
+                elif app_mode == c.OperatingMode.MODE_AUTO:
+                    # If mode auto: app decides controller states based on mediator goal
+                    self._handle_auto_mode()
+
+
+
+
+                # Check for charging amperage adjustment to avoid peak consumption
+                evcc_changes = False
+                if not peak_safety_override:
+                    evcc_changes = self._recalculate_charging_amperage()
+                if peak_safety_override or (evcc_changes and int(time.time()) - self.last_amps_push > 20):
+                    logger.info(f"Evcc changes: {evcc_changes}. To push: {self.new_evcc_state} with {self.new_max_amps} A")
+                    self._execute_evcc_state()
+
+                inverter_changes = False
+                if not peak_safety_override:
+                    inverter_changes = self._recalculate_inverter_limit()
+                if inverter_changes or peak_safety_override:
+                    logger.info(
+                        f"Inverter changes: {inverter_changes}. To push: {self.new_inv_state} with {self.new_inv_limit} W")
+                    self._execute_inverter_state()
+
+                logger.debug(f"Battery mediator part.")
+                manual = GLOBAL_APP_STATE.get("battery_manual_mode")
+                battery_data = GLOBAL_APP_STATE.get("battery_data", {})
+                actual = battery_data.get("mode", "UNKNOWN")
+
+                is_charging = GLOBAL_APP_STATE.get('evcc_loadpoint_state').get('is_charging', False)
+                new_battery_value = actual
+                battery_stop_for_car_charge = False
+
+                if is_charging and not is_daylight(self.app_config):
+                    # Charging without solar energy should never come from battery
+                    battery_stop_for_car_charge = True
+                    logger.debug(f"Battery stop for car charge without sunlight.")
+
+                if battery_stop_for_car_charge:
+                    new_battery_value = c.BatteryState.BATTERY_OFF.value
+                else:
+                    if manual is not None and manual is not c.BatteryState.BATTERY_AUTO:
+                        logger.debug(f"Battery manual state: {manual.value}")
+                        new_battery_value = manual.value
+                    elif manual is c.BatteryState.BATTERY_AUTO or manual is None:
+                        new_battery_value = c.BatteryState.BATTERY_ON.value
+
+                if new_battery_value != actual:
+                    logger.debug(f"Pushing new battery state: {new_battery_value}")
+                    self.p1_client.set_battery_mode(new_battery_value)
+
+                # Charge car grace period: force start
+                car_charge_grace_period = (datetime.now() - self.car_start_deadline).total_seconds() < 0
+                if car_charge_grace_period and not self.force_charge_pushed:
+                    logger.info(f"Car charge grace period active. Force pv charging.")
+                    # Temporary disabled
+                    # self.evcc_client.sequence_force_pv_charging()
+                    self.force_charge_pushed = True
+                self.force_charge_pushed = car_charge_grace_period
+
+        except Exception as e:
+            logger.error(f"Unexpected error during mediator run: {e}")
 
 # if __name__ == "__main__":
 #     mock_config = {'mediator': {'standard_max_peak_consumption_kw': 2.5, 'buffer_before_pv_limit_change': 3}}

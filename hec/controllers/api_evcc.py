@@ -2,11 +2,10 @@
 import json
 import logging
 import time
-from datetime import datetime, timezone
-from typing import Any, Dict, Optional
-
 import requests
 
+from datetime import datetime, timezone
+from typing import Any, Dict, Optional
 from hec.core import constants as c
 
 logger = logging.getLogger(__name__)
@@ -76,7 +75,8 @@ class EvccApiClient:
             # Add a timestamp to the data for AppState consistency
             if isinstance(data, dict):
                 data["timestamp_utc_iso"] = datetime.now(timezone.utc).isoformat()
-                logger.debug(f"EVCC API: Successfully fetched state. Grid Power: {data.get("grid", {}).get("power")}W")
+                print(data)
+                logger.debug(f"EVCC API: Successfully fetched state. Grid: {data.get('grid', {}).get('power', 0)}W")
                 return data
             else:
                 logger.warning(f"EVCC API: Response is not a dict: {data}")
@@ -173,6 +173,14 @@ class EvccApiClient:
         # EVCC expects this as a number
         return self._send_command(f"/smartcostlimit/{cost_limit_eur_kwh}", loadpoint_id=loadpoint_id)
 
+    def set_smart_feed_in_priority_limit(self, cost_limit_eur_kwh: float) -> bool:
+        """Sets the smart feed-in priority limit (price per kWh)."""
+        # EVCC expects this as a number
+        return self._send_command(f"/smartfeedinprioritylimit/{cost_limit_eur_kwh}")
+
+    def remove_smart_feed_in_priority_limit(self, loadpoint_id: Optional[int] = None) -> bool:
+        return self._send_command(f"/smartfeedinprioritylimit", "DELETE")
+
     def sequence_force_pv_charging(self, loadpoint_id: Optional[int] = None) -> bool:
         """Attempts a sequence to start PV charging immediately instead of waiting for min_time."""
         logger.info("EVCC API: Initiating sequence for PV charging (now -> pv).")
@@ -193,33 +201,37 @@ class EvccApiClient:
 #
 #     if evcc.is_available:
 #         print("\n--- Getting Current State ---")
-#         state = evcc.get_current_state()
-#         if state:
-#             print(f"EVCC Grid Power: {state.get('gridPower')} W")
-#             if state.get('loadpoints') and len(state['loadpoints']) > 0:
-#                 lp0 = state['loadpoints'][0]
-#                 print(f"Loadpoint 1 Mode: {lp0.get('mode')}")
-#                 print(f"Loadpoint 1 Charging: {lp0.get('charging')}")
-#                 print(f"Loadpoint 1 SoC: {lp0.get('vehicleSoc')} %")
-#             print("Full state:", state)
-#         else:
-#             print("Failed to get current EVCC state.")
-#         exit(0)
+#         # state = evcc.get_current_state_data()
+#         # if state:
+#         #     print(f"EVCC Grid Power: {state.get('gridPower')} W")
+#         #     if state.get('loadpoints') and len(state['loadpoints']) > 0:
+#         #         lp0 = state['loadpoints'][0]
+#         #         print(f"Loadpoint 1 Mode: {lp0.get('mode')}")
+#         #         print(f"Loadpoint 1 Charging: {lp0.get('charging')}")
+#         #         print(f"Loadpoint 1 SoC: {lp0.get('vehicleSoc')} %")
+#         #     print("Full state:", state)
+#         # else:
+#         #     print("Failed to get current EVCC state.")
+#         # exit(0)
 #         print("\n--- Testing Commands ---")
-#         print("Setting mode to 'pv'...")
-#         if evcc.set_charge_mode(c.EVCCManualState.EVCC_CMD_STATE_PV.value):
-#             time.sleep(3)
-#             print("Setting mode back to 'off'...")
-#             evcc.set_charge_mode(c.EVCCManualState.EVCC_CMD_STATE_OFF.value)
-#         else:
-#             print("Failed to set mode to 'pv'.")
-#
-#         print("\nSetting max current to 10A...")
-#         if evcc.set_max_current(10):
-#             time.sleep(3)
-#             print("Setting max current back to 30A...")
-#             evcc.set_max_current(30)
-#         else:
-#             print("Failed to set max current to 10A.")
+#         # print("Setting mode to 'pv'...")
+#         # if evcc.set_charge_mode(c.EVCCManualState.EVCC_CMD_STATE_PV.value):
+#         #     time.sleep(3)
+#         #     print("Setting mode back to 'off'...")
+#         #     evcc.set_charge_mode(c.EVCCManualState.EVCC_CMD_STATE_OFF.value)
+#         # else:
+#         #     print("Failed to set mode to 'pv'.")
+#         #
+#         # print("\nSetting max current to 10A...")
+#         # if evcc.set_max_current(10):
+#         #     time.sleep(3)
+#         #     print("Setting max current back to 30A...")
+#         #     evcc.set_max_current(30)
+#         # else:
+#         #     print("Failed to set max current to 10A.")
+#         print("Setting smart feed in priority limit.")
+#         # evcc.set_smart_feed_in_priority_limit(0.05)
+#         print("Removing smart feed in priority limit.")
+#         evcc.remove_smart_feed_in_priority_limit()
 #     else:
 #         print(f"EVCC API client could not connect or EVCC is not available at {TEST_EVCC_URL}.")
