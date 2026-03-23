@@ -1,8 +1,8 @@
 import pandas as pd
 import numpy as np
 import logging
-from typing import Dict, Any, List
-from datetime import datetime, timezone, timedelta
+from typing import Dict
+from datetime import datetime
 
 from hec.core.app_state import GLOBAL_APP_STATE
 from hec.logic_engine.consumption_predictor import ConsumptionPredictor
@@ -10,29 +10,6 @@ from hec.database_ops.db_handler import DatabaseHandler
 from hec.utils.utils import process_price_points_to_app_state
 
 logger = logging.getLogger(__name__)
-
-
-def add_prices_to_plan(df_plan: pd.DataFrame, state: Dict) -> pd.DataFrame:
-    prices_today = state.get("electricity_prices_today", [])
-    prices_tomorrow = state.get("electricity_prices_tomorrow", [])
-    all_prices = prices_today + prices_tomorrow
-
-    price_map = {}
-    for p in all_prices:
-        try:
-            contract = p.active_contract_type
-            buy_price = p.net_prices_eur_per_kwh[contract]['buy']
-            sell_price = p.net_prices_eur_per_kwh[contract]['sell']
-            price_map[p.interval_start_local] = {'buy_price': buy_price, 'sell_price': sell_price}
-        except (KeyError, TypeError):
-            pass
-
-    df_prices = pd.DataFrame.from_dict(price_map, orient='index')
-    df = df_plan.merge(df_prices, left_index=True, right_index=True, how='left')
-    df['buy_price'] = df['buy_price'].ffill()
-    df['sell_price'] = df['sell_price'].ffill()
-
-    return df
 
 
 class BatteryPredictor:
@@ -99,8 +76,6 @@ class BatteryPredictor:
 
         df_prices = pd.DataFrame.from_dict(price_map, orient='index')
         df = df_plan.merge(df_prices, left_index=True, right_index=True, how='left')
-        # df['buy_price'] = df['buy_price'].ffill()
-        # df['sell_price'] = df['sell_price'].ffill()
 
         return df
 
@@ -112,7 +87,7 @@ class BatteryPredictor:
         self.max_peak_kw = max_peak_kw
 
         # Ensure consumption is a Series
-        if isinstance(consumption_s, pd.DataFrame) and consumption_s:
+        if isinstance(consumption_s, pd.DataFrame) and consumption_s is not None:
             consumption_s = consumption_s.iloc[:, 0]
 
         solar_s = self._fetch_aligned_solar(start_dt, end_dt, db, consumption_s.index)
@@ -555,7 +530,7 @@ class BatteryPredictor:
 
         for t_peak, peak_row in peaks.iterrows():
             # Check live grid deficit
-            if abs(df_opt.at[t_peak, 'new_grid']) < 0.01:
+            if abs(float(df_opt.at[t_peak, 'new_grid'])) < 0.01:
                 continue
 
             peak_price = float(peak_row['buy_price'])
@@ -574,7 +549,7 @@ class BatteryPredictor:
 
             for t_cand in valid_candidates.index:
                 # If the peak is already covered by a previous candidate, skip to next peak
-                if abs(df_opt.at[t_peak, 'new_grid']) < 0.01:
+                if abs(float(df_opt.at[t_peak, 'new_grid'])) < 0.01:
                     break
 
                 # Best duration: 15m, 10m, or 5m
@@ -621,8 +596,8 @@ if __name__ == "__main__":
     cd = ConsumptionPredictor(db_handler)
 
     # Fill app_state with NEPIs from PricePoints in database
-    first_day_start = datetime(2026, 3, 19, 23, 00, 0, tzinfo=pytz.UTC)
-    first_day_end = datetime(2026, 3, 20, 22, 45, 0, tzinfo=pytz.UTC)
+    first_day_start = datetime(2026, 3, 20, 23, 00, 0, tzinfo=pytz.UTC)
+    first_day_end = datetime(2026, 3, 21, 22, 45, 0, tzinfo=pytz.UTC)
     price_points = db_handler.get_da_prices(first_day_start.astimezone(local_tz))
     process_price_points_to_app_state(price_points, first_day_start, "electricity_prices_today", config, db_handler)
 
@@ -632,8 +607,8 @@ if __name__ == "__main__":
     last_soc_day1 = first_plan_df['soc_pct'].iloc[-1]
 
     # Fill app_state with NEPIs
-    second_day_start = datetime(2026, 3, 20, 23, 00, 0, tzinfo=pytz.UTC)
-    second_day_end = datetime(2026, 3, 21, 22, 45, 0, tzinfo=pytz.UTC)
+    second_day_start = datetime(2026, 3, 21, 23, 00, 0, tzinfo=pytz.UTC)
+    second_day_end = datetime(2026, 3, 22, 22, 45, 0, tzinfo=pytz.UTC)
     price_points = db_handler.get_da_prices(second_day_start.astimezone(local_tz))
     process_price_points_to_app_state(price_points, second_day_start, "electricity_prices_tomorrow", config, db_handler)
 
