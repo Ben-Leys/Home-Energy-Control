@@ -113,16 +113,16 @@
                         <div class="metric">
                             <span class="metric-label">Net buy</span>
                             <span v-if="currentPrice.buy !== null">
-                                <span class="metric-value">{{ currentPrice.buy.toFixed(2) }}</span>
-                                <span class="unit">€/kWh</span>
+                                <span class="metric-value">{{ (currentPrice.buy * 100).toFixed(1) }}</span>
+                                <span class="unit">€c/kWh</span>
                             </span>
                             <span v-else class="metric-value">N/A</span>
                         </div>
                         <div class="metric">
                             <span class="metric-label">Net sell</span>
                             <span v-if="currentPrice.buy !== null">
-                                <span class="metric-value">{{ currentPrice.sell.toFixed(2) }}</span>
-                                <span class="unit">€/kWh</span>
+                                <span class="metric-value">{{ (currentPrice.sell * 100).toFixed(1) }}</span>
+                                <span class="unit">€c/kWh</span>
                             </span>
                         </div>
                     </div>
