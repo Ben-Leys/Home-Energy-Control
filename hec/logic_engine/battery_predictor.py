@@ -19,7 +19,7 @@ class BatteryPredictor:
         self.max_charge_kw = 0
         self.max_discharge_kw = 0
         self.dt_hours = 0.25
-        self.eff = 0.9
+        self.eff = 0.85
         self.cur_dt = None
         self.max_peak_kw = 0
 
@@ -399,7 +399,7 @@ class BatteryPredictor:
             day_df = df_opt[day_mask].copy()
 
             day_excess = day_df.loc[day_df['net_kwh'] > 0, 'net_kwh'].sum()
-            if day_excess <= self.capacity_kwh * 1.2:
+            if day_excess <= self.capacity_kwh * 1.3:
                 logger.debug(f"Rule Block Charge: Skipped {date.date()} - "
                              f"Excess production ({day_excess:.1f} kWh) is insufficient "
                              f"(threshold: {self.capacity_kwh * 1.2:.1f} kWh)")
@@ -439,16 +439,19 @@ class BatteryPredictor:
                 if df_opt.at[ts, 'sell_price'] >= 0
             ]
 
-            # If we have blocked slots, remove the first chronological one to act as a buffer
-            if len(blocked_candidates) > 1:
-                # Sort chronologically to find the "first" one in the day
-                blocked_candidates.sort()
-                blocked_candidates.pop(0)
-            elif len(blocked_candidates) == 1:
-                # If there's only one, we leave it out entirely
-                blocked_candidates = []
-
             df_opt.loc[blocked_candidates, 'block_c'] = True
+
+        # Remove last block_c in block of 4 or more as a buffer
+        is_blocked = df_opt['block_c'].astype(int)
+        # Check if the next interval is the end of the block
+        is_end_of_block = (is_blocked == 1) & (is_blocked.shift(-1, fill_value=0) == 0)
+        # Check if we have had at least 4 consecutive True values leading up to/including this one
+        has_four_consecutive = is_blocked.rolling(window=4).sum() >= 4
+        # Identify the specific index to flip
+        tail_buffer_mask = is_end_of_block & has_four_consecutive
+        # Flip those specific True values back to False
+        df_opt.loc[tail_buffer_mask, 'block_c'] = False
+        logger.debug(f"Rule Block Charge: Removed {tail_buffer_mask.sum()} tail-buffer slots.")
 
         return df_opt
 
@@ -603,8 +606,8 @@ if __name__ == "__main__":
     cd = ConsumptionPredictor(db_handler)
 
     # Fill app_state with NEPIs from PricePoints in database
-    first_day_start = datetime(2026, 3, 20, 23, 00, 0, tzinfo=pytz.UTC)
-    first_day_end = datetime(2026, 3, 21, 22, 45, 0, tzinfo=pytz.UTC)
+    first_day_start = datetime(2026, 3, 25, 23, 00, 0, tzinfo=pytz.UTC)
+    first_day_end = datetime(2026, 3, 26, 22, 45, 0, tzinfo=pytz.UTC)
     price_points = db_handler.get_da_prices(first_day_start.astimezone(local_tz))
     process_price_points_to_app_state(price_points, first_day_start, "electricity_prices_today", config, db_handler)
 
@@ -614,8 +617,8 @@ if __name__ == "__main__":
     last_soc_day1 = first_plan_df['soc_pct'].iloc[-1]
 
     # Fill app_state with NEPIs
-    second_day_start = datetime(2026, 3, 21, 23, 00, 0, tzinfo=pytz.UTC)
-    second_day_end = datetime(2026, 3, 22, 22, 45, 0, tzinfo=pytz.UTC)
+    second_day_start = datetime(2026, 3, 26, 23, 00, 0, tzinfo=pytz.UTC)
+    second_day_end = datetime(2026, 3, 27, 22, 45, 0, tzinfo=pytz.UTC)
     price_points = db_handler.get_da_prices(second_day_start.astimezone(local_tz))
     process_price_points_to_app_state(price_points, second_day_start, "electricity_prices_tomorrow", config, db_handler)
 

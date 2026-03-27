@@ -51,6 +51,7 @@ class AppState:
             "battery_data": None,
             "battery_records": [],
             "battery_manual_mode": None,
+            "battery_manual_permissions": [],
             "prediction_plan": None
         }
 

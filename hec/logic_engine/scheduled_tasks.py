@@ -310,7 +310,7 @@ def task_poll_battery_for_db_logging(db_handler: DatabaseHandler,
                 logger.error(f"Failed to store battery data for '{name}'.")
 
         all_battery_records.append(battery_record)
-        GLOBAL_APP_STATE.set("battery_records", all_battery_records)
+    GLOBAL_APP_STATE.set("battery_records", all_battery_records)
 
 
 def task_fetch_elia_forecasts(db_handler: DatabaseHandler, app_config: dict):
