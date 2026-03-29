@@ -60,21 +60,26 @@ class BatteryPredictor:
 
     @staticmethod
     def add_prices_to_plan(df_plan: pd.DataFrame, state: Dict) -> pd.DataFrame:
-        prices_today = state.get("electricity_prices_today", [])
-        prices_tomorrow = state.get("electricity_prices_tomorrow", [])
-        all_prices = prices_today + prices_tomorrow
+        all_prices = state.get("electricity_prices_today", []) + state.get("electricity_prices_tomorrow", [])
 
         price_map = {}
         for p in all_prices:
             try:
                 contract = p.active_contract_type
-                buy_price = p.net_prices_eur_per_kwh[contract]['buy']
-                sell_price = p.net_prices_eur_per_kwh[contract]['sell']
-                price_map[p.interval_start_local] = {'buy_price': buy_price, 'sell_price': sell_price}
+                price_map[p.interval_start_local] = {
+                    'buy_price': p.net_prices_eur_per_kwh[contract]['buy'],
+                    'sell_price': p.net_prices_eur_per_kwh[contract]['sell']
+                }
             except (KeyError, TypeError):
                 pass
 
         df_prices = pd.DataFrame.from_dict(price_map, orient='index')
+
+        # Drop columns
+        cols_to_drop = [c for c in ['buy_price', 'sell_price'] if c in df_plan.columns]
+        if cols_to_drop:
+            df_plan = df_plan.drop(columns=cols_to_drop)
+
         df = df_plan.merge(df_prices, left_index=True, right_index=True, how='left')
 
         return df
@@ -457,6 +462,72 @@ class BatteryPredictor:
 
     def apply_rule_block_discharge(self, df_opt: pd.DataFrame, min_price_diff: float = 0.01) -> pd.DataFrame:
         """
+        Reactive Peak Shaving: Solves the most expensive grid-import peak,
+        recalculates the plan, and repeats until no solvable peaks remain.
+        """
+        max_iterations = 50  # Safety cap to prevent infinite loops
+        iteration = 0
+
+        while iteration < max_iterations:
+            # 1. Recalculate impact to get the latest 'new_grid' and 'new_pct'
+            df_opt = self.calculate_impact(df_opt)
+
+            # 2. Find the current WORST peak (highest buy_price where we are importing)
+            # We only care about peaks where we are actually importing from grid (new_grid < -0.01)
+            import_rows = df_opt[df_opt['new_grid'] < -0.01].copy()
+
+            if import_rows.empty:
+                break
+
+            # Sort by price descending to fix the most expensive problem first
+            worst_peak = import_rows.sort_values(by='buy_price', ascending=False).iloc[0]
+            t_peak = worst_peak.name
+            peak_price = worst_peak['buy_price']
+            energy_needed = abs(worst_peak['new_grid'])
+
+            # 3. Find candidates to block (Look BACKWARDS from this peak)
+            # Stop at the most recent "Full Battery" event
+            full_times = df_opt.index[(df_opt.index < t_peak) & (df_opt['new_pct'] >= 98.0)]
+            t_start_search = full_times[-1] if not full_times.empty else df_opt.index[0]
+
+            # Candidates are cheaper slots currently discharging before the peak
+            candidates = df_opt.loc[t_start_search:t_peak].iloc[:-1]
+            candidates = candidates[
+                (candidates['block_d'] == False) &  # Not already blocked
+                (candidates['buy_price'] <= peak_price - min_price_diff)
+                ]
+
+            if candidates.empty:
+                break
+
+            # 4. Attempt to solve this specific peak by blocking candidates
+            saved_for_this_peak = 0
+            for t_cand, _ in candidates.iterrows():
+                if saved_for_this_peak >= energy_needed:
+                    break
+
+                # Block the slot
+                df_opt.at[t_cand, 'block_d'] = True
+
+                # We must recalculate within the candidate loop to see if the "bridge"
+                # to the peak is actually working
+                df_opt = self.calculate_impact(df_opt)
+
+                # Check if our target peak actually improved
+                new_peak_grid = df_opt.at[t_peak, 'new_grid']
+                improvement = new_peak_grid - worst_peak['new_grid']
+
+                if improvement > 0.001:
+                    saved_for_this_peak += improvement
+                    # Update our reference for the next candidate in this inner loop
+                    worst_peak['new_grid'] = new_peak_grid
+
+            iteration += 1
+
+        return df_opt
+
+    def old_apply_rule_block_discharge(self, df_opt: pd.DataFrame, min_price_diff: float = 0.01) -> pd.DataFrame:
+        """
         Look-ahead Peak Shaving: Finds expensive future peaks and blocks
         enough cumulative discharge slots to ensure energy is available for them.
         """
@@ -606,8 +677,8 @@ if __name__ == "__main__":
     cd = ConsumptionPredictor(db_handler)
 
     # Fill app_state with NEPIs from PricePoints in database
-    first_day_start = datetime(2026, 3, 25, 23, 00, 0, tzinfo=pytz.UTC)
-    first_day_end = datetime(2026, 3, 26, 22, 45, 0, tzinfo=pytz.UTC)
+    first_day_start = datetime(2026, 3, 27, 23, 00, 0, tzinfo=pytz.UTC)
+    first_day_end = datetime(2026, 3, 28, 22, 45, 0, tzinfo=pytz.UTC)
     price_points = db_handler.get_da_prices(first_day_start.astimezone(local_tz))
     process_price_points_to_app_state(price_points, first_day_start, "electricity_prices_today", config, db_handler)
 
@@ -617,8 +688,8 @@ if __name__ == "__main__":
     last_soc_day1 = first_plan_df['soc_pct'].iloc[-1]
 
     # Fill app_state with NEPIs
-    second_day_start = datetime(2026, 3, 26, 23, 00, 0, tzinfo=pytz.UTC)
-    second_day_end = datetime(2026, 3, 27, 22, 45, 0, tzinfo=pytz.UTC)
+    second_day_start = datetime(2026, 3, 28, 23, 00, 0, tzinfo=pytz.UTC)
+    second_day_end = datetime(2026, 3, 29, 21, 45, 0, tzinfo=pytz.UTC)
     price_points = db_handler.get_da_prices(second_day_start.astimezone(local_tz))
     process_price_points_to_app_state(price_points, second_day_start, "electricity_prices_tomorrow", config, db_handler)
 
@@ -628,8 +699,10 @@ if __name__ == "__main__":
 
     plan_df = pd.concat([first_plan_df, second_plan_df])
 
-    cur_dt = datetime(2026, 1, 10, 23, 0, 0, tzinfo=pytz.UTC)
-    opt_plan_df = bp.optimize_plan(plan_df, cur_dt, 25, GLOBAL_APP_STATE)
+    cur_dt = datetime(2026, 3, 28, 22, 19, 0, tzinfo=pytz.UTC)
+    opt_plan_df = bp.optimize_plan(plan_df, cur_dt, 84, GLOBAL_APP_STATE)
+    cur_dt = datetime(2026, 3, 28, 22, 33, 0, tzinfo=pytz.UTC)
+    opt_plan_df = bp.optimize_plan(opt_plan_df, cur_dt, 82, GLOBAL_APP_STATE)
 
     with pd.option_context(
             'display.max_rows', None,
@@ -640,3 +713,4 @@ if __name__ == "__main__":
     ):
         pd.options.display.float_format = '{:,.3f}'.format
         print(opt_plan_df)
+

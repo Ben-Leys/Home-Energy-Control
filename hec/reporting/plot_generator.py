@@ -18,37 +18,50 @@ logger = logging.getLogger(__name__)
 
 def _prepare_price_data_for_plot(
         price_intervals: List[NetElectricityPriceInterval],
-        num_expected_intervals: int
+        num_expected_intervals: int  # Usually 96 for 15-min intervals
 ) -> Tuple[List[float], List[float], List[datetime]]:
-    """
-    Helper to convert list of NetElectricityPriceInterval to plottable lists with the same number of elements
-    as num_expected_intervals (which is the max of the different lists to plot).
-    """
-    buy_prices, sell_prices, timestamps = [], [], []
+    buy_raw, sell_raw, ts_raw = [], [], []
 
     for interval in price_intervals:
         prices = interval.net_prices_eur_per_kwh.get(interval.active_contract_type, {})
-        buy_prices .append(prices.get("buy",  np.nan))
-        sell_prices.append(prices.get("sell", np.nan))
-        timestamps .append(interval.interval_start_local)
+        buy_raw.append(prices.get("buy", np.nan))
+        sell_raw.append(prices.get("sell", np.nan))
+        ts_raw.append(interval.interval_start_local)
 
-    arr_buy = np.array(buy_prices, dtype=float)
-    arr_sell = np.array(sell_prices, dtype=float)
-    arr_ts = np.array(timestamps, dtype='object')
+    n = len(buy_raw)
 
-    # how many times each original point should repeat
-    n, m = len(arr_buy), num_expected_intervals
-    if n == 0 or m == 0:
-        return [], [], []
-    repeat_factor, extra = divmod(m, n)
+    # Spring DST (Short day 92 intervals)
+    if n == 92:
+        # Duplicate the 8th element (index 7) 4 times to fill the jump
+        # Insert at index 8
+        for i in range(1, 5):
+            buy_raw.insert(8, 0)
+            sell_raw.insert(8, 0)
+            new_ts = ts_raw[7] + pd.Timedelta(minutes=15 * i)
+            ts_raw.insert(8, new_ts)
 
-    # build an index array: [0,0,…,1,1,…,2,2,…, …]
-    idx = np.repeat(np.arange(n), repeat_factor)
-    if extra:
-        idx = np.concatenate([idx, np.arange(extra)])
-    idx = idx[:m]
+    # DST (Long day 100 intervals)
+    elif n == 100:
+        new_buy = buy_raw[:8]
+        new_sell = sell_raw[:8]
+        new_ts = ts_raw[:8]
 
-    return arr_buy[idx].tolist(), arr_sell[idx].tolist(), arr_ts[idx].tolist()
+        # Average the "double hour"
+        for i in range(4):
+            avg_buy = (buy_raw[8 + i] + buy_raw[12 + i]) / 2
+            avg_sell = (sell_raw[8 + i] + sell_raw[12 + i]) / 2
+            new_buy.append(avg_buy)
+            new_sell.append(avg_sell)
+            new_ts.append(ts_raw[8 + i])
+
+        # Add the remaining
+        new_buy.extend(buy_raw[16:])
+        new_sell.extend(sell_raw[16:])
+        new_ts.extend(ts_raw[16:])
+
+        buy_raw, sell_raw, ts_raw = new_buy, new_sell, new_ts
+
+    return buy_raw[:num_expected_intervals], sell_raw[:num_expected_intervals], ts_raw[:num_expected_intervals]
 
 
 def generate_price_solar_plot(

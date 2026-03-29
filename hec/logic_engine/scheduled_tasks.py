@@ -7,6 +7,8 @@ from time import sleep
 from datetime import datetime, timedelta, timezone, time, date
 from typing import Optional, List, Dict, Any
 
+import pandas as pd
+import pytz
 from apscheduler.schedulers.base import BaseScheduler
 
 from hec.controllers.api_evcc import EvccApiClient
@@ -20,6 +22,9 @@ from hec.data_sources.api_entsoe import fetch_entsoe_prices
 from hec.data_sources.api_p1_meter_homewizard import P1MeterHomewizardClient
 from hec.data_sources.api_battery_homewizard import BatteryHomeWizard
 from hec.database_ops.db_handler import DatabaseHandler
+from hec.logic_engine import battery_predictor
+from hec.logic_engine.battery_predictor import BatteryPredictor
+from hec.logic_engine.consumption_predictor import ConsumptionPredictor
 from hec.logic_engine.data_processors import populate_appstate_with_price_data, populate_appstate_with_forecast_data, \
     update_rolling_averages
 from hec.logic_engine.system_mediator import SystemMediator
@@ -43,6 +48,7 @@ DAILY_SUMMARY_EMAIL_JOB_ID = "daily_summary_email"
 MEDIATOR_LOGIC_JOB_ID = "mediator_logic"
 BATTERY_UPDATE_FOR_DB_JOB_ID = "battery_update_for_db"
 BATTERY_UPDATE_JOB_ID = "battery_update"
+BATTERY_PREDICTOR_JOB_ID = "battery_prediction"
 
 
 def task_fetch_and_store_day_ahead_prices(scheduler: BaseScheduler, db_handler: DatabaseHandler, app_config: dict,
@@ -102,8 +108,6 @@ def task_midnight_rollover(db_handler: DatabaseHandler, app_config: dict):
     else:  # No prices for tomorrow, try fetch from API
         populate_appstate_with_price_data(db_handler, app_config, True)
 
-    # populate_appstate_with_forecast_data(db_handler)
-
 
 def task_poll_p1_meter(db_handler: DatabaseHandler, p1_client: Optional[P1MeterHomewizardClient], boundary: int = 5):
     """
@@ -141,7 +145,7 @@ def task_poll_p1_meter(db_handler: DatabaseHandler, p1_client: Optional[P1MeterH
         "monthly_power_peak_w": p1_data.get("montly_power_peak_w"),  # P1_meter spelling error
         "monthly_power_peak_timestamp": p1_data.get("montly_power_peak_timestamp"),  # P1_meter spelling error
     }
-    if datetime.now().day == 1 and datetime.now().hour == 0:
+    if datetime.now().day == 1 and datetime.now().hour <= 1:
         # Monthly power peak doesn't reset immediately in smart meter possibly allowing charging to create a new peak
         live["monthly_power_peak_w"] = 0
     GLOBAL_APP_STATE.set("p1_meter_data", live)
@@ -410,6 +414,102 @@ def fetch_historic_elia_data(db_handler: DatabaseHandler, app_config: dict, hist
     logger.info(f"Fetched and stored {total_lines_added} Elia forecast records.")
 
 
+def task_run_battery_predictor(app_config, db_handler: DatabaseHandler):
+    """
+    Scheduled task to run the battery predictor.
+    Generates the base 48h plan once per day, and optimizes it every 15 minutes.
+    """
+    logger.info("Running battery predictor task...")
+    bp = BatteryPredictor(app_config)
+    cd = ConsumptionPredictor(db_handler)
+
+    local_tz = pytz.timezone('Europe/Brussels')
+    now_utc = datetime.now(pytz.UTC)
+    now_local = now_utc.astimezone(local_tz)
+
+    # 1. Get Actual SOC from App State (fallback to 0 if not found)
+    battery_records = GLOBAL_APP_STATE.get("battery_records") or []
+    actual_soc = 0.0
+    if battery_records and len(battery_records) > 0:
+        for battery in battery_records:
+            actual_soc += battery.get("state_of_charge_pct", 0.0)
+        actual_soc /= len(battery_records)
+    else:
+        logger.warning("Predictor: No battery SOC found in state, defaulting to 0%.")
+
+    # 2. Get Max Peak (Convert W to kW)
+    p1_data = GLOBAL_APP_STATE.get("p1_meter_data") or {}
+    max_peak_w = p1_data.get("monthly_power_peak_w", 2500)
+    max_peak_kw = max_peak_w / 1000.0
+
+    # 3. Check if we need to generate the base plan
+    today_date_str = now_local.strftime('%Y-%m-%d')
+    last_gen_date = GLOBAL_APP_STATE.get("plan_generation_date")
+    base_plan_df = GLOBAL_APP_STATE.get("prediction_plan_df", None)
+
+    if last_gen_date != today_date_str:
+        logger.info(f"Generating new 48h base prediction plan for {today_date_str}...")
+
+        # Determine strict local midnight boundaries (DST safe!)
+        today_local_midnight = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
+        tomorrow_date = today_local_midnight.date() + timedelta(days=1)
+        tomorrow_local_midnight = local_tz.localize(datetime.combine(tomorrow_date, datetime.min.time()))
+        day_after_date = today_local_midnight.date() + timedelta(days=2)
+        day_after_local_midnight = local_tz.localize(datetime.combine(day_after_date, datetime.min.time()))
+
+        # Convert back to UTC for the predictor limits
+        first_day_start = today_local_midnight.astimezone(pytz.UTC)
+        first_day_end = (tomorrow_local_midnight - timedelta(minutes=15)).astimezone(pytz.UTC)
+
+        second_day_start = tomorrow_local_midnight.astimezone(pytz.UTC)
+        second_day_end = (day_after_local_midnight - timedelta(minutes=15)).astimezone(pytz.UTC)
+
+        try:
+            # --- DAY 1 ---
+            ff1 = cd.generate_consumption_forecast(first_day_start, first_day_end)
+            first_plan_df = bp.generate_plan(
+                first_day_start, first_day_end, ff1, db_handler,
+                max_peak_kw, initial_soc_pct=actual_soc
+            )
+
+            # --- DAY 2 ---
+            # Carry over the last SOC from Day 1 to the start of Day 2
+            if not first_plan_df.empty:
+                last_soc_day1 = first_plan_df['soc_pct'].iloc[-1]
+            else:
+                last_soc_day1 = actual_soc
+
+            ff2 = cd.generate_consumption_forecast(second_day_start, second_day_end)
+            second_plan_df = bp.generate_plan(
+                second_day_start, second_day_end, ff2, db_handler,
+                max_peak_kw, initial_soc_pct=last_soc_day1
+            )
+
+            # --- Combine and Store ---
+            base_plan_df = pd.concat([first_plan_df, second_plan_df])
+            GLOBAL_APP_STATE.set("plan_generation_date", today_date_str)
+            logger.info("Base prediction plan generated successfully.")
+
+        except Exception as e:
+            logger.error(f"Failed to generate base prediction plan: {e}", exc_info=True)
+            return  # Stop execution if base plan fails
+
+    # 4. Run the 15-minute Optimization
+    try:
+        if base_plan_df is not None:
+            logger.debug("Optimizing prediction plan for current state...")
+            opt_plan_df = bp.optimize_plan(base_plan_df, now_utc, actual_soc, GLOBAL_APP_STATE)
+
+            # Store the finalized plan in app_state so the Vue dashboard can pick it up
+            plan_list = opt_plan_df.reset_index().to_dict(orient='records')
+            GLOBAL_APP_STATE.set("prediction_plan", plan_list)
+            GLOBAL_APP_STATE.set("prediction_plan_df", opt_plan_df)
+            logger.debug("Prediction plan optimized and saved to state.")
+
+    except Exception as e:
+        logger.error(f"Failed to optimize prediction plan: {e}", exc_info=True)
+
+
 def task_system_mediator(system_mediator: SystemMediator, app_config,
                          db_handler: DatabaseHandler, tariff_manager: TariffManager):
     # System reboot asked
@@ -422,6 +522,8 @@ def task_system_mediator(system_mediator: SystemMediator, app_config,
         logger.info('Summary e-mail requested')
         GLOBAL_APP_STATE.set('summary_request', False)
         task_send_daily_energy_summary_email(app_config, db_handler, tariff_manager)
+    if GLOBAL_APP_STATE.get('prediction_plan', None) is None:
+        task_run_battery_predictor(app_config, db_handler)
 
     system_mediator.run_system_mediation_logic()
 
@@ -474,6 +576,15 @@ def register_all_jobs(scheduler: BaseScheduler, db_handler: DatabaseHandler, app
                 "job_args": [system_mediator, app_config, db_handler, tariff_manager],
                 "name": "System Mediator",
                 "misfire_grace_time": 10,
+            },
+            {
+                "job_id": BATTERY_PREDICTOR_JOB_ID,
+                "task_function": task_run_battery_predictor,
+                "trigger": "cron",
+                "trigger_args": "",
+                "job_args": [app_config, db_handler],
+                "name": "Battery predictor",
+                "misfire_grace_time": 600,
             }
         ]
 

@@ -134,27 +134,29 @@ class P1MeterHomewizardClient:
 
     def set_battery_mode(self, mode: c.BatteryState) -> bool:
         """
-        Sends a command to the battery group to change the operating mode.
-
-        Args:
-            mode: New mode ('to_full', 'zero', or 'standby').
-
-        Returns:
-            True if the mode was changed, False otherwise.
+        Updates the battery behavior based on the BatteryState enum.
+        Handles the internal mapping between 'mode' and 'permissions'.
         """
         if not self.is_initialized:
             logger.warning("P1 Meter: Not initialized, skipping set_battery_mode.")
             return False
 
         if not self.battery_url:
-            logger.error(
-                "P1 Meter: Battery command URL is not set. "
-            )
+            logger.error("P1 Meter: Battery command URL is not set. ")
             return False
 
-        valid_modes = {"to_full", "zero", "standby"}
-        if mode.value not in valid_modes:
-            logger.warning(f"P1 Meter: Invalid battery mode '{mode}' requested.")
+        state_map = {
+            c.BatteryState.BATTERY_OFF: {"mode": "standby"},
+            c.BatteryState.BATTERY_ON: {"mode": "zero", "permissions": ["charge_allowed", "discharge_allowed"]},
+            c.BatteryState.BATTERY_FORCE_CHARGE: {"mode": "to_full"},
+            c.BatteryState.BATTERY_BLOCK_CHARGE: {"mode": "zero", "permissions": ["discharge_allowed"]},
+            c.BatteryState.BATTERY_BLOCK_DISCHARGE: {"mode": "zero", "permissions": ["charge_allowed"]},
+        }
+
+        payload = state_map.get(mode)
+
+        if not payload:
+            logger.error(f"P1 Meter: No payload mapping found for state {mode}")
             return False
 
         headers = {
@@ -162,9 +164,9 @@ class P1MeterHomewizardClient:
             "X-Api-Version": "2",
             "Content-Type": "application/json",
         }
-        payload = {"mode": mode}
 
         try:
+            logger.info(f"P1 Meter: Setting battery to {mode.name} with payload {payload}")
             response = requests.put(
                 self.battery_url,
                 headers=headers,
@@ -188,54 +190,7 @@ class P1MeterHomewizardClient:
             logger.warning(f"P1 Meter: HTTP error while setting battery mode '{mode}': {e}")
             return False
         except (requests.exceptions.RequestException, json.JSONDecodeError) as e:
-            logger.error(
-                f"P1 Meter: Error while setting battery mode '{mode}': {e}",
-                exc_info=True
-            )
-            return False
-
-    def set_battery_permissions(self, charge_allowed: bool, discharge_allowed: bool,
-                                mode: Optional[str] = None) -> bool:
-        """
-        Updates the battery permissions and optionally the mode.
-        Note: Cannot set mode to 'to_full' while changing permissions.
-        """
-        if not self.is_initialized or not self.battery_url:
-            return False
-
-        # Build permissions array
-        permissions = []
-        if charge_allowed:
-            permissions.append("charge_allowed")
-        if discharge_allowed:
-            permissions.append("discharge_allowed")
-
-        # Prepare payload
-        payload = {"permissions": permissions}
-        if mode:
-            if mode == "to_full":
-                return False
-            payload["mode"] = mode
-
-        headers = {
-            "Authorization": f"Bearer {self.token}",
-            "X-Api-Version": "2",
-            "Content-Type": "application/json",
-        }
-
-        try:
-            response = requests.put(
-                self.battery_url,
-                headers=headers,
-                json=payload,
-                verify=False,
-                timeout=self.request_timeout,
-            )
-            response.raise_for_status()
-            logger.info(f"P1 Meter: Permissions updated to {permissions}")
-            return True
-        except requests.exceptions.RequestException as e:
-            logger.error(f"P1 Meter: Failed to update permissions: {e}")
+            logger.error(f"P1 Meter: Error while setting battery mode '{mode}': {e}", exc_info=True)
             return False
 
 # Example standalone test (if needed, but better to test via scheduled task)

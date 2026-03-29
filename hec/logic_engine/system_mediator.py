@@ -1,9 +1,9 @@
 # hec/logic_engine/system_mediator.py
 import logging
-import time
 import pandas as pd
 import pytz
-from datetime import datetime, timedelta, time
+import time
+from datetime import datetime, timedelta, time as dt_time
 from typing import Optional
 
 from hec.controllers.api_evcc import EvccApiClient
@@ -39,7 +39,7 @@ class SystemMediator:
         self.app_config = app_config
         self.app_mediator_goal: Optional[c.MediatorGoal] = None
         # Prices
-        self.market: Optional[market_prices] = None
+        self.market = market_prices.MarketContext()
         # Charging/evcc
         self.new_evcc_state: Optional[c.EVCCManualState] = None
         self.new_max_amps: Optional[int] = None
@@ -59,9 +59,9 @@ class SystemMediator:
         self.new_inv_limit = None
         # Peak consumption
         self.standard_max_peak_consumption_kw: float = 2.5
-        self.current_max_peak_consumption_kw: float = 2.5
-        self.ignore_start = time(4, 0)
-        self.ignore_end = time(4, 45)
+        self.current_max_peak_kw: float = 2.5
+        self.ignore_start = dt_time(4, 0)
+        self.ignore_end = dt_time(4, 45)
         self.last_email_sent_time: datetime | None = None
         self.is_peak_throttle_mode: bool = False
         self.inv_state_before_peak: Optional[c.InverterManualState] = None
@@ -69,10 +69,9 @@ class SystemMediator:
         self.evcc_state_before_peak: Optional[c.EVCCManualState] = None
         self.bat_state_before_peak: Optional[c.BatteryState] = None
         # Battery
-        self.battery_force_deadline = None
-        self.new_bat_mode = c.BatteryState.BATTERY_AUTO
-        self.new_bat_charge_allowed = True
-        self.new_bat_discharge_allowed = True
+        self.new_bat_mode = c.BatteryState.BATTERY_ON
+        self.battery_force_start_time = None
+        self.last_processed_interval = None
 
         self._prepare_mediator_prerequisites(evcc_client, inverter_client, p1_client)
 
@@ -138,12 +137,12 @@ class SystemMediator:
             if not GLOBAL_APP_STATE:
                 return False
 
-            if not self.market.refresh_if_needed(GLOBAL_APP_STATE):
+            if not self.market.refresh_if_needed():
                 return False
 
             p1_data = GLOBAL_APP_STATE.get('p1_meter_data', {})
             cur_peak_kw = p1_data.get('monthly_power_peak_w', 0) / 1000
-            self.current_max_peak_consumption_kw = max(cur_peak_kw, self.standard_max_peak_consumption_kw)
+            self.current_max_peak_kw = max(cur_peak_kw, self.standard_max_peak_consumption_kw)
 
             return True
 
@@ -178,11 +177,8 @@ class SystemMediator:
         self.new_evcc_state = GLOBAL_APP_STATE.get('evcc_manual_state')
         self.new_inv_state = GLOBAL_APP_STATE.get('inverter_manual_state')
         self.new_max_amps = GLOBAL_APP_STATE.get('evcc_manual_limit')
-
-        # Battery Manual
-        bat_mode = GLOBAL_APP_STATE.get("battery_manual_mode")
-        perms = GLOBAL_APP_STATE.get("battery_manual_permissions", [True, True])
-        self._set_battery_targets(bat_mode, charge=perms[0], discharge=perms[1])
+        self.new_bat_mode = GLOBAL_APP_STATE.get("battery_manual_mode")
+        self._recalculate_inverter_limit()
 
     def _determine_evcc_state(self):
         """Determines the new evcc controller state based on the mediator goal."""
@@ -241,7 +237,7 @@ class SystemMediator:
 
         # Calculate Available Power
         grid_kw = GLOBAL_APP_STATE.get('p1_meter_data', {}).get('active_power_w', 0) / 1000
-        threshold_kw = self.current_max_peak_consumption_kw - 0.15
+        threshold_kw = self.current_max_peak_kw - 0.15
         avail_kw = threshold_kw - grid_kw
         logger.debug(f"Grid power: {grid_kw:.2f} kW. Base available for charging: {avail_kw:.2f} kW")
 
@@ -438,7 +434,29 @@ class SystemMediator:
                     can_update = True
                     logger.debug(f"Sustained import detected. Boosting limit to {desired_limit_w:.0f} W")
 
-            # 6. Apply decision
+            # 6 Minimum for battery charging
+            # If battery needs energy (SOC < 95%) and isn't blocked, ensure at least 1800W
+            battery_records = GLOBAL_APP_STATE.get("battery_records") or []
+            bat_soc = 0.0
+            if battery_records and len(battery_records) > 0:
+                for battery in battery_records:
+                    bat_soc += battery.get("state_of_charge_pct", 0.0)
+                bat_soc /= len(battery_records)
+
+            # Check if battery is in a state where it CAN charge
+            is_charging_allowed = self.new_bat_mode not in [c.BatteryState.BATTERY_OFF,
+                                                            c.BatteryState.BATTERY_BLOCK_CHARGE]
+
+            if bat_soc < 95 and is_charging_allowed:
+                if desired_limit_w < 1800:
+                    logger.debug(f"SOC {bat_soc}% < 95%: Boosting inverter limit from "
+                                 f"{desired_limit_w:.0f}W to 1800W floor for battery.")
+                    desired_limit_w = 1800
+                    # Force an update if the current limit is significantly below the floor
+                    if cur_limit_w < 1600:
+                        can_update = True
+
+            # 7. Apply decision
             if can_update:
                 # Final clamp to hardware limits
                 self.new_inv_limit = int(max(0, min(desired_limit_w, self.inverter_client.standard_power_limit)))
@@ -466,19 +484,37 @@ class SystemMediator:
         now = datetime.now(tz=pytz.UTC)
         lp = GLOBAL_APP_STATE.get('evcc_loadpoint_state', {})
         bat_data = GLOBAL_APP_STATE.get("battery_data", {})
+        bat_records = GLOBAL_APP_STATE.get("battery_records", [])
+        lowest_soc = min([b.get("state_of_charge_pct", 5) for b in bat_records]) if bat_records else 5
 
-        # 1. Absolute rule: Car is charging
+        # 1. Absolute rules:
+        # A: Don't allow empty for too long
+        empty_since = GLOBAL_APP_STATE.get("empty_since")
+        if lowest_soc < 1:
+            if empty_since is None:
+                GLOBAL_APP_STATE.set("empty_since", now)
+                empty_since = now
+        else:
+            GLOBAL_APP_STATE.set("empty_since", None)
+            empty_since = None
+        empty_too_long = (now - empty_since) > timedelta(hours=12) if empty_since else False
+
+        # B: Car is charging
         if lp.get('is_charging', False):
-            self._set_battery_targets(c.BatteryState.BATTERY_OFF, charge=True, discharge=True)
+            self.new_bat_mode = c.BatteryState.BATTERY_BLOCK_DISCHARGE
             # Clear any ongoing force-charge timers
-            self.battery_force_deadline = None
+            self.battery_force_start_time = None
+            return
+
+        # C: SOC <= 1%
+        if lowest_soc <= 1 and not empty_too_long:
+            self.new_bat_mode = c.BatteryState.BATTERY_BLOCK_DISCHARGE
             return
 
         # 2. Prediction plan
-        plan_df = GLOBAL_APP_STATE.get("prediction_plan")
-
+        plan_df: pd.DataFrame = GLOBAL_APP_STATE.get("prediction_plan_df")
         if plan_df is None or plan_df.empty:
-            self._set_battery_targets(c.BatteryState.BATTERY_ON, charge=True, discharge=True)
+            self.new_bat_mode = c.BatteryState.BATTERY_ON
             return
 
         # A. Get the current instruction from the DataFrame
@@ -486,49 +522,78 @@ class SystemMediator:
             current_row = plan_df[plan_df.index <= now].iloc[-1]
         except (IndexError, AttributeError, KeyError):
             logger.warning("Could not parse prediction_plan for current time. Defaulting to BATTERY_ON.")
-            self._set_battery_targets(c.BatteryState.BATTERY_ON, charge=True, discharge=True)
+            self.new_bat_mode = c.BatteryState.BATTERY_ON
             return
 
         # B. Handle Force Charge Timer
-        is_force_c = bool(current_row.get("force_c", False))
+        is_force_plan = False
+        plan_minutes_limit = 15.0
+        current_interval_start = now.replace(minute=(now.minute // 15) * 15, second=0, microsecond=0)
 
-        if is_force_c and not self.battery_force_deadline:
-            safe_minutes = self._calculate_safe_force_charge_minutes(bat_data)
+        try:
+            is_force_plan = bool(current_row.get("force_c", False))
+            plan_minutes_limit = float(current_row.get("force_time", 15))
+            current_interval_start = current_row.name
+        except (IndexError, AttributeError):
+            pass
 
-            if safe_minutes >= 1:
-                plan_minutes = int(current_row.get("force_time", 15))
-                actual_minutes = min(plan_minutes, safe_minutes)
+        # Override if empty for too long
+        if empty_too_long:
+            if not is_force_plan:
+                logger.info("Battery empty > 12h. Triggering 5min maintenance charge.")
+                is_force_plan = True
+                plan_minutes_limit = 5.0
 
-                self.battery_force_deadline = now + timedelta(minutes=actual_minutes)
-                logger.info(f"Safe Force Charge started for {actual_minutes} min (Peak Budget limit).")
+        if is_force_plan:
+            if self.last_processed_interval != current_interval_start:
+                self.battery_force_start_time = now
+                self.last_processed_interval = current_interval_start
+                logger.info(f"New Force Charge interval started at {current_interval_start}.")
+
+            elapsed_minutes = (now - self.battery_force_start_time).total_seconds() / 60
+
+            # Recalculate budget every loop
+            safe_minutes = self._calculate_safe_force_charge_minutes()
+
+            # If the window is closing or budget is tight, safe_minutes will drop to 0
+            if elapsed_minutes < plan_minutes_limit and safe_minutes >= 1:
+                self.new_bat_mode = c.BatteryState.BATTERY_FORCE_CHARGE
+                remaining_plan = round(plan_minutes_limit - elapsed_minutes, 1)
+                logger.info(f"Force Charging: {remaining_plan}min left in plan. Safety buffer: {safe_minutes}min.")
+                return
             else:
-                logger.warning("Force Charge requested by plan, but no Peak Budget available. Skipping.")
+                if elapsed_minutes >= plan_minutes_limit:
+                    logger.info(f"Force Charge complete: Reached plan limit of {plan_minutes_limit} min.")
+                else:
+                    logger.warning(f"Force Charge aborted: Peak budget exhausted (Safety: {safe_minutes}min).")
 
-        # Check if timer is active
-        if self.battery_force_deadline and now < self.battery_force_deadline:
-            # While force charging, mode = 'to_full'
-            self._set_battery_targets(c.BatteryState.BATTERY_FORCE_CHARGE)
-            return
-        elif self.battery_force_deadline and now >= self.battery_force_deadline:
-            logger.info("Prediction plan: Force charge completed.")
-            self.battery_force_deadline = None
+                self.new_bat_mode = c.BatteryState.BATTERY_BLOCK_DISCHARGE
+                # We don't reset battery_force_start_time here yet,
+                # so we don't restart immediately in the next loop of the same interval.
+                return
+        else:
+            self.battery_force_start_time = None
+            self.last_processed_interval = None
 
         # C. Handle Blocking (Charge / Discharge)
         is_block_c = bool(current_row.get("block_c", False))
+        if is_block_c:
+            self.new_bat_mode = c.BatteryState.BATTERY_BLOCK_CHARGE
+
         is_block_d = bool(current_row.get("block_d", False))
+        if is_block_d:
+            avg_w_2m = (GLOBAL_APP_STATE.get('average_grid_import_watts', {}).get("2m", 0))
+            block_will_cause_peak = (avg_w_2m + bat_data.get('max_consumption_w', 1600)) / 1000 > self.current_max_peak_kw * 0.9
+            if not block_will_cause_peak:
+                self.new_bat_mode = c.BatteryState.BATTERY_BLOCK_DISCHARGE
 
-        self._set_battery_targets(
-            mode=c.BatteryState.BATTERY_ON,  # Standard auto mode
-            charge=not is_block_c,
-            discharge=not is_block_d
-        )
-
-    def _calculate_safe_force_charge_minutes(self, bat_data: dict) -> int:
+    def _calculate_safe_force_charge_minutes(self) -> int:
         """
         Calculates how many minutes we can charge at max power without
         exceeding the 15-minute average capacity limit.
         """
         now = datetime.now()
+        bat_data = GLOBAL_APP_STATE.get("battery_data", {})
         # 1. Where are we in the current 15-minute block
         # (at 14:07, we are 7 minutes into the [14:00-14:15] window)
         minutes_passed = now.minute % 15
@@ -546,7 +611,7 @@ class SystemMediator:
 
         # 4. Math: How much 'Energy Debt' can we afford?
         # Total allowed Joules (Ws) in 15 mins = Limit_W * 900s
-        allowed_ws = self.current_max_peak_consumption_kw * 1000 * 900
+        allowed_ws = self.current_max_peak_kw * 1000 * 900
 
         # Estimated Joules already spent (using 5m average as a proxy for the current window)
         avg_5m_w = GLOBAL_APP_STATE.get('average_grid_import_watts', {}).get('5m', 0)
@@ -566,12 +631,6 @@ class SystemMediator:
         actual_safe_seconds = min(safe_seconds, seconds_remaining)
 
         return int(actual_safe_seconds // 60)
-
-    def _set_battery_targets(self, mode: c.BatteryState=None, charge: bool=None, discharge: bool=None):
-        """Helper to update the internal state trackers."""
-        self.new_bat_mode = mode
-        self.new_bat_charge_allowed = charge
-        self.new_bat_discharge_allowed = discharge
 
     def _apply_inverter_state(self):
         """
@@ -611,6 +670,7 @@ class SystemMediator:
             if success:
                 self.last_pv_limit_change_time = datetime.now(tz=pytz.UTC)
                 GLOBAL_APP_STATE.set('inverter_manual_state', self.new_inv_state)
+                GLOBAL_APP_STATE.set('inverter_manual_limit', self.new_inv_limit)
             else:
                 logger.error("Inverter: API rejected the limit update.")
 
@@ -660,6 +720,7 @@ class SystemMediator:
                 success_amps = self.evcc_client.set_max_current(int(self.new_max_amps))
                 if success_amps:
                     self.last_max_amps = int(self.new_max_amps)
+                    GLOBAL_APP_STATE.set('evcc_manual_limit', int(self.new_max_amps))
 
             self.last_amps_push = now_ts
 
@@ -670,41 +731,43 @@ class SystemMediator:
         """
         Executes the planned battery state against the P1 Client API.
         """
+        if not self.new_bat_mode:
+            return
+        # Get current mode
         bat_data = GLOBAL_APP_STATE.get("battery_data", {})
-        cur_mode_str = bat_data.get("mode", "UNKNOWN")
-        cur_permissions = bat_data.get("permissions", [])
+        if not bat_data:
+            logger.error("Can't apply battery state. No battery data available.")
+            return
+        mode = bat_data.get("mode")
+        perms = bat_data.get("permissions", [])
 
-        cur_charge_allowed = "charge_allowed" in cur_permissions
-        cur_discharge_allowed = "discharge_allowed" in cur_permissions
+        current_state = c.BatteryState.BATTERY_OFF
+        if mode == "standby":
+            current_state = c.BatteryState.BATTERY_OFF
+        elif mode == "to_full":
+            current_state = c.BatteryState.BATTERY_FORCE_CHARGE
+        elif perms:
+            charge = "charge_allowed" in perms
+            discharge = "discharge_allowed" in perms
+            if charge and discharge:
+                current_state = c.BatteryState.BATTERY_ON
+            elif discharge and not charge:
+                current_state = c.BatteryState.BATTERY_BLOCK_CHARGE
+            elif charge and not discharge:
+                current_state = c.BatteryState.BATTERY_BLOCK_DISCHARGE
 
-        # Changes required?
-        mode_changed = cur_mode_str != self.new_bat_mode.value
-        perms_changed = (cur_charge_allowed != self.new_bat_charge_allowed or
-                         cur_discharge_allowed != self.new_bat_discharge_allowed)
-
-        if not mode_changed and not perms_changed:
+        if current_state == self.new_bat_mode:
+            logger.debug(f"Battery is already in state: {current_state.name}. No action needed.")
             return
 
         try:
-            # A: We are in 'to_full' but need to change permissions.
-            # We must step down to 'zero' first to unlock the API.
-            if cur_mode_str == c.BatteryState.BATTERY_FORCE_CHARGE.value and perms_changed:
-                logger.debug("Stepping battery down to 'zero' to unlock permission writes.")
-                self.p1_client.set_battery_mode(c.BatteryState.BATTERY_ON)
-
-            # B: Apply permissions
-            if perms_changed:
-                self.p1_client.set_battery_permissions(
-                    charge_allowed=self.new_bat_charge_allowed,
-                    discharge_allowed=self.new_bat_discharge_allowed
-                )
-                logger.debug(
-                    f"Battery perms updated: C={self.new_bat_charge_allowed}, D={self.new_bat_discharge_allowed}")
-
-            # C: Apply the final mode
-            if mode_changed:
-                self.p1_client.set_battery_mode(self.new_bat_mode)
-                logger.debug(f"Battery mode updated to {self.new_bat_mode.value}")
+            logger.info(f"Transitioning battery: {current_state.name} -> {self.new_bat_mode.name}")
+            success = self.p1_client.set_battery_mode(self.new_bat_mode)
+            GLOBAL_APP_STATE.set('battery_manual_mode', self.new_bat_mode)
+            if success:
+                logger.debug(f"Battery successfully set to {self.new_bat_mode.name}")
+            else:
+                logger.error(f"P1 Client failed to apply state {self.new_bat_mode.name}")
 
         except Exception as e:
             logger.error(f"Failed to update battery state: {e}")
@@ -715,7 +778,7 @@ class SystemMediator:
         avg = {k: get_kw(k) for k in ['5m', '10m', '15m']}
 
         # Detection logic
-        limit = self.current_max_peak_consumption_kw
+        limit = self.current_max_peak_kw
         peak_exceeded = (avg['5m'] > limit * 1.1 or avg['10m'] > limit or avg['15m'] > limit)
         should_throttle = (avg['5m'] > limit * 1.25 or avg['10m'] > limit * 1.05 or avg['15m'] > limit)
 
@@ -732,7 +795,7 @@ class SystemMediator:
 
                 def _send_peak_email(avg_data_mail):
                     smtp_cfg = self.app_config.get('smtp', {})
-                    limit = self.current_max_peak_consumption_kw
+                    limit = self.current_max_peak_kw
 
                     if avg_data_mail['15m'] > limit:
                         status_msg = "peak exceeded!"

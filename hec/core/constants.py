@@ -59,7 +59,8 @@ class EVCCManualState(Enum):
 
 
 class BatteryState(Enum):
-    BATTERY_OFF = "standby"
-    BATTERY_ON = "zero"
-    BATTERY_FORCE_CHARGE = "to_full"
-    BATTERY_AUTO = "auto"
+    BATTERY_OFF = "Off"
+    BATTERY_ON = "Zero"
+    BATTERY_FORCE_CHARGE = "Force charge"
+    BATTERY_BLOCK_CHARGE = "Block charge"
+    BATTERY_BLOCK_DISCHARGE = "Block discharge"

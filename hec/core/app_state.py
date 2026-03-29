@@ -51,15 +51,20 @@ class AppState:
             "battery_data": None,
             "battery_records": [],
             "battery_manual_mode": None,
-            "battery_manual_permissions": [],
-            "prediction_plan": None
+            "prediction_plan": None,
+            "plan_generation_date": None,
+            "empty_since": None
         }
+        self.prediction_plan_df = None
 
         self.db_handler: Optional[db_handler] = None
         self.persisted_keys: List[str] = ["app_operating_mode", "app_mediator_goal", "inverter_manual_state",
-                                          "inverter_manual_limit", "evcc_manual_state"]
+                                          "inverter_manual_limit", "evcc_manual_state", "evcc_manual_limit",
+                                          "battery_manual_mode", "empty_since"]
 
     def get(self, key, default=None):
+        if key == "prediction_plan_df":
+            return self.prediction_plan_df
         return self.current_values.get(key, default)
 
     def set(self, key, value):
@@ -67,6 +72,8 @@ class AppState:
             self.current_values[key] = value
             truncated_value = str(value)[:500]
             logger.debug(f"App state updated: {key} = {truncated_value}")
+        elif key == "prediction_plan_df":
+            self.prediction_plan_df = value
         else:
             logger.warning(f"Attempted to update non-existent state key: {key}")
 
