@@ -78,6 +78,7 @@ def task_fetch_and_store_day_ahead_prices(scheduler: BaseScheduler, db_handler: 
             if daily_summary_mail:
                 register_job(scheduler, DAILY_SUMMARY_EMAIL_JOB_ID, task_send_daily_energy_summary_email, "date", {},
                              [app_config, db_handler, tariff_manager], "Daily summary e-mail", 3600)
+            task_run_battery_predictor(app_config, db_handler)
             return
 
     # --- Handle Retries if no price points ---
@@ -356,7 +357,7 @@ def task_fetch_elia_forecasts(db_handler: DatabaseHandler, app_config: dict):
         logger.warning(f"No Elia forecast data fetched for {days_to_fetch} days. Check API.")
 
 
-def task_send_daily_energy_summary_email(app_config, db_handler, tariff_manager):
+def task_send_daily_energy_summary_email(app_config, db_handler, tariff_manager, renew_prices=False):
     """
     Scheduled task to generate and send the daily energy summary email.
     """
@@ -366,8 +367,8 @@ def task_send_daily_energy_summary_email(app_config, db_handler, tariff_manager)
     logger.info("Running task: Send Daily Energy Summary Email.")
 
     t_date_prices = GLOBAL_APP_STATE.get("electricity_prices_tomorrow")
-    if not t_date_prices:
-        logger.warning("Prices for 'tomorrow' not yet in AppState. Daily summary email skipped.")
+    if not t_date_prices or renew_prices:
+        populate_appstate_with_price_data(db_handler, app_config, True)
 
     try:
         success = summary_generator.generate_and_send_summary(app_config)
@@ -429,13 +430,14 @@ def task_run_battery_predictor(app_config, db_handler: DatabaseHandler):
 
     # 1. Get Actual SOC from App State (fallback to 0 if not found)
     battery_records = GLOBAL_APP_STATE.get("battery_records") or []
-    actual_soc = 0.0
+    actual_soc = -0.001
     if battery_records and len(battery_records) > 0:
         for battery in battery_records:
             actual_soc += battery.get("state_of_charge_pct", 0.0)
         actual_soc /= len(battery_records)
-    else:
-        logger.warning("Predictor: No battery SOC found in state, defaulting to 0%.")
+    if actual_soc == -0.001:
+        logger.warning("Predictor: No battery SOC found in state, skipping predictor.")
+        return
 
     # 2. Get Max Peak (Convert W to kW)
     p1_data = GLOBAL_APP_STATE.get("p1_meter_data") or {}
@@ -521,7 +523,7 @@ def task_system_mediator(system_mediator: SystemMediator, app_config,
     if GLOBAL_APP_STATE.get('summary_request', False):
         logger.info('Summary e-mail requested')
         GLOBAL_APP_STATE.set('summary_request', False)
-        task_send_daily_energy_summary_email(app_config, db_handler, tariff_manager)
+        task_send_daily_energy_summary_email(app_config, db_handler, tariff_manager, True)
     if GLOBAL_APP_STATE.get('prediction_plan', None) is None:
         task_run_battery_predictor(app_config, db_handler)
 

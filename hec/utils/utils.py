@@ -91,7 +91,7 @@ def process_price_points_to_app_state(price_points: list, target_day: datetime,
     return True
 
 
-def is_daylight(app_config: dict) -> bool:
+def is_daylight(app_config: dict, return_dt=False) -> bool | tuple[bool, datetime, datetime]:
     """Checks if it's currently daylight hours based on configured location."""
     location_config = app_config.get('inverter').get('location')
     if not location_config or not all(k in location_config for k in ['latitude', 'longitude', 'timezone']):
@@ -112,7 +112,9 @@ def is_daylight(app_config: dict) -> bool:
     is_light = sunrise_local <= now_dt_aware <= sunset_local
     logger.debug(f"Daylight check: Now={now_dt_aware.strftime('%H:%M')}, Sunrise={sunrise_local.strftime('%H:%M')}, "
                  f"Sunset={sunset_local.strftime('%H:%M')} -> Is Daylight: {is_light}")
-    return is_light
+    if not return_dt:
+        return is_light
+    return is_light, sunrise_local, sunset_local
 
 
 def send_email_with_attachments(
@@ -241,20 +243,20 @@ def convert_power(current_a: Optional[float] = None, power_kw: Optional[float] =
         logger.error("Provide exactly one parameter: either 'current_a' or 'power_kw'.")
 
 
-# if __name__ == '__main__':
-#     import os
-#     from dotenv import load_dotenv
-#     from pathlib import Path
-#
-#     BASE_DIR = Path(__file__).resolve().parent.parent
-#     env_path = BASE_DIR / ".env"
-#     load_dotenv(dotenv_path=env_path)
-#
-#     logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-#     test_config = {'inverter': {'location': {'latitude': 51.05483, 'longitude': 4.62877,
-#                                              'timezone': 'Europe/Brussels',
-#                                              'region_name_for_astral_optional': 'Belgium'}}}
-#     print(is_daylight(test_config))
+if __name__ == '__main__':
+    import os
+    from dotenv import load_dotenv
+    from pathlib import Path
+
+    BASE_DIR = Path(__file__).resolve().parent.parent
+    env_path = BASE_DIR / ".env"
+    load_dotenv(dotenv_path=env_path)
+
+    logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    test_config = {'inverter': {'location': {'latitude': 51.05483, 'longitude': 4.62877,
+                                             'timezone': 'Europe/Brussels', 'city': 'Putte',
+                                             'region_name_for_astral_optional': 'Belgium'}}}
+    print(is_daylight(test_config))
 #     test_config = {"host": "smtp.gmail.com", "port": 465,
 #                    "user": "", "sender_email": "",
 #                    "default_recipients": ["", ""]}

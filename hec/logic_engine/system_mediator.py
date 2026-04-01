@@ -169,7 +169,7 @@ class SystemMediator:
             f"Auto Mode Logic: Goal={self.app_mediator_goal} | "
             f"EV={self.new_evcc_state}({self.new_max_amps}A) | "
             f"INV={self.new_inv_state} | "
-            f"BAT={self.new_bat_mode},{self.new_bat_charge_allowed},{self.new_bat_discharge_allowed}"
+            f"BAT={self.new_bat_mode}"
         )
 
     def _handle_manual_mode(self):
@@ -388,7 +388,8 @@ class SystemMediator:
             # 1. Current power data
             grid_w = GLOBAL_APP_STATE.get('p1_meter_data', {}).get('active_power_w', 0)
             prod_w = GLOBAL_APP_STATE.get('inverter_data', {}).get('pv_power_watts', 0)
-            home_use_w = grid_w + prod_w
+            bat_w = GLOBAL_APP_STATE.get('battery_data', {}).get('power_w', 0)
+            home_use_w = grid_w + prod_w + bat_w
 
             # 2. Dynamic buffer calculation based on market prices
             buy_price = self.market.buy_price or 1.0
@@ -577,15 +578,24 @@ class SystemMediator:
 
         # C. Handle Blocking (Charge / Discharge)
         is_block_c = bool(current_row.get("block_c", False))
+        is_block_d = bool(current_row.get("block_d", False))
+
+        if is_block_d and is_block_c:
+            self.new_bat_mode = c.BatteryState.BATTERY_OFF
+            return
+
         if is_block_c:
             self.new_bat_mode = c.BatteryState.BATTERY_BLOCK_CHARGE
+            return
 
-        is_block_d = bool(current_row.get("block_d", False))
         if is_block_d:
-            avg_w_2m = (GLOBAL_APP_STATE.get('average_grid_import_watts', {}).get("2m", 0))
-            block_will_cause_peak = (avg_w_2m + bat_data.get('max_consumption_w', 1600)) / 1000 > self.current_max_peak_kw * 0.9
-            if not block_will_cause_peak:
+            avg_kw_2m = (GLOBAL_APP_STATE.get('average_grid_import_watts', {}).get("2m", 0)) / 1000
+            may_cause_peak = avg_kw_2m > self.current_max_peak_kw
+            if not may_cause_peak:
                 self.new_bat_mode = c.BatteryState.BATTERY_BLOCK_DISCHARGE
+                return
+
+        self.new_bat_mode = c.BatteryState.BATTERY_ON
 
     def _calculate_safe_force_charge_minutes(self) -> int:
         """
@@ -687,13 +697,13 @@ class SystemMediator:
         cur_manual_state = GLOBAL_APP_STATE.get('evcc_manual_state')
 
         # Validation
-        if self.new_evcc_state is None or self.new_max_amps is None:
-            return
+        state_changed, amps_changed = False, False
+        if self.new_evcc_state is not None:
+            state_changed = self.new_evcc_state != cur_manual_state
+        if self.new_max_amps is not None:
+            amps_changed = int(self.new_max_amps) != int(lp.max_current)
 
         # Changes are needed?
-        state_changed = self.new_evcc_state != cur_manual_state
-        amps_changed = int(self.new_max_amps) != int(lp.max_current)
-
         if not state_changed and not amps_changed:
             return
 
@@ -735,26 +745,26 @@ class SystemMediator:
             return
         # Get current mode
         bat_data = GLOBAL_APP_STATE.get("battery_data", {})
-        if not bat_data:
-            logger.error("Can't apply battery state. No battery data available.")
-            return
-        mode = bat_data.get("mode")
-        perms = bat_data.get("permissions", [])
-
         current_state = c.BatteryState.BATTERY_OFF
-        if mode == "standby":
-            current_state = c.BatteryState.BATTERY_OFF
-        elif mode == "to_full":
-            current_state = c.BatteryState.BATTERY_FORCE_CHARGE
-        elif perms:
-            charge = "charge_allowed" in perms
-            discharge = "discharge_allowed" in perms
-            if charge and discharge:
-                current_state = c.BatteryState.BATTERY_ON
-            elif discharge and not charge:
-                current_state = c.BatteryState.BATTERY_BLOCK_CHARGE
-            elif charge and not discharge:
-                current_state = c.BatteryState.BATTERY_BLOCK_DISCHARGE
+        if not bat_data:
+            logger.error("No battery data available. Will apply new state anyway.")
+        else:
+            mode = bat_data.get("mode")
+            perms = bat_data.get("permissions", [])
+
+            if mode == "standby":
+                current_state = c.BatteryState.BATTERY_OFF
+            elif mode == "to_full":
+                current_state = c.BatteryState.BATTERY_FORCE_CHARGE
+            elif perms:
+                charge = "charge_allowed" in perms
+                discharge = "discharge_allowed" in perms
+                if charge and discharge:
+                    current_state = c.BatteryState.BATTERY_ON
+                elif discharge and not charge:
+                    current_state = c.BatteryState.BATTERY_BLOCK_CHARGE
+                elif charge and not discharge:
+                    current_state = c.BatteryState.BATTERY_BLOCK_DISCHARGE
 
         if current_state == self.new_bat_mode:
             logger.debug(f"Battery is already in state: {current_state.name}. No action needed.")
@@ -889,9 +899,9 @@ class SystemMediator:
                     # If mode auto: app decides controller states based on mediator goal
                     self._handle_auto_mode()
 
-                self._apply_evcc_state()
-                self._apply_inverter_state()
-                self._apply_battery_state()
+            self._apply_evcc_state()
+            self._apply_inverter_state()
+            self._apply_battery_state()
 
         except Exception as e:
             logger.error(f"Unexpected error during mediator run: {e}", exc_info=True)

@@ -110,10 +110,10 @@
         .info { color: #e0e0e0; }
         .debug { color: #9e9e9e; font-style: italic; }
         .log-line {
-            padding: 4px 0;
-            border-bottom: 1px solid #2d2d2d;
+            padding: 2px 0;
+            border-bottom: 1px solid grey;
             white-space: pre-wrap;
-            line-height: 1.4;
+            line-height: 1.2;
         }
         .timestamp {
             color: white;
@@ -201,7 +201,7 @@
                 <div class="card">
                     <h4>💡 Price</h4>
                     <div style="grid-column: span 2; font-size: 0.8rem; color: var(--info-label); margin-bottom: 12px">
-                        Interval: {{ formatTime(currentPrice.start) }} - {{ formatTime(currentPrice.end) }} (LT)
+                        Interval: {{ formatTimeHm(currentPrice.start) }} - {{ formatTimeHm(currentPrice.end) }} (LT)
                     </div>
                     <div v-if="currentPrice" class="grid-2">
                         <div class="metric">
@@ -409,6 +409,12 @@
                     <option value="INFO">⚪ Info Only</option>
                     <option value="DEBUG">🟣 Debug Only</option>
                 </select>
+                <select v-model="logLimit" @change="fetchLogs" style="width: auto;">
+                    <option :value="100">Last 100</option>
+                    <option :value="1000">Last 1000</option>
+                    <option :value="5000">Last 5000</option>
+                    <option :value="10000">Last 10000</option>
+                </select>
                 <button class="btn" @click="fetchLogs" :disabled="isFetchingLogs"
                         style="padding: 5px 15px; margin-bottom: 10px; background-color: grey">
                     {{ isFetchingLogs ? '...' : '🔄 Refresh' }}
@@ -452,7 +458,7 @@
 </div>
 
 <script>
-    const { createApp, ref, computed, onMounted, onUnmounted } = Vue
+    const { createApp, ref, computed, watch, nextTick, onMounted, onUnmounted } = Vue
 
     createApp({
         setup() {
@@ -464,12 +470,23 @@
             const logs = ref([]);
             const isFetchingLogs = ref(false);
             const logFilter = ref('ALL');
+            const logLimit = ref(100);
             let refreshTimer = null;
 
             // API URLs. Assumes this page is served from the same server.
             const API_STATE = '/api/v1/state';
             const API_UPDATE = '/api/v1/settings/update';
             const API_LOGS = '/api/v1/logs';
+
+            // Watches
+            watch(currentTab, (newTab) => {
+                if (newTab === 'logs') {
+                    fetchLogs();
+                }
+                if (newTab === 'state') {
+                    fetchState();
+                }
+            });
 
             // --- ENUMS CONFIGURATION ---
             const enums = {
@@ -479,8 +496,12 @@
                 ],
                 MediatorGoal: [
                     { name: 'NO_CHARGING', value: 'No charging' },
+                    { name: 'CHARGE_WITH_MINIMUM_SOLAR_POWER', value: 'Charge when any solar power' },
                     { name: 'CHARGE_WITH_ONLY_EXCESS_SOLAR_POWER', value: 'Charge with excess solar power' },
                     { name: 'CHARGE_WHEN_SELL_PRICE_NEGATIVE', value: 'Charge when sell price negative' },
+                    { name: 'CHARGE_WHEN_BUY_PRICE_NEGATIVE', value: 'Charge when buy price negative' },
+                    { name: 'CHARGE_NOW_WITH_CAPACITY_RATE', value: 'Charge now with capacity rate' },
+                    { name: 'CHARGE_NOW_NO_CAPACITY_RATE', value: 'Charge now no capacity rate' },
                 ],
                 InverterManualState: [
                     { name: 'INV_CMD_LIMIT_STANDARD', value: 'Standard power limit' },
@@ -564,6 +585,18 @@
                 return d.toLocaleTimeString('en-GB', {
                     hour: '2-digit',
                     minute: '2-digit',
+                    second: '2-digit',
+                    hour12: false
+                });
+            };
+
+            const formatTimeHm = (ts) => {
+                if (!ts) return '';
+                // Formats ISO string or timestamp to HH:mm
+                const d = new Date(ts);
+                return d.toLocaleTimeString('en-GB', {
+                    hour: '2-digit',
+                    minute: '2-digit',
                     hour12: false
                 });
             };
@@ -623,7 +656,7 @@
             const fetchLogs = async () => {
                 isFetchingLogs.value = true;
                 try {
-                    const res = await fetch(API_LOGS);
+                    const res = await fetch(`${API_LOGS}?limit=${logLimit.value}`);
                     if (res.ok) {
                         const data = await res.json();
                         logs.value = data.logs;
@@ -647,7 +680,7 @@
 
             return { currentTab, state, lastSync, enums, statusColor, currentPrice, formatTime, updateSetting, toast,
                 formatPeakTimestamp, logs, fetchLogs, isFetchingLogs, logFilter, filteredLogs, formattedState,
-                isCurrentInterval, fetchState, batteryModeDisplay}
+                isCurrentInterval, fetchState, batteryModeDisplay, logLimit, formatTimeHm}
         }
     }).mount('#app')
 </script>

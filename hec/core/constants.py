@@ -43,14 +43,6 @@ class InverterManualState(Enum):
     INV_CMD_LIMIT_TO_USE = "Power limited to home consumption"
 
 
-class EVChargeStatus(Enum):
-    UNKNOWN = "Unknown"
-    OFFLINE = "Offline"
-    DISCONNECTED = "Disconnected"
-    CONNECTED_NOT_CHARGING = "Connected not charging"
-    CHARGING = "Charging"
-
-
 class EVCCManualState(Enum):
     EVCC_CMD_STATE_OFF = "off"
     EVCC_CMD_STATE_PV = "pv"        # Charge with PV only

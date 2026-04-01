@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 class EnergyPricePredictor:
     def __init__(self, db_handler: DatabaseHandler):
         self.db_handler = db_handler
-        self.model = RandomForestRegressor(n_estimators=100, random_state=42, n_jobs=-1)  # Configure as needed
+        self.model = RandomForestRegressor(n_estimators=100, random_state=42, n_jobs=-1)
         self.is_trained = False
         self.features: List[str] = []
 
@@ -132,7 +132,8 @@ class EnergyPricePredictor:
             self.is_trained = False
 
     def predict_prices_for_day(self, target_predict_date: date,
-                               elia_forecasts_for_day: Dict[str, List[Dict[str, Any]]]) -> Optional[pd.DataFrame]:
+                               elia_forecasts_for_day: Dict[str, List[Dict[str, Any]]],
+                               save_to_db: bool = True) -> Optional[pd.DataFrame]:
         """
         Predicts gross electricity prices for a target day using history Elia forecasts.
         elia_forecasts_for_day: {'solar': [...], 'wind': [...], 'grid_load': [...]}
@@ -164,6 +165,15 @@ class EnergyPricePredictor:
 
         predicted_prices_kwh = self.model.predict(X_future)
         future_df['predicted_gross_price_kwh'] = predicted_prices_kwh
+
+        result_df = future_df[
+            ['timestamp_utc', 'predicted_gross_price_kwh', 'solar_factor', 'wind_factor', 'grid_load_mwh']]
+
+        if save_to_db and self.db_handler is not None:
+            try:
+                self.db_handler.store_predicted_prices(result_df)
+            except Exception as e:
+                logger.error(f"Failed to save predictions to database: {e}", exc_info=True)
 
         logger.info(f"Predicted {len(future_df)} price intervals for {target_predict_date}.")
         return future_df[['timestamp_utc', 'predicted_gross_price_kwh', 'solar_factor', 'wind_factor', 'grid_load_mwh']]

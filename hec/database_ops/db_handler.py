@@ -7,6 +7,9 @@ from datetime import datetime, timezone, timedelta, time, date
 from enum import Enum
 from pathlib import Path
 from typing import List, Optional, Dict, Any
+
+import pandas as pd
+
 from hec.core import constants as c
 
 from hec.core.models import PricePoint, NetElectricityPriceInterval
@@ -187,6 +190,19 @@ class DatabaseHandler:
                 cursor.execute("CREATE INDEX IF NOT EXISTS idx_logs_timestamp ON logs (timestamp);")
                 cursor.execute("CREATE INDEX IF NOT EXISTS idx_logs_level ON logs (level);")
                 logger.info("Table 'logs' and indexes checked/created.")
+
+                # --- Predicted Prices Table ---
+                cursor.execute("""
+                               CREATE TABLE IF NOT EXISTS predicted_prices
+                               (
+                                   timestamp_utc             TEXT PRIMARY KEY,
+                                   predicted_gross_price_kwh REAL,
+                                   solar_factor              REAL,
+                                   wind_factor               REAL,
+                                   grid_load_mwh             REAL
+                               );
+                               """)
+                logger.info("Table predicted_prices checked/created.")
 
         except sqlite3.Error as e:
             logger.error(f"Error initializing database tables: {e}", exc_info=True)
@@ -1279,6 +1295,73 @@ class DatabaseHandler:
         sql = "SELECT * FROM logs ORDER BY timestamp DESC LIMIT ?"
         conn = self._get_connection()
         return [dict(row) for row in conn.execute(sql, (limit,)).fetchall()]
+
+    def store_predicted_prices(self, df: pd.DataFrame):
+        """
+        Saves the predicted prices DataFrame to the database and
+        deletes any predictions older than 14 days.
+        """
+        if df is None or df.empty:
+            return
+
+        # Convert to list of dicts and ensure ISO strings for SQLite
+        records = df.copy()
+        if pd.api.types.is_datetime64_any_dtype(records['timestamp_utc']):
+            records['timestamp_utc'] = records['timestamp_utc'].dt.strftime('%Y-%m-%dT%H:%M:%SZ')
+        data = records.to_dict('records')
+
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=14)).strftime('%Y-%m-%dT%H:%M:%SZ')
+
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+
+                # Insert/Overwrite
+                cursor.executemany("""
+                                   REPLACE INTO predicted_prices
+                                   (timestamp_utc, predicted_gross_price_kwh, solar_factor, wind_factor, grid_load_mwh)
+                                   VALUES (:timestamp_utc, :predicted_gross_price_kwh, :solar_factor, :wind_factor,
+                                           :grid_load_mwh)
+                                   """, data)
+
+                # Cleanup
+                cursor.execute("DELETE FROM predicted_prices WHERE timestamp_utc < ?", (cutoff,))
+                conn.commit()
+
+            logger.debug(f"Saved {len(data)} predictions and cleared old records.")
+
+        except Exception as e:
+            logger.error(f"Error saving predicted prices to DB: {e}", exc_info=True)
+            raise
+
+    def get_predicted_prices_for_date(self, target_date: date) -> List[Dict[str, Any]]:
+        """
+        Retrieves predicted prices for a specific target date (UTC).
+        Returns an empty DataFrame if no data is found.
+        """
+        start_str = datetime.combine(target_date, datetime.min.time(), tzinfo=timezone.utc).strftime(
+            '%Y-%m-%dT%H:%M:%SZ')
+        end_str = (datetime.combine(target_date, datetime.min.time(), tzinfo=timezone.utc) + timedelta(
+            days=1)).strftime('%Y-%m-%dT%H:%M:%SZ')
+
+        try:
+            with self._get_connection() as conn:
+                conn.row_factory = sqlite3.Row  # This allows accessing columns by name
+                cursor = conn.cursor()
+                query = """
+                        SELECT * \
+                        FROM predicted_prices
+                        WHERE timestamp_utc >= ? \
+                          AND timestamp_utc < ?
+                        ORDER BY timestamp_utc ASC \
+                        """
+                cursor.execute(query, (start_str, end_str))
+                # Convert Row objects to standard dictionaries
+                return [dict(row) for row in cursor.fetchall()]
+
+        except Exception as e:
+            logger.error(f"Error retrieving predicted prices for {target_date}: {e}", exc_info=True)
+            return []
 
 
 if __name__ == '__main__':

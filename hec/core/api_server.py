@@ -36,7 +36,6 @@ def get_app_state_api():
                 isinstance(value, c.OperatingMode) or \
                 isinstance(value, c.InverterStatus) or \
                 isinstance(value, c.InverterManualState) or \
-                isinstance(value, c.EVChargeStatus) or \
                 isinstance(value, c.EVCCManualState) or \
                 isinstance(value, c.BatteryState):
             serializable_state[key] = value.name
@@ -79,7 +78,13 @@ def get_logs():
     if _DB_INSTANCE is None:
         return jsonify({"error": "Database not initialized in API"}), 500
 
-    logs = _DB_INSTANCE.get_latest_logs(10000)
+    try:
+        limit = request.args.get('limit', default=1000, type=int)
+        limit = min(limit, 20000)
+    except ValueError:
+        limit = 1000
+
+    logs = _DB_INSTANCE.get_latest_logs(limit)
     return jsonify({"logs": logs})
 
 

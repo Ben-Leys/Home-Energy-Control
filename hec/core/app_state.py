@@ -35,9 +35,6 @@ class AppState:
             "inverter_manual_limit": None,
             "recent_solar_production_wh_samples": None,
             "average_solar_production_watts": None,
-            # EV data TODO (Tesla connect?)
-            "ev_data": None,
-            "ev_charge_status": c.EVChargeStatus.UNKNOWN,
             # Electricity prices and solar, wind and grid_load forecasts (forecasts deprecated 19/03/2026)
             "electricity_prices_today": None,
             "electricity_prices_tomorrow": None,

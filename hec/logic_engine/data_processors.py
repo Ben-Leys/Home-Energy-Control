@@ -24,7 +24,7 @@ MAX_HISTORY_SECONDS = max(AVERAGE_WINDOWS_SECONDS.values())
 
 
 def populate_appstate_with_price_data(db_handler: DatabaseHandler, app_config: dict,
-                                      force_api_fetch_if_missing: bool = False):
+                                      force_api_fetch: bool = False):
     """
     Ensures price data for today and tomorrow is in AppState.
     Tries DB first. If missing and force_api_fetch_if_missing is True, tries API.
@@ -42,7 +42,7 @@ def populate_appstate_with_price_data(db_handler: DatabaseHandler, app_config: d
 
         # If DB is empty and API fetching is allowed, fetch from API
         store_to_db = False
-        if not price_points and force_api_fetch_if_missing:
+        if not price_points or force_api_fetch:
             logger.info(f"No DB data for '{key}' on {day.date()}, attempting API fetch.")
             price_points = fetch_entsoe_prices(day, app_config)
             store_to_db = True if price_points else False
