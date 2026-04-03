@@ -369,7 +369,7 @@
                             <td>{{ row.index ? formatTime(row.index).substring(0, 5) : '??:??' }}</td>
 
                             <td :style="{ color: row.net_kwh > 0 ? '#1b5e20' : '#b71c1c', fontWeight: 'bold' }">
-                                {{ row.net_kwh !== null ? row.net_kwh.toFixed(2) : '--' }}
+                                {{ row.net_kwh !== null ? (row.net_kwh * 4000).toFixed(0) : '--' }}
                             </td>
 
                             <td>{{ row.sell_price !== null ? (row.sell_price * 100).toFixed(1) + 'c' : '--' }}</td>
