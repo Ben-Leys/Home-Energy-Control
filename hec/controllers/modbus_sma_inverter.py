@@ -5,6 +5,7 @@ from collections import deque
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, Any
 
+import pytz
 # Pymodbus v3.x imports
 from pymodbus.client import ModbusTcpClient
 from pymodbus.exceptions import ModbusIOException, ConnectionException
@@ -286,7 +287,7 @@ class InverterSmaModbusClient:
             return False
 
         # Enforce rate limiting
-        now = datetime.now()
+        now = datetime.now(tz=pytz.UTC)
         if len(self.power_limit_timestamps) >= 4 and now - self.power_limit_timestamps[0] < timedelta(minutes=2):
             logger.error("InverterSMA: Rate limit exceeded for setting power limit. Try again later.")
             return False

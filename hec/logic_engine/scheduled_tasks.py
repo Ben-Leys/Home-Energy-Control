@@ -500,7 +500,7 @@ def task_run_battery_predictor(app_config, db_handler: DatabaseHandler):
     try:
         if base_plan_df is not None:
             logger.debug("Optimizing prediction plan for current state...")
-            opt_plan_df = bp.optimize_plan(base_plan_df, now_utc, actual_soc, GLOBAL_APP_STATE)
+            opt_plan_df = bp.optimize_plan(base_plan_df, now_utc, actual_soc, GLOBAL_APP_STATE, app_config, db_handler)
 
             # Store the finalized plan in app_state so the Vue dashboard can pick it up
             plan_list = opt_plan_df.reset_index().to_dict(orient='records')

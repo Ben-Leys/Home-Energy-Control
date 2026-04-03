@@ -7,6 +7,7 @@ from datetime import datetime, timezone, timedelta, time, date
 from enum import Enum
 from pathlib import Path
 from typing import List, Optional, Dict, Any
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 
@@ -1334,15 +1335,18 @@ class DatabaseHandler:
             logger.error(f"Error saving predicted prices to DB: {e}", exc_info=True)
             raise
 
-    def get_predicted_prices_for_date(self, target_date: date) -> List[Dict[str, Any]]:
+    def get_predicted_prices_for_date(self, target_date_local: date) -> List[Dict[str, Any]]:
         """
         Retrieves predicted prices for a specific target date (UTC).
         Returns an empty DataFrame if no data is found.
         """
-        start_str = datetime.combine(target_date, datetime.min.time(), tzinfo=timezone.utc).strftime(
-            '%Y-%m-%dT%H:%M:%SZ')
-        end_str = (datetime.combine(target_date, datetime.min.time(), tzinfo=timezone.utc) + timedelta(
-            days=1)).strftime('%Y-%m-%dT%H:%M:%SZ')
+        tz = ZoneInfo("Europe/Brussels")
+
+        local_start = datetime.combine(target_date_local, datetime.min.time(), tzinfo=tz)
+        local_end = local_start + timedelta(days=1)
+
+        start_str = local_start.astimezone(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+        end_str = local_end.astimezone(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
 
         try:
             with self._get_connection() as conn:

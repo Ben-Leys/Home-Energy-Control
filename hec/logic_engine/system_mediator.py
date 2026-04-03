@@ -389,7 +389,8 @@ class SystemMediator:
             grid_w = GLOBAL_APP_STATE.get('p1_meter_data', {}).get('active_power_w', 0)
             prod_w = GLOBAL_APP_STATE.get('inverter_data', {}).get('pv_power_watts', 0)
             bat_w = GLOBAL_APP_STATE.get('battery_data', {}).get('power_w', 0)
-            home_use_w = grid_w + prod_w + bat_w
+            bat_w = min(bat_w, 0)
+            home_use_w = grid_w + prod_w - bat_w
 
             # 2. Dynamic buffer calculation based on market prices
             buy_price = self.market.buy_price or 1.0
@@ -438,23 +439,26 @@ class SystemMediator:
             # 6 Minimum for battery charging
             # If battery needs energy (SOC < 95%) and isn't blocked, ensure at least 1800W
             battery_records = GLOBAL_APP_STATE.get("battery_records") or []
-            bat_soc = 0.0
-            if battery_records and len(battery_records) > 0:
-                for battery in battery_records:
-                    bat_soc += battery.get("state_of_charge_pct", 0.0)
-                bat_soc /= len(battery_records)
+            bat_needing_charge = sum(1 for b in battery_records if b.get("state_of_charge_pct", 0) < 95)
 
             # Check if battery is in a state where it CAN charge
             is_charging_allowed = self.new_bat_mode not in [c.BatteryState.BATTERY_OFF,
                                                             c.BatteryState.BATTERY_BLOCK_CHARGE]
 
-            if bat_soc < 95 and is_charging_allowed:
-                if desired_limit_w < 1800:
-                    logger.debug(f"SOC {bat_soc}% < 95%: Boosting inverter limit from "
-                                 f"{desired_limit_w:.0f}W to 1800W floor for battery.")
-                    desired_limit_w = 1800
+            if bat_needing_charge > 0 and is_charging_allowed:
+                battery_data = GLOBAL_APP_STATE.get("battery_data", {})
+                battery_count = max(1, battery_data.get('battery_count', 1))
+                max_charge_w = battery_data.get("max_consumption_w", 0)
+                max_charge_per_bat = max_charge_w / battery_count
+                floor_w = max_charge_per_bat * bat_needing_charge
+                if desired_limit_w < floor_w:
+                    new_desired_limit_w = floor_w
+                    logger.debug(f"{bat_needing_charge} batteries < 95%: Boosting inverter limit from "
+                                 f"{desired_limit_w:.0f}W to {new_desired_limit_w}W for charging.")
+                    desired_limit_w = new_desired_limit_w
+
                     # Force an update if the current limit is significantly below the floor
-                    if cur_limit_w < 1600:
+                    if cur_limit_w < floor_w - 200:
                         can_update = True
 
             # 7. Apply decision
@@ -487,6 +491,7 @@ class SystemMediator:
         bat_data = GLOBAL_APP_STATE.get("battery_data", {})
         bat_records = GLOBAL_APP_STATE.get("battery_records", [])
         lowest_soc = min([b.get("state_of_charge_pct", 5) for b in bat_records]) if bat_records else 5
+        would_block_discharge = False
 
         # 1. Absolute rules:
         # A: Don't allow empty for too long
@@ -507,10 +512,9 @@ class SystemMediator:
             self.battery_force_start_time = None
             return
 
-        # C: SOC <= 1%
-        if lowest_soc <= 1 and not empty_too_long:
-            self.new_bat_mode = c.BatteryState.BATTERY_BLOCK_DISCHARGE
-            return
+        # C: SOC < 2%
+        if lowest_soc < 2 and not empty_too_long:
+            would_block_discharge = True
 
         # 2. Prediction plan
         plan_df: pd.DataFrame = GLOBAL_APP_STATE.get("prediction_plan_df")
@@ -580,7 +584,7 @@ class SystemMediator:
         is_block_c = bool(current_row.get("block_c", False))
         is_block_d = bool(current_row.get("block_d", False))
 
-        if is_block_d and is_block_c:
+        if (is_block_d and is_block_c) or (is_block_c and would_block_discharge):
             self.new_bat_mode = c.BatteryState.BATTERY_OFF
             return
 
@@ -588,7 +592,7 @@ class SystemMediator:
             self.new_bat_mode = c.BatteryState.BATTERY_BLOCK_CHARGE
             return
 
-        if is_block_d:
+        if is_block_d or would_block_discharge:
             avg_kw_2m = (GLOBAL_APP_STATE.get('average_grid_import_watts', {}).get("2m", 0)) / 1000
             may_cause_peak = avg_kw_2m > self.current_max_peak_kw
             if not may_cause_peak:

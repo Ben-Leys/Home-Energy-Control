@@ -43,7 +43,7 @@ def populate_appstate_with_price_data(db_handler: DatabaseHandler, app_config: d
         # If DB is empty and API fetching is allowed, fetch from API
         store_to_db = False
         if not price_points or force_api_fetch:
-            logger.info(f"No DB data for '{key}' on {day.date()}, attempting API fetch.")
+            logger.info(f"Attempting API fetch for '{key}' on {day.date()}, .")
             price_points = fetch_entsoe_prices(day, app_config)
             store_to_db = True if price_points else False
         if not price_points:
