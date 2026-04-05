@@ -216,7 +216,8 @@ class SystemMediator:
         cur_state = GLOBAL_APP_STATE.get('evcc_manual_state', None)
 
         # Is amperage calculation needed?
-        is_managed_charging = (lp.smart_cost_active or lp.plan_active)
+        is_managed_charging = (lp.smart_cost_active or lp.plan_active or
+                               self.app_mediator_goal == c.MediatorGoal.CHARGE_NOW_WITH_CAPACITY_RATE)
         if not is_managed_charging or self.app_mediator_goal == c.MediatorGoal.CHARGE_NOW_NO_CAPACITY_RATE:
             self.new_max_amps = self.evcc_client.max_current
             return
