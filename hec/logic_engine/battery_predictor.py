@@ -76,7 +76,7 @@ class BatteryPredictor:
                 if pred_points:
                     # Convert PricePoints to NetElectricityPriceIntervals
                     prices_tomorrow = calculate_net_intervals_for_day(
-                        db_handler, app_config, tomorrow_date, pred_points
+                        db, app_config, tomorrow_date, pred_points
                     )
                     logger.info(f"Using {len(prices_tomorrow)} predicted price intervals for tomorrow.")
             except Exception as e:
@@ -513,12 +513,6 @@ class BatteryPredictor:
             blocked_candidates = [ts for ts in blocked_candidates if df_opt.at[ts, 'sell_price'] >= 0]
 
             df_opt.loc[blocked_candidates, 'block_c'] = True
-
-        # 6. Tail-Buffer Cleanup (Your existing logic)
-        is_blocked = df_opt['block_c'].astype(int)
-        is_end_of_block = (is_blocked == 1) & (is_blocked.shift(-1, fill_value=0) == 0)
-        has_four_consecutive = is_blocked.rolling(window=4).sum() >= 4
-        df_opt.loc[is_end_of_block & has_four_consecutive, 'block_c'] = False
 
         return df_opt
 

@@ -109,6 +109,9 @@ def task_midnight_rollover(db_handler: DatabaseHandler, app_config: dict):
     else:  # No prices for tomorrow, try fetch from API
         populate_appstate_with_price_data(db_handler, app_config, True)
 
+    _, sunrise, sunset = is_daylight(app_config, db_handler)
+    GLOBAL_APP_STATE.set("sunrise", sunrise)
+    GLOBAL_APP_STATE.set("sunset", sunset)
 
 def task_poll_p1_meter(db_handler: DatabaseHandler, p1_client: Optional[P1MeterHomewizardClient], boundary: int = 5):
     """
@@ -510,6 +513,21 @@ def task_run_battery_predictor(app_config, db_handler: DatabaseHandler):
 
     except Exception as e:
         logger.error(f"Failed to optimize prediction plan: {e}", exc_info=True)
+
+    # 5. Check if sunrise block_c is active
+    sunrise = GLOBAL_APP_STATE.get("sunrise")
+    sunrise_block_until = None
+    if sunrise:
+        search_end = sunrise + timedelta(hours=3)
+        if now_local < search_end:
+            sunrise_window_df = base_plan_df[(base_plan_df.index >= sunrise.astimezone(tz=pytz.UTC)) &
+                                             (base_plan_df.index <= search_end.astimezone(tz=pytz.UTC))]
+            blocks = sunrise_window_df[sunrise_window_df['block_c'] is True]
+            if not blocks.empty:
+                last_block_start = blocks.index[-1]
+                sunrise_block_until = last_block_start.astimezone(local_tz) + timedelta(minutes=15)
+                logger.info(f"Battery predictor: sunrise block active until {sunrise_block_until}")
+    GLOBAL_APP_STATE.set("sunrise_block_until", sunrise_block_until)
 
 
 def task_system_mediator(system_mediator: SystemMediator, app_config,

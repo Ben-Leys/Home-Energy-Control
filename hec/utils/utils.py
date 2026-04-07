@@ -2,11 +2,12 @@
 import logging
 import os
 import smtplib
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta
 from email.mime.image import MIMEImage
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from typing import List, Optional, Tuple
+from zoneinfo import ZoneInfo
 
 from astral import LocationInfo
 from astral.sun import sun
@@ -289,7 +290,7 @@ if __name__ == '__main__':
     test_config = {'inverter': {'location': {'latitude': 51.05483, 'longitude': 4.62877,
                                              'timezone': 'Europe/Brussels', 'city': 'Putte',
                                              'region_name_for_astral_optional': 'Belgium'}}}
-    print(is_daylight(test_config))
+    print(is_daylight(test_config, True))
 #     test_config = {"host": "smtp.gmail.com", "port": 465,
 #                    "user": "", "sender_email": "",
 #                    "default_recipients": ["", ""]}

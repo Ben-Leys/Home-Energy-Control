@@ -22,6 +22,8 @@ class AppState:
             "app_mediator_goal": c.MediatorGoal.NO_CHARGING,
             "reboot_request": False,
             "summary_request": False,
+            "sunrise": None,
+            "sunset": None,
             # P1 meter data, recent import/export samples and averages
             "p1_meter_data": None,
             "p1_meter_last_stored_boundary_slot_utc_iso": None,
@@ -50,7 +52,9 @@ class AppState:
             "battery_manual_mode": None,
             "prediction_plan": None,
             "plan_generation_date": None,
-            "empty_since": None
+            "empty_since": None,
+            "sunrise_block_c": False,
+            "sunrise_block_until": None
         }
         self.prediction_plan_df = None
 

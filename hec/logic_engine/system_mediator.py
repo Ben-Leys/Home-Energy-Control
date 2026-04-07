@@ -1,5 +1,7 @@
 # hec/logic_engine/system_mediator.py
 import logging
+from zoneinfo import ZoneInfo
+
 import pandas as pd
 import pytz
 import time
@@ -451,20 +453,14 @@ class SystemMediator:
                 battery_count = max(1, battery_data.get('battery_count', 1))
                 max_charge_w = battery_data.get("max_consumption_w", 0)
                 max_charge_per_bat = max_charge_w / battery_count
-                floor_w = max_charge_per_bat * bat_needing_charge
-                if desired_limit_w < floor_w:
-                    new_desired_limit_w = floor_w
-                    logger.debug(f"{bat_needing_charge} batteries < 95%: Boosting inverter limit from "
-                                 f"{desired_limit_w:.0f}W to {new_desired_limit_w}W for charging.")
-                    desired_limit_w = new_desired_limit_w
-
-                    # Force an update if the current limit is significantly below the floor
-                    if cur_limit_w < floor_w - 200:
-                        can_update = True
+                bat_w = max_charge_per_bat * bat_needing_charge
+                new_desired_limit_w = desired_limit_w + bat_w
+                logger.debug(f"{bat_needing_charge} batteries < 95%: Boosting inverter limit from "
+                             f"{desired_limit_w:.0f}W to {new_desired_limit_w}W for charging.")
+                desired_limit_w = new_desired_limit_w
 
             # 7. Apply decision
             if can_update:
-                # Final clamp to hardware limits
                 self.new_inv_limit = int(max(0, min(desired_limit_w, self.inverter_client.standard_power_limit)))
             else:
                 self.new_inv_limit = int(cur_limit_w)
@@ -489,7 +485,6 @@ class SystemMediator:
         """
         now = datetime.now(tz=pytz.UTC)
         lp = GLOBAL_APP_STATE.get('evcc_loadpoint_state', {})
-        bat_data = GLOBAL_APP_STATE.get("battery_data", {})
         bat_records = GLOBAL_APP_STATE.get("battery_records", [])
         lowest_soc = min([b.get("state_of_charge_pct", 5) for b in bat_records]) if bat_records else 5
         would_block_discharge = False
@@ -546,7 +541,7 @@ class SystemMediator:
         # Override if empty for too long
         if empty_too_long:
             if not is_force_plan:
-                logger.info("Battery empty > 12h. Triggering 5min maintenance charge.")
+                logger.warning("Battery empty > 12h. Triggering 5min maintenance charge.")
                 is_force_plan = True
                 plan_minutes_limit = 5.0
 
@@ -584,6 +579,17 @@ class SystemMediator:
         # C. Handle Blocking (Charge / Discharge)
         is_block_c = bool(current_row.get("block_c", False))
         is_block_d = bool(current_row.get("block_d", False))
+
+        # Sunrise override
+        if not is_block_c:
+            local_tz = ZoneInfo("Europe/Brussels")
+            now_local = now.astimezone(local_tz)
+            sunrise = GLOBAL_APP_STATE.get("sunrise")
+            block_until = GLOBAL_APP_STATE.get("sunrise_block_until")
+            if sunrise and block_until:
+                if sunrise <= now_local < block_until:
+                    logger.info(f"Sunrise Override: Blocking charge until {block_until.strftime('%H:%M')}")
+                    is_block_c = True
 
         if (is_block_d and is_block_c) or (is_block_c and would_block_discharge):
             self.new_bat_mode = c.BatteryState.BATTERY_OFF
