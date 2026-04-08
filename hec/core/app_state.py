@@ -53,7 +53,6 @@ class AppState:
             "prediction_plan": None,
             "plan_generation_date": None,
             "empty_since": None,
-            "sunrise_block_c": False,
             "sunrise_block_until": None
         }
         self.prediction_plan_df = None

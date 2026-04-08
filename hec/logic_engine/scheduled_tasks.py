@@ -511,24 +511,25 @@ def task_run_battery_predictor(app_config, db_handler: DatabaseHandler):
             GLOBAL_APP_STATE.set("prediction_plan_df", opt_plan_df)
             logger.debug("Prediction plan optimized and saved to state.")
 
+            # 5. Check if sunrise block_c is active
+            sunrise = GLOBAL_APP_STATE.get("sunrise")
+            sunrise_block_until = None
+            if sunrise:
+                search_end = sunrise + timedelta(hours=3)
+                if now_local < search_end:
+                    start_utc = sunrise.astimezone(pytz.UTC)
+                    end_utc = search_end.astimezone(pytz.UTC)
+                    sunrise_window_df = opt_plan_df.loc[start_utc: end_utc]
+                    if not sunrise_window_df.empty:
+                        blocks = sunrise_window_df[sunrise_window_df['block_c']]
+                        if not blocks.empty:
+                            last_block_start = blocks.index[-1]
+                            sunrise_block_until = last_block_start.astimezone(local_tz) + timedelta(minutes=15)
+                            logger.info(f"Battery predictor: sunrise block active until {sunrise_block_until}")
+            GLOBAL_APP_STATE.set("sunrise_block_until", sunrise_block_until)
+
     except Exception as e:
         logger.error(f"Failed to optimize prediction plan: {e}", exc_info=True)
-
-    # 5. Check if sunrise block_c is active
-    sunrise = GLOBAL_APP_STATE.get("sunrise")
-    sunrise_block_until = None
-    if sunrise:
-        search_end = sunrise + timedelta(hours=3)
-        if now_local < search_end:
-            sunrise_window_df = base_plan_df[(base_plan_df.index >= sunrise.astimezone(tz=pytz.UTC)) &
-                                             (base_plan_df.index <= search_end.astimezone(tz=pytz.UTC))]
-            blocks = sunrise_window_df[sunrise_window_df['block_c'] is True]
-            if not blocks.empty:
-                last_block_start = blocks.index[-1]
-                sunrise_block_until = last_block_start.astimezone(local_tz) + timedelta(minutes=15)
-                logger.info(f"Battery predictor: sunrise block active until {sunrise_block_until}")
-    GLOBAL_APP_STATE.set("sunrise_block_until", sunrise_block_until)
-
 
 def task_system_mediator(system_mediator: SystemMediator, app_config,
                          db_handler: DatabaseHandler, tariff_manager: TariffManager):

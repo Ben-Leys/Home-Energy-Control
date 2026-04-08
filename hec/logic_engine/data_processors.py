@@ -7,7 +7,7 @@ from hec.core import constants as c
 from hec.core.app_state import GLOBAL_APP_STATE
 from hec.data_sources.api_entsoe import fetch_entsoe_prices
 from hec.database_ops.db_handler import DatabaseHandler
-from hec.utils.utils import process_price_points_to_app_state
+from hec.utils.utils import is_daylight, process_price_points_to_app_state
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +55,11 @@ def populate_appstate_with_price_data(db_handler: DatabaseHandler, app_config: d
 
     if not GLOBAL_APP_STATE.get("electricity_prices_today"):
         logger.warning("No 'electricity_prices_today' found in AppState. Price-based decisions will fail.")
+
+    # Sunrise and sunset hours
+    _, sunrise, sunset = is_daylight(app_config, db_handler)
+    GLOBAL_APP_STATE.set("sunrise", sunrise)
+    GLOBAL_APP_STATE.set("sunset", sunset)
 
 
 def populate_appstate_with_forecast_data(db_handler: DatabaseHandler):
