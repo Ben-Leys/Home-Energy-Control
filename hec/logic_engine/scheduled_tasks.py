@@ -241,7 +241,7 @@ def task_poll_inverter_for_mediator_update(db_handler: DatabaseHandler, inv_clie
     task_poll_inverter(db_handler, inv_client, app_config, log_to_db=False)
 
 
-def task_poll_evcc_state(evcc_client: Optional[EvccApiClient]):
+def task_poll_evcc_state(evcc_client: Optional[EvccApiClient], db_handler: DatabaseHandler):
     """Poll evcc for state dict and store in AppState"""
     if not evcc_client:
         logger.debug("EVCC polling task: Client not available. Skipping.")
@@ -273,6 +273,21 @@ def task_poll_evcc_state(evcc_client: Optional[EvccApiClient]):
         GLOBAL_APP_STATE.set("evcc_overall_state", cur_state.to_dict())
         GLOBAL_APP_STATE.set("evcc_loadpoint_state", cur_lp.to_dict())
         logger.debug(f"EVCC: AppState updated. Mode: {cur_lp.mode}, Charging: {cur_lp.is_charging}")
+
+        # DB Logging (Once every 15 mins)
+        now_utc = datetime.now(pytz.UTC)
+        current_minute_floor = (now_utc.minute // 15) * 15
+        current_slot_ts = now_utc.replace(minute=current_minute_floor, second=0, microsecond=0)
+        last_logged_slot = GLOBAL_APP_STATE.get("evcc_last_logged_slot")
+
+        if last_logged_slot is None or current_slot_ts > last_logged_slot:
+            session_energy_kwh = cur_lp.session_energy / 1000
+
+            db_handler.store_evcc_session(now_utc, session_energy_kwh)
+
+            # Update the flag
+            GLOBAL_APP_STATE.set("evcc_last_logged_slot", current_slot_ts)
+            logger.info(f"EVCC: Logged session energy for slot {current_slot_ts.strftime('%H:%M')}")
 
     else:
         logger.warning("EVCC polling task: Failed to fetch state from EVCC.")
@@ -685,7 +700,7 @@ def register_all_jobs(scheduler: BaseScheduler, db_handler: DatabaseHandler, app
                 func=task_poll_evcc_state,
                 trigger="cron",
                 trigger_args={"second": second},
-                job_args=[evcc_client],
+                job_args=[evcc_client, db_handler],
                 name="Poll EVCC",
                 grace_time=10,
             )

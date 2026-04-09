@@ -46,6 +46,7 @@ class AppState:
             "evcc_loadpoint_state": None,
             "evcc_manual_state": None,
             "evcc_manual_limit": None,
+            "evcc_last_logged_slot": None,
             # Battery control
             "battery_data": None,
             "battery_records": [],

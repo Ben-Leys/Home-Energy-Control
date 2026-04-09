@@ -10,6 +10,7 @@ from typing import List, Optional, Dict, Any
 from zoneinfo import ZoneInfo
 
 import pandas as pd
+import pytz
 
 from hec.core import constants as c
 
@@ -204,6 +205,17 @@ class DatabaseHandler:
                                );
                                """)
                 logger.info("Table predicted_prices checked/created.")
+
+                # --- EVCC Charging Log Table ---
+                cursor.execute("""
+                                CREATE TABLE IF NOT EXISTS evcc_log (
+                                    timestamp_utc TEXT NOT NULL,
+                                    session_energy REAL NOT NULL,
+                                    energy_delta REAL,
+                                    UNIQUE (timestamp_utc)
+                                );
+                            """)
+                logger.info("Table evcc_log checked/created.")
 
         except sqlite3.Error as e:
             logger.error(f"Error initializing database tables: {e}", exc_info=True)
@@ -1367,6 +1379,93 @@ class DatabaseHandler:
             logger.error(f"Error retrieving predicted prices for {target_date}: {e}", exc_info=True)
             return []
 
+    def store_evcc_session(self, timestamp_utc: datetime, current_session_kwh: float):
+        """
+        Snaps to 15m intervals. Updates the previous interval's energy_delta.
+        Backfills missing rows if a gap > 15m is detected.
+        """
+        # 1. Snap current timestamp
+        minute = (timestamp_utc.minute // 15) * 15
+        current_snapped_dt = timestamp_utc.replace(minute=minute, second=0, microsecond=0)
+        current_ts_str = current_snapped_dt.strftime('%Y-%m-%d %H:%M:%S')
+
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+
+                # 2. Get the most recent record
+                cursor.execute("SELECT timestamp_utc, session_energy FROM evcc_log ORDER BY timestamp_utc DESC LIMIT 1")
+                prev_row = cursor.fetchone()
+
+                if prev_row:
+                    prev_ts_str, prev_val = prev_row
+                    prev_dt = datetime.strptime(prev_ts_str, '%Y-%m-%d %H:%M:%S').replace(tzinfo=pytz.UTC)
+
+                    # Calculate the time gap in 15-minute increments
+                    time_diff = current_snapped_dt - prev_dt
+                    intervals = int(time_diff.total_seconds() // 900)  # 900s = 15m
+
+                    if intervals > 0:
+                        # Handle session reset (car unplugged)
+                        total_delta = max(0,
+                                          current_session_kwh - prev_val) if current_session_kwh >= prev_val else current_session_kwh
+                        energy_per_slot = total_delta / intervals
+
+                        # 3. Update the previous row's delta
+                        cursor.execute("""
+                            UPDATE evcc_log 
+                            SET energy_delta = ? 
+                            WHERE timestamp_utc = ?
+                        """, (energy_per_slot, prev_ts_str))
+
+                        # 4. Backfill missing rows if gap > 15 mins
+                        if intervals > 1:
+                            # Start at 1, so we skip the prev_row we just updated
+                            for i in range(1, intervals):
+                                fill_dt = prev_dt + timedelta(minutes=15 * i)
+                                fill_ts_str = fill_dt.strftime('%Y-%m-%d %H:%M:%S')
+
+                                # Calculate a logical session_energy for the gap
+                                simulated_session = prev_val + (
+                                            energy_per_slot * i) if current_session_kwh >= prev_val else current_session_kwh
+
+                                cursor.execute("""
+                                    INSERT OR REPLACE INTO evcc_log (timestamp_utc, session_energy, energy_delta)
+                                    VALUES (?, ?, ?)
+                                """, (fill_ts_str, simulated_session, energy_per_slot))
+
+                # 5. ALWAYS insert the current slot
+                cursor.execute("""
+                    INSERT OR REPLACE INTO evcc_log (timestamp_utc, session_energy, energy_delta)
+                    VALUES (?, ?, 0.0)
+                """, (current_ts_str, current_session_kwh))
+
+                conn.commit()
+
+                if prev_row and intervals > 1:
+                    logger.info(f"EVCC Log: Backfilled {intervals - 1} missing slots.")
+
+        except Exception as e:
+            logger.error(f"Failed to store EVCC database: {e}", exc_info=True)
+
+    def get_evcc_data_for_period(self, start_utc: datetime, end_utc: datetime) -> list[dict]:
+        """Fetches EVCC energy delta logs for a specific period."""
+        try:
+            start_str = start_utc.strftime('%Y-%m-%d %H:%M:%S')
+            end_str = end_utc.strftime('%Y-%m-%d %H:%M:%S')
+            with self._get_connection() as conn:
+                conn.row_factory = sqlite3.Row
+                cursor = conn.cursor()
+                cursor.execute("""
+                    SELECT timestamp_utc, energy_delta 
+                    FROM evcc_log 
+                    WHERE timestamp_utc >= ? AND timestamp_utc <= ?
+                """, (start_str, end_str))
+                return [dict(row) for row in cursor.fetchall()]
+        except Exception as e:
+            logger.error(f"Failed to fetch EVCC data: {e}")
+            return []
+
 
 if __name__ == '__main__':
     logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -1375,11 +1474,12 @@ if __name__ == '__main__':
     # Initialize
     app_config = {"database": {"type": "sqlite", "path": "home_energy.db"}}
     db_handler = DatabaseHandler(app_config['database'])
-    db_handler.initialize_database()
+    # db_handler.initialize_database()
     today_local = datetime.combine(datetime.now(), time.min)
     tomorrow_local = today_local + timedelta(days=1)
     fall_dst = datetime(2024, 10, 27, 0, 0, 0)
 
+    db_handler.store_evcc_session(datetime(2026, 4, 9, 13, 45, 5, tzinfo=pytz.UTC), 4.813)
     # Retrieve solar forecast
     # solar_forecast = db_handler.get_elia_forecasts("solar", fall_dst, fall_dst + timedelta(days=1))
     # print(solar_forecast)
@@ -1422,7 +1522,7 @@ if __name__ == '__main__':
          NetElectricityPriceInterval(datetime(2025, 12, 4, 4, 45), 15, "dynamic", {})
          ]
     # print(db_handler.get_battery_deltas_for_intervals(nepis))
-    print(db_handler.get_energy_deltas_for_intervals(nepis))
+    # print(db_handler.get_energy_deltas_for_intervals(nepis))
 
     # print(db_handler.get_energy_deltas_for_period(date(2025, 5, 1), date(2025, 5, 10)))
 

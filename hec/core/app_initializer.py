@@ -32,7 +32,7 @@ def populate_app_state(db_handler: DatabaseHandler, app_config: dict, evcc_clien
         populate_appstate_with_price_data(db_handler, app_config, False)
 
         # Populate evcc data
-        task_poll_evcc_state(evcc_client)
+        task_poll_evcc_state(evcc_client, db_handler)
 
     except Exception as e:
         logger.error(f"Error during AppState population: {e}", exc_info=True)
