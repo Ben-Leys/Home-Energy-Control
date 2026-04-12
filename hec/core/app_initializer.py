@@ -16,7 +16,7 @@ from hec.controllers.api_evcc import EvccApiClient
 from hec.core import constants as c
 from hec.data_sources import api_p1_meter_homewizard, api_battery_homewizard
 from hec.database_ops.db_handler import DatabaseHandler
-from hec.logic_engine.data_processors import populate_appstate_with_forecast_data, populate_appstate_with_price_data
+from hec.logic_engine.data_processors import populate_appstate_with_price_data
 from hec.logic_engine.scheduled_tasks import task_poll_evcc_state
 
 logger = logging.getLogger(__name__)
@@ -29,13 +29,10 @@ def populate_app_state(db_handler: DatabaseHandler, app_config: dict, evcc_clien
     """Populate app state with necessary data from data sources."""
     try:
         # Populate price data
-        populate_appstate_with_price_data(db_handler, app_config, True)
-
-        # Populate forecast data
-        # populate_appstate_with_forecast_data(db_handler)
+        populate_appstate_with_price_data(db_handler, app_config, False)
 
         # Populate evcc data
-        task_poll_evcc_state(evcc_client)
+        task_poll_evcc_state(evcc_client, db_handler)
 
     except Exception as e:
         logger.error(f"Error during AppState population: {e}", exc_info=True)

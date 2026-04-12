@@ -7,6 +7,8 @@ from time import sleep
 from datetime import datetime, timedelta, timezone, time, date
 from typing import Optional, List, Dict, Any
 
+import pandas as pd
+import pytz
 from apscheduler.schedulers.base import BaseScheduler
 
 from hec.controllers.api_evcc import EvccApiClient
@@ -20,6 +22,9 @@ from hec.data_sources.api_entsoe import fetch_entsoe_prices
 from hec.data_sources.api_p1_meter_homewizard import P1MeterHomewizardClient
 from hec.data_sources.api_battery_homewizard import BatteryHomeWizard
 from hec.database_ops.db_handler import DatabaseHandler
+from hec.logic_engine import battery_predictor
+from hec.logic_engine.battery_predictor import BatteryPredictor
+from hec.logic_engine.consumption_predictor import ConsumptionPredictor
 from hec.logic_engine.data_processors import populate_appstate_with_price_data, populate_appstate_with_forecast_data, \
     update_rolling_averages
 from hec.logic_engine.system_mediator import SystemMediator
@@ -43,6 +48,7 @@ DAILY_SUMMARY_EMAIL_JOB_ID = "daily_summary_email"
 MEDIATOR_LOGIC_JOB_ID = "mediator_logic"
 BATTERY_UPDATE_FOR_DB_JOB_ID = "battery_update_for_db"
 BATTERY_UPDATE_JOB_ID = "battery_update"
+BATTERY_PREDICTOR_JOB_ID = "battery_prediction"
 
 
 def task_fetch_and_store_day_ahead_prices(scheduler: BaseScheduler, db_handler: DatabaseHandler, app_config: dict,
@@ -72,6 +78,7 @@ def task_fetch_and_store_day_ahead_prices(scheduler: BaseScheduler, db_handler: 
             if daily_summary_mail:
                 register_job(scheduler, DAILY_SUMMARY_EMAIL_JOB_ID, task_send_daily_energy_summary_email, "date", {},
                              [app_config, db_handler, tariff_manager], "Daily summary e-mail", 3600)
+            task_run_battery_predictor(app_config, db_handler)
             return
 
     # --- Handle Retries if no price points ---
@@ -102,8 +109,9 @@ def task_midnight_rollover(db_handler: DatabaseHandler, app_config: dict):
     else:  # No prices for tomorrow, try fetch from API
         populate_appstate_with_price_data(db_handler, app_config, True)
 
-    # populate_appstate_with_forecast_data(db_handler)
-
+    _, sunrise, sunset = is_daylight(app_config, db_handler)
+    GLOBAL_APP_STATE.set("sunrise", sunrise)
+    GLOBAL_APP_STATE.set("sunset", sunset)
 
 def task_poll_p1_meter(db_handler: DatabaseHandler, p1_client: Optional[P1MeterHomewizardClient], boundary: int = 5):
     """
@@ -141,7 +149,7 @@ def task_poll_p1_meter(db_handler: DatabaseHandler, p1_client: Optional[P1MeterH
         "monthly_power_peak_w": p1_data.get("montly_power_peak_w"),  # P1_meter spelling error
         "monthly_power_peak_timestamp": p1_data.get("montly_power_peak_timestamp"),  # P1_meter spelling error
     }
-    if datetime.now().day == 1 and datetime.now().hour == 0:
+    if datetime.now().day == 1 and datetime.now().hour <= 1:
         # Monthly power peak doesn't reset immediately in smart meter possibly allowing charging to create a new peak
         live["monthly_power_peak_w"] = 0
     GLOBAL_APP_STATE.set("p1_meter_data", live)
@@ -233,7 +241,7 @@ def task_poll_inverter_for_mediator_update(db_handler: DatabaseHandler, inv_clie
     task_poll_inverter(db_handler, inv_client, app_config, log_to_db=False)
 
 
-def task_poll_evcc_state(evcc_client: Optional[EvccApiClient]):
+def task_poll_evcc_state(evcc_client: Optional[EvccApiClient], db_handler: DatabaseHandler):
     """Poll evcc for state dict and store in AppState"""
     if not evcc_client:
         logger.debug("EVCC polling task: Client not available. Skipping.")
@@ -265,6 +273,21 @@ def task_poll_evcc_state(evcc_client: Optional[EvccApiClient]):
         GLOBAL_APP_STATE.set("evcc_overall_state", cur_state.to_dict())
         GLOBAL_APP_STATE.set("evcc_loadpoint_state", cur_lp.to_dict())
         logger.debug(f"EVCC: AppState updated. Mode: {cur_lp.mode}, Charging: {cur_lp.is_charging}")
+
+        # DB Logging (Once every 15 mins)
+        now_utc = datetime.now(pytz.UTC)
+        current_minute_floor = (now_utc.minute // 15) * 15
+        current_slot_ts = now_utc.replace(minute=current_minute_floor, second=0, microsecond=0)
+        last_logged_slot = GLOBAL_APP_STATE.get("evcc_last_logged_slot")
+
+        if last_logged_slot is None or current_slot_ts > last_logged_slot:
+            session_energy_kwh = cur_lp.session_energy / 1000
+
+            db_handler.store_evcc_session(now_utc, session_energy_kwh)
+
+            # Update the flag
+            GLOBAL_APP_STATE.set("evcc_last_logged_slot", current_slot_ts)
+            logger.info(f"EVCC: Logged session energy for slot {current_slot_ts.strftime('%H:%M')}")
 
     else:
         logger.warning("EVCC polling task: Failed to fetch state from EVCC.")
@@ -310,7 +333,7 @@ def task_poll_battery_for_db_logging(db_handler: DatabaseHandler,
                 logger.error(f"Failed to store battery data for '{name}'.")
 
         all_battery_records.append(battery_record)
-        GLOBAL_APP_STATE.set("battery_records", all_battery_records)
+    GLOBAL_APP_STATE.set("battery_records", all_battery_records)
 
 
 def task_fetch_elia_forecasts(db_handler: DatabaseHandler, app_config: dict):
@@ -352,7 +375,7 @@ def task_fetch_elia_forecasts(db_handler: DatabaseHandler, app_config: dict):
         logger.warning(f"No Elia forecast data fetched for {days_to_fetch} days. Check API.")
 
 
-def task_send_daily_energy_summary_email(app_config, db_handler, tariff_manager):
+def task_send_daily_energy_summary_email(app_config, db_handler, tariff_manager, renew_prices=False):
     """
     Scheduled task to generate and send the daily energy summary email.
     """
@@ -362,8 +385,8 @@ def task_send_daily_energy_summary_email(app_config, db_handler, tariff_manager)
     logger.info("Running task: Send Daily Energy Summary Email.")
 
     t_date_prices = GLOBAL_APP_STATE.get("electricity_prices_tomorrow")
-    if not t_date_prices:
-        logger.warning("Prices for 'tomorrow' not yet in AppState. Daily summary email skipped.")
+    if not t_date_prices or renew_prices:
+        populate_appstate_with_price_data(db_handler, app_config, True)
 
     try:
         success = summary_generator.generate_and_send_summary(app_config)
@@ -410,6 +433,119 @@ def fetch_historic_elia_data(db_handler: DatabaseHandler, app_config: dict, hist
     logger.info(f"Fetched and stored {total_lines_added} Elia forecast records.")
 
 
+def task_run_battery_predictor(app_config, db_handler: DatabaseHandler):
+    """
+    Scheduled task to run the battery predictor.
+    Generates the base 48h plan once per day, and optimizes it every 15 minutes.
+    """
+    logger.info("Running battery predictor task...")
+    bp = BatteryPredictor(app_config)
+    cd = ConsumptionPredictor(db_handler)
+
+    local_tz = pytz.timezone('Europe/Brussels')
+    now_utc = datetime.now(pytz.UTC)
+    now_local = now_utc.astimezone(local_tz)
+
+    # 1. Get Actual SOC from App State (fallback to 0 if not found)
+    battery_records = GLOBAL_APP_STATE.get("battery_records") or []
+    actual_soc = -0.001
+    if battery_records and len(battery_records) > 0:
+        for battery in battery_records:
+            actual_soc += battery.get("state_of_charge_pct", 0.0)
+        actual_soc /= len(battery_records)
+    if actual_soc == -0.001:
+        logger.warning("Predictor: No battery SOC found in state, skipping predictor.")
+        return
+
+    # 2. Get Max Peak (Convert W to kW)
+    p1_data = GLOBAL_APP_STATE.get("p1_meter_data") or {}
+    max_peak_w = p1_data.get("monthly_power_peak_w", 2500)
+    max_peak_kw = max_peak_w / 1000.0
+
+    # 3. Check if we need to generate the base plan
+    today_date_str = now_local.strftime('%Y-%m-%d')
+    last_gen_date = GLOBAL_APP_STATE.get("plan_generation_date")
+    base_plan_df = GLOBAL_APP_STATE.get("prediction_plan_df", None)
+
+    if last_gen_date != today_date_str:
+        logger.info(f"Generating new 48h base prediction plan for {today_date_str}...")
+
+        # Determine strict local midnight boundaries (DST safe!)
+        today_local_midnight = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
+        tomorrow_date = today_local_midnight.date() + timedelta(days=1)
+        tomorrow_local_midnight = local_tz.localize(datetime.combine(tomorrow_date, datetime.min.time()))
+        day_after_date = today_local_midnight.date() + timedelta(days=2)
+        day_after_local_midnight = local_tz.localize(datetime.combine(day_after_date, datetime.min.time()))
+
+        # Convert back to UTC for the predictor limits
+        first_day_start = today_local_midnight.astimezone(pytz.UTC)
+        first_day_end = (tomorrow_local_midnight - timedelta(minutes=15)).astimezone(pytz.UTC)
+
+        second_day_start = tomorrow_local_midnight.astimezone(pytz.UTC)
+        second_day_end = (day_after_local_midnight - timedelta(minutes=15)).astimezone(pytz.UTC)
+
+        try:
+            # --- DAY 1 ---
+            ff1 = cd.generate_consumption_forecast(first_day_start, first_day_end)
+            first_plan_df = bp.generate_plan(
+                first_day_start, first_day_end, ff1, db_handler,
+                max_peak_kw, initial_soc_pct=actual_soc
+            )
+
+            # --- DAY 2 ---
+            # Carry over the last SOC from Day 1 to the start of Day 2
+            if not first_plan_df.empty:
+                last_soc_day1 = first_plan_df['soc_pct'].iloc[-1]
+            else:
+                last_soc_day1 = actual_soc
+
+            ff2 = cd.generate_consumption_forecast(second_day_start, second_day_end)
+            second_plan_df = bp.generate_plan(
+                second_day_start, second_day_end, ff2, db_handler,
+                max_peak_kw, initial_soc_pct=last_soc_day1
+            )
+
+            # --- Combine and Store ---
+            base_plan_df = pd.concat([first_plan_df, second_plan_df])
+            GLOBAL_APP_STATE.set("plan_generation_date", today_date_str)
+            logger.info("Base prediction plan generated successfully.")
+
+        except Exception as e:
+            logger.error(f"Failed to generate base prediction plan: {e}", exc_info=True)
+            return  # Stop execution if base plan fails
+
+    # 4. Run the 15-minute Optimization
+    try:
+        if base_plan_df is not None:
+            logger.debug("Optimizing prediction plan for current state...")
+            opt_plan_df = bp.optimize_plan(base_plan_df, now_utc, actual_soc, GLOBAL_APP_STATE, app_config, db_handler)
+
+            # Store the finalized plan in app_state so the Vue dashboard can pick it up
+            plan_list = opt_plan_df.reset_index().to_dict(orient='records')
+            GLOBAL_APP_STATE.set("prediction_plan", plan_list)
+            GLOBAL_APP_STATE.set("prediction_plan_df", opt_plan_df)
+            logger.debug("Prediction plan optimized and saved to state.")
+
+            # 5. Check if sunrise block_c is active
+            sunrise = GLOBAL_APP_STATE.get("sunrise")
+            sunrise_block_until = None
+            if sunrise:
+                search_end = sunrise + timedelta(hours=3)
+                if now_local < search_end:
+                    start_utc = sunrise.astimezone(pytz.UTC)
+                    end_utc = search_end.astimezone(pytz.UTC)
+                    sunrise_window_df = opt_plan_df.loc[start_utc: end_utc]
+                    if not sunrise_window_df.empty:
+                        blocks = sunrise_window_df[sunrise_window_df['block_c']]
+                        if not blocks.empty:
+                            last_block_start = blocks.index[-1]
+                            sunrise_block_until = last_block_start.astimezone(local_tz) + timedelta(minutes=15)
+                            logger.info(f"Battery predictor: sunrise block active until {sunrise_block_until}")
+            GLOBAL_APP_STATE.set("sunrise_block_until", sunrise_block_until)
+
+    except Exception as e:
+        logger.error(f"Failed to optimize prediction plan: {e}", exc_info=True)
+
 def task_system_mediator(system_mediator: SystemMediator, app_config,
                          db_handler: DatabaseHandler, tariff_manager: TariffManager):
     # System reboot asked
@@ -421,7 +557,9 @@ def task_system_mediator(system_mediator: SystemMediator, app_config,
     if GLOBAL_APP_STATE.get('summary_request', False):
         logger.info('Summary e-mail requested')
         GLOBAL_APP_STATE.set('summary_request', False)
-        task_send_daily_energy_summary_email(app_config, db_handler, tariff_manager)
+        task_send_daily_energy_summary_email(app_config, db_handler, tariff_manager, True)
+    if GLOBAL_APP_STATE.get('prediction_plan', None) is None:
+        task_run_battery_predictor(app_config, db_handler)
 
     system_mediator.run_system_mediation_logic()
 
@@ -474,6 +612,15 @@ def register_all_jobs(scheduler: BaseScheduler, db_handler: DatabaseHandler, app
                 "job_args": [system_mediator, app_config, db_handler, tariff_manager],
                 "name": "System Mediator",
                 "misfire_grace_time": 10,
+            },
+            {
+                "job_id": BATTERY_PREDICTOR_JOB_ID,
+                "task_function": task_run_battery_predictor,
+                "trigger": "cron",
+                "trigger_args": "",
+                "job_args": [app_config, db_handler],
+                "name": "Battery predictor",
+                "misfire_grace_time": 600,
             }
         ]
 
@@ -553,7 +700,7 @@ def register_all_jobs(scheduler: BaseScheduler, db_handler: DatabaseHandler, app
                 func=task_poll_evcc_state,
                 trigger="cron",
                 trigger_args={"second": second},
-                job_args=[evcc_client],
+                job_args=[evcc_client, db_handler],
                 name="Poll EVCC",
                 grace_time=10,
             )

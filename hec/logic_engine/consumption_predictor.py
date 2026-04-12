@@ -43,6 +43,7 @@ class ConsumptionPredictor:
             p1_data = self.db.get_p1_meter_data_for_period(start_utc, end_utc)
             inv_data = self.db.get_inverter_data(start_utc, end_utc)
             bat_data = self.db.get_battery_data_for_period(start_utc, end_utc)
+            evcc_data = self.db.get_evcc_data_for_period(start_utc, end_utc)
 
             if not p1_data or not inv_data:
                 logger.debug(f"No p1 meter or inverter data for {start_utc}")
@@ -117,8 +118,20 @@ class ConsumptionPredictor:
 
                 net_battery_kwh = total_net_battery_kwh.fillna(0)
 
-            # 5. Total house consumption
-            house_consumption_kwh = solar_kwh + net_grid_kwh + net_battery_kwh
+            # 5. EVCC data
+            if not evcc_data:
+                logger.debug(f"No EVCC data for {start_utc}, assume zero.")
+                evcc_kwh = pd.Series(0.0, index=idx_15min)
+            else:
+                evcc_df = pd.DataFrame(evcc_data)
+                evcc_df['timestamp_utc'] = pd.to_datetime(evcc_df['timestamp_utc']).dt.tz_localize('UTC')
+                evcc_df = evcc_df.set_index('timestamp_utc')
+                evcc_resampled = evcc_df[['energy_delta']].reindex(idx_15min, fill_value=0.0)
+                evcc_kwh = evcc_resampled['energy_delta']
+
+            # 6. Total house consumption
+            gross_consumption_kwh = solar_kwh + net_grid_kwh + net_battery_kwh
+            house_consumption_kwh = (gross_consumption_kwh - evcc_kwh).clip(lower=0.0)
 
             # Return data but shifted to show future consumption at the requested time
             return house_consumption_kwh.iloc[2:]

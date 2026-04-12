@@ -6,7 +6,12 @@ from time import sleep
 from datetime import datetime, timezone, timedelta, time, date
 from enum import Enum
 from pathlib import Path
-from typing import List, Optional, Dict, Any, Tuple
+from typing import List, Optional, Dict, Any
+from zoneinfo import ZoneInfo
+
+import pandas as pd
+import pytz
+
 from hec.core import constants as c
 
 from hec.core.models import PricePoint, NetElectricityPriceInterval
@@ -31,7 +36,9 @@ class DatabaseHandler:
             try:
                 # Ensure parent directory exists
                 self.db_path.parent.mkdir(parents=True, exist_ok=True)
-                self.conn = sqlite3.connect(self.db_path, detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES, check_same_thread=False)
+                self.conn = sqlite3.connect(self.db_path, timeout=10,
+                                            detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES,
+                                            check_same_thread=False)
                 self.conn.row_factory = sqlite3.Row  # Access columns by name
                 logger.info(f"Successfully connected to SQLite database: {self.db_path}")
             except sqlite3.Error as e:
@@ -60,119 +67,156 @@ class DatabaseHandler:
     def initialize_database(self):
         """Creates necessary tables if they don't exist."""
         try:
-            conn = self._get_connection()
-            cursor = conn.cursor()
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
 
-            # --- Day-Ahead Price Forecasts Table ---
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS belpex_da_prices (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    timestamp_utc TEXT NOT NULL,
-                    price_eur_per_mwh REAL NOT NULL,
-                    resolution_minutes INTEGER NOT NULL,  -- 15, 30, 60
-                    fetched_at_utc TEXT NOT NULL,  -- When this data was retrieved
-                    source_api TEXT DEFAULT 'ENTSO-E',
-                    UNIQUE (timestamp_utc, resolution_minutes) -- Ensure no duplicate entries
-                );
-            """)
-            logger.info("Table belpex_da_prices checked/created.")
+                # --- Day-Ahead Price Forecasts Table ---
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS belpex_da_prices (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        timestamp_utc TEXT NOT NULL,
+                        price_eur_per_mwh REAL NOT NULL,
+                        resolution_minutes INTEGER NOT NULL,  -- 15, 30, 60
+                        fetched_at_utc TEXT NOT NULL,  -- When this data was retrieved
+                        source_api TEXT DEFAULT 'ENTSO-E',
+                        UNIQUE (timestamp_utc, resolution_minutes) -- Ensure no duplicate entries
+                    );
+                """)
+                logger.info("Table belpex_da_prices checked/created.")
 
-            cursor.execute("""
-                CREATE INDEX IF NOT EXISTS idx_price_timestamp_utc 
-                ON belpex_da_prices (timestamp_utc);
-            """)
-            logger.info("Index idx_price_timestamp_utc checked/created.")
+                cursor.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_price_timestamp_utc 
+                    ON belpex_da_prices (timestamp_utc);
+                """)
+                logger.info("Index idx_price_timestamp_utc checked/created.")
 
-            # --- P1 Meter Log Table ---
-            cursor.execute("""
-                            CREATE TABLE IF NOT EXISTS p1_meter_log (
-                                timestamp_utc TEXT PRIMARY KEY,
-                                wifi_strength INTEGER,
-                                smr_version TEXT,
-                                active_tariff INTEGER,
-                                total_power_import_kwh REAL,
-                                total_power_import_t1_kwh REAL,
-                                total_power_import_t2_kwh REAL,
-                                total_power_export_kwh REAL,
-                                total_power_export_t1_kwh REAL,
-                                total_power_export_t2_kwh REAL,
-                                active_power_w REAL,
-                                active_power_l1_w REAL,
-                                active_power_l2_w REAL,
-                                active_power_l3_w REAL,
-                                active_voltage_l1_v REAL,
-                                active_voltage_l2_v REAL,
-                                active_voltage_l3_v REAL,
-                                active_current_l1_a REAL,
-                                active_current_l2_a REAL,
-                                active_current_l3_a REAL,
-                                active_power_average_w REAL,
-                                monthly_power_peak_w REAL,
-                                monthly_power_peak_timestamp TEXT
+                # --- P1 Meter Log Table ---
+                cursor.execute("""
+                                CREATE TABLE IF NOT EXISTS p1_meter_log (
+                                    timestamp_utc TEXT PRIMARY KEY,
+                                    wifi_strength INTEGER,
+                                    smr_version TEXT,
+                                    active_tariff INTEGER,
+                                    total_power_import_kwh REAL,
+                                    total_power_import_t1_kwh REAL,
+                                    total_power_import_t2_kwh REAL,
+                                    total_power_export_kwh REAL,
+                                    total_power_export_t1_kwh REAL,
+                                    total_power_export_t2_kwh REAL,
+                                    active_power_w REAL,
+                                    active_power_l1_w REAL,
+                                    active_power_l2_w REAL,
+                                    active_power_l3_w REAL,
+                                    active_voltage_l1_v REAL,
+                                    active_voltage_l2_v REAL,
+                                    active_voltage_l3_v REAL,
+                                    active_current_l1_a REAL,
+                                    active_current_l2_a REAL,
+                                    active_current_l3_a REAL,
+                                    active_power_average_w REAL,
+                                    monthly_power_peak_w REAL,
+                                    monthly_power_peak_timestamp TEXT
+                                );
+                            """)
+                logger.info("Table p1_meter_log checked/created.")
+
+                # --- Elia Open Data Table ---
+                cursor.execute("""
+                                CREATE TABLE IF NOT EXISTS elia_open_data (
+                                    timestamp_utc TEXT NOT NULL,
+                                    forecast_type TEXT NOT NULL,  -- solar, wind, grid_load
+                                    resolution_minutes INTEGER NOT NULL,  -- 15, 60
+                                    most_recent_forecast_mwh REAL,  -- For solar/wind/load
+                                    monitored_capacity_mw REAL,  -- For solar/wind
+                                    fetched_at_utc TEXT NOT NULL,  -- When this data was retrieved
+                                    PRIMARY KEY (timestamp_utc, forecast_type, resolution_minutes) -- Unique
+                                );
+                            """)
+                logger.info("Table elia_open_data checked/created.")
+
+                cursor.execute("""
+                                CREATE INDEX IF NOT EXISTS idx_elia_forecast_type_ts 
+                                ON elia_open_data (forecast_type, timestamp_utc);
+                            """)
+                logger.info("Index idx_elia_forecast_type_ts checked/created.")
+
+                # --- Inverter Log Table ---
+                cursor.execute("""
+                                CREATE TABLE IF NOT EXISTS inverter_log (
+                                    timestamp_utc TEXT PRIMARY KEY,
+                                    operational_status TEXT NOT NULL,
+                                    pv_power_watts REAL,
+                                    daily_yield_wh REAL,
+                                    total_yield_wh REAL,
+                                    active_power_limit_watts REAL
+                                );
+                            """)
+                logger.info("Table 'inverter_log' checked/created.")
+
+                # --- Battery Log Table ---
+                cursor.execute("""
+                            CREATE TABLE IF NOT EXISTS battery_log (
+                                timestamp_utc TEXT,
+                                battery_name TEXT,
+                                energy_import_kwh REAL,
+                                energy_export_kwh REAL,
+                                state_of_charge_pct REAL,
+                                battery_mode TEXT,
+                                cycles REAL,
+                                PRIMARY KEY (timestamp_utc, battery_name)
                             );
                         """)
-            logger.info("Table p1_meter_log checked/created.")
+                logger.info("Table 'battery_log' checked/created.")
 
-            # --- Elia Open Data Table ---
-            cursor.execute("""
-                            CREATE TABLE IF NOT EXISTS elia_open_data (
-                                timestamp_utc TEXT NOT NULL,
-                                forecast_type TEXT NOT NULL,  -- solar, wind, grid_load
-                                resolution_minutes INTEGER NOT NULL,  -- 15, 60
-                                most_recent_forecast_mwh REAL,  -- For solar/wind/load
-                                monitored_capacity_mw REAL,  -- For solar/wind
-                                fetched_at_utc TEXT NOT NULL,  -- When this data was retrieved
-                                PRIMARY KEY (timestamp_utc, forecast_type, resolution_minutes) -- Unique
-                            );
-                        """)
-            logger.info("Table elia_open_data checked/created.")
-
-            cursor.execute("""
-                            CREATE INDEX IF NOT EXISTS idx_elia_forecast_type_ts 
-                            ON elia_open_data (forecast_type, timestamp_utc);
-                        """)
-            logger.info("Index idx_elia_forecast_type_ts checked/created.")
-
-            # --- Inverter Log Table ---
-            cursor.execute("""
-                            CREATE TABLE IF NOT EXISTS inverter_log (
-                                timestamp_utc TEXT PRIMARY KEY,
-                                operational_status TEXT NOT NULL,
-                                pv_power_watts REAL,
-                                daily_yield_wh REAL,
-                                total_yield_wh REAL,
-                                active_power_limit_watts REAL
-                            );
-                        """)
-            logger.info("Table 'inverter_log' checked/created.")
-
-            # --- Battery Log Table ---
-            cursor.execute("""
-                        CREATE TABLE IF NOT EXISTS battery_log (
-                            timestamp_utc TEXT,
-                            battery_name TEXT,
-                            energy_import_kwh REAL,
-                            energy_export_kwh REAL,
-                            state_of_charge_pct REAL,
-                            battery_mode TEXT,
-                            cycles REAL,
-                            PRIMARY KEY (timestamp_utc, battery_name)
-                        );
-                    """)
-            logger.info("Table 'battery_log' checked/created.")
-
-            # --- Settings Table ---
-            cursor.execute("""
-                                    CREATE TABLE IF NOT EXISTS app_settings (
-                                        setting_key TEXT PRIMARY KEY,
-                                        setting_value TEXT NOT NULL,
-                                        value_type TEXT NOT NULL,
-                                        last_updated_utc TEXT NOT NULL
-                                    );
+                # --- Settings Table ---
+                cursor.execute("""
+                                CREATE TABLE IF NOT EXISTS app_settings (
+                                    setting_key TEXT PRIMARY KEY,
+                                    setting_value TEXT NOT NULL,
+                                    value_type TEXT NOT NULL,
+                                    last_updated_utc TEXT NOT NULL
+                                );
                                 """)
-            logger.info("Table 'app_settings' checked/created.")
+                logger.info("Table 'app_settings' checked/created.")
 
-            conn.commit()
+                # --- Logs Table ---
+                cursor.execute("""
+                                CREATE TABLE IF NOT EXISTS logs (
+                                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                                    timestamp TEXT NOT NULL,
+                                    level TEXT NOT NULL,
+                                    module TEXT NOT NULL,
+                                    message TEXT NOT NULL
+                               );
+                               """)
+                cursor.execute("CREATE INDEX IF NOT EXISTS idx_logs_timestamp ON logs (timestamp);")
+                cursor.execute("CREATE INDEX IF NOT EXISTS idx_logs_level ON logs (level);")
+                logger.info("Table 'logs' and indexes checked/created.")
+
+                # --- Predicted Prices Table ---
+                cursor.execute("""
+                               CREATE TABLE IF NOT EXISTS predicted_prices
+                               (
+                                   timestamp_utc             TEXT PRIMARY KEY,
+                                   predicted_gross_price_kwh REAL,
+                                   solar_factor              REAL,
+                                   wind_factor               REAL,
+                                   grid_load_mwh             REAL
+                               );
+                               """)
+                logger.info("Table predicted_prices checked/created.")
+
+                # --- EVCC Charging Log Table ---
+                cursor.execute("""
+                                CREATE TABLE IF NOT EXISTS evcc_log (
+                                    timestamp_utc TEXT NOT NULL,
+                                    session_energy REAL NOT NULL,
+                                    energy_delta REAL,
+                                    UNIQUE (timestamp_utc)
+                                );
+                            """)
+                logger.info("Table evcc_log checked/created.")
+
         except sqlite3.Error as e:
             logger.error(f"Error initializing database tables: {e}", exc_info=True)
             raise
@@ -200,21 +244,20 @@ class DatabaseHandler:
 
         inserted_count = 0
         try:
-            conn = self._get_connection()
-            cursor = conn.cursor()
-            sql = """
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                sql = """
                 INSERT OR REPLACE INTO belpex_da_prices 
                 (timestamp_utc, price_eur_per_mwh, resolution_minutes, fetched_at_utc)
                 VALUES (?, ?, ?, ?);
             """
-            cursor.executemany(sql, rows_to_insert)
-            conn.commit()
-            inserted_count = cursor.rowcount
-            if inserted_count > 0:
-                logger.info(
-                    f"Successfully stored or updated {inserted_count} price points in the database.")
-            else:
-                logger.info(f"No new price points stored.")
+                cursor.executemany(sql, rows_to_insert)
+
+                if cursor.rowcount > 0:
+                    logger.info(
+                        f"Successfully stored or updated {inserted_count} price points in the database.")
+                else:
+                    logger.info(f"No new price points stored.")
 
         except sqlite3.Error as e:
             logger.error(f"Error storing price forecasts in database: {e}", exc_info=True)
@@ -243,12 +286,12 @@ class DatabaseHandler:
             conn = self._get_connection()
             cursor = conn.cursor()
             sql = """
-                SELECT timestamp_utc, price_eur_per_mwh, resolution_minutes
-                FROM belpex_da_prices
-                WHERE timestamp_utc >= ? 
-                  AND timestamp_utc < ? 
-                ORDER BY timestamp_utc;
-            """
+            SELECT timestamp_utc, price_eur_per_mwh, resolution_minutes
+            FROM belpex_da_prices
+            WHERE timestamp_utc >= ? 
+              AND timestamp_utc < ? 
+            ORDER BY timestamp_utc;
+        """
             cursor.execute(sql, (day_start_utc_str, day_end_utc_str))
             rows = cursor.fetchall()
 
@@ -315,16 +358,16 @@ class DatabaseHandler:
         """
 
         try:
-            conn = self._get_connection()
-            cursor = conn.cursor()
-            cursor.execute(sql, values)
-            conn.commit()
-            if cursor.rowcount > 0:
-                logger.debug(f"P1 Meter: Successfully stored data for timestamp {p1_data['timestamp_utc_iso']} in DB.")
-                return True
-            else:
-                logger.warning(f"P1 Meter: Data for timestamp {p1_data['timestamp_utc_iso']} was not stored.")
-                return False
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(sql, values)
+
+                if cursor.rowcount > 0:
+                    logger.debug(f"P1 Meter: Successfully stored data for timestamp {p1_data['timestamp_utc_iso']} in DB.")
+                    return True
+                else:
+                    logger.warning(f"P1 Meter: Data for timestamp {p1_data['timestamp_utc_iso']} was not stored.")
+                    return False
         except sqlite3.Error as e:
             logger.error(f"P1 Meter: Error storing data in database: {e}", exc_info=True)
             return False
@@ -758,10 +801,10 @@ class DatabaseHandler:
         Returns:
             Optional[float]: average peak in kW, or None if no data.
         """
+        peaks_kw = []
+
         conn = self._get_connection()
         cursor = conn.cursor()
-
-        peaks_kw = []
 
         # Helper to roll back months
         yr, m = reference_date.year, reference_date.month
@@ -837,22 +880,22 @@ class DatabaseHandler:
 
         inserted_count = 0
         try:
-            conn = self._get_connection()
-            cursor = conn.cursor()
-            sql = """
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                sql = """
                 INSERT OR REPLACE INTO elia_open_data (
                     timestamp_utc, forecast_type, resolution_minutes,
                     most_recent_forecast_mwh, monitored_capacity_mw,
                     fetched_at_utc
                 ) VALUES (?, ?, ?, ?, ?, ?);
             """
-            cursor.executemany(sql, rows_to_insert)
-            conn.commit()
-            inserted_count = cursor.rowcount
-            if inserted_count > 0:
-                logger.info(f"Successfully stored/updated {inserted_count} Elia forecast records.")
-            else:
-                logger.info(f"No new Elia forecast records to store (or all were duplicates).")
+                cursor.executemany(sql, rows_to_insert)
+
+                inserted_count = cursor.rowcount
+                if inserted_count > 0:
+                    logger.info(f"Successfully stored/updated {inserted_count} Elia forecast records.")
+                else:
+                    logger.info(f"No new Elia forecast records to store (or all were duplicates).")
         except sqlite3.Error as e:
             logger.error(f"Error storing Elia forecasts in database: {e}", exc_info=True)
         return inserted_count
@@ -895,7 +938,7 @@ class DatabaseHandler:
 
             if not results:
                 logger.info(f"No Elia '{forecast_type}' records found in DB for the period "
-                            f"{start_date_local} - {end_date_local}.")
+                                f"{start_date_local} - {end_date_local}.")
         except sqlite3.Error as e:
             logger.error(f"Error retrieving Elia '{forecast_type}' forecasts from database: {e}", exc_info=True)
 
@@ -926,17 +969,17 @@ class DatabaseHandler:
         retries = 5
         for attempt in range(retries):
             try:
-                conn = self._get_connection()
-                cursor = conn.cursor()
-                cursor.execute(sql, values)
-                conn.commit()
-                if cursor.rowcount > 0:
-                    logger.debug(
-                        f"Inverter Log: Successfully stored data timestamp {inverter_data['timestamp_utc_iso']} in DB.")
-                    return True
-                else:
-                    logger.warning(f"Inverter Log: Data timestamp {inverter_data['timestamp_utc_iso']} not stored.")
-                    return False
+                with self._get_connection() as conn:
+                    cursor = conn.cursor()
+                    cursor.execute(sql, values)
+
+                    if cursor.rowcount > 0:
+                        logger.debug(
+                            f"Inverter Log: Successfully stored data for {inverter_data['timestamp_utc_iso']} in DB.")
+                        return True
+
+                logger.warning(f"Inverter Log: Data at {inverter_data['timestamp_utc_iso']} not stored (rowcount 0).")
+                return False
             except sqlite3.OperationalError as e:
                 if "database is locked" in str(e).lower():
                     logger.warning(
@@ -952,6 +995,7 @@ class DatabaseHandler:
                 logger.error(f"Inverter Log: Missing key '{e}' in inverter_data: {inverter_data}", exc_info=True)
                 return False
         logger.error("Inverter Log: Failed to store data after multiple attempts.")
+        return False
 
     def get_inverter_data(self, start_date_local: datetime, end_date_local: datetime) -> List[Dict[str, Any]]:
         """
@@ -975,13 +1019,13 @@ class DatabaseHandler:
             conn = self._get_connection()
             cursor = conn.cursor()
             sql = """
-                SELECT timestamp_utc, operational_status, pv_power_watts, 
-                       daily_yield_wh, total_yield_wh, active_power_limit_watts
-                FROM inverter_log
-                WHERE timestamp_utc >= ? 
-                  AND timestamp_utc < ? 
-                ORDER BY timestamp_utc;
-            """
+            SELECT timestamp_utc, operational_status, pv_power_watts, 
+                   daily_yield_wh, total_yield_wh, active_power_limit_watts
+            FROM inverter_log
+            WHERE timestamp_utc >= ? 
+              AND timestamp_utc < ? 
+            ORDER BY timestamp_utc;
+        """
             cursor.execute(sql, (start_utc_str, end_utc_str))
             rows = cursor.fetchall()
 
@@ -1027,16 +1071,16 @@ class DatabaseHandler:
         """
 
         try:
-            conn = self._get_connection()
-            cursor = conn.cursor()
-            cursor.execute(sql, values)
-            conn.commit()
-            if cursor.rowcount > 0:
-                logger.debug(f"Battery data: Successfully stored data in DB.")
-                return True
-            else:
-                logger.warning(f"Battery data: Data was not stored.")
-                return False
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(sql, values)
+
+                if cursor.rowcount > 0:
+                    logger.debug(f"Battery data: Successfully stored data in DB.")
+                    return True
+
+            logger.warning(f"Battery data: Data was not stored.")
+            return False
         except sqlite3.Error as e:
             logger.error(f"Battery data: Error storing data in database: {e}", exc_info=True)
             return False
@@ -1073,17 +1117,17 @@ class DatabaseHandler:
                 value_type_str = "str_fallback"
                 value_json_str = json.dumps(str(value))
 
-            conn = self._get_connection()
-            cursor = conn.cursor()
-            sql = """
-                INSERT OR REPLACE INTO app_settings 
-                (setting_key, setting_value, value_type, last_updated_utc)
-                VALUES (?, ?, ?, ?);
-            """
-            cursor.execute(sql, (key, value_json_str, value_type_str, now_utc_str))
-            conn.commit()
-            logger.info(f"Setting '{key}' saved to database with value type '{value_type_str}'.")
-            return True
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                sql = """
+                    INSERT OR REPLACE INTO app_settings 
+                    (setting_key, setting_value, value_type, last_updated_utc)
+                    VALUES (?, ?, ?, ?);
+                """
+                cursor.execute(sql, (key, value_json_str, value_type_str, now_utc_str))
+
+                logger.info(f"Setting '{key}' saved to database with value type '{value_type_str}'.")
+                return True
         except sqlite3.Error as e:
             logger.error(f"Error saving setting '{key}' to database: {e}", exc_info=True)
             return False
@@ -1194,7 +1238,7 @@ class DatabaseHandler:
                 except Exception as e_inner:
                     logger.error(
                         f"Error deserializing setting '{key}' (type: {value_type_str}) "
-                        f"during load_all_settings: {e_inner}")
+                            f"during load_all_settings: {e_inner}")
 
             logger.info(f"Loaded {len(all_settings_from_db)} settings from database.")
         except sqlite3.Error as e:
@@ -1242,6 +1286,186 @@ class DatabaseHandler:
             logger.error(f"DBHandler: Error retrieving battery data: {e}", exc_info=True)
             return []
 
+    def store_log(self, log: dict):
+        sql_insert = "INSERT INTO logs (timestamp, level, message, module) VALUES (?, ?, ?, ?)"
+        sql_cleanup = """
+                      DELETE \
+                      FROM logs
+                      WHERE (level IN ('INFO', 'DEBUG') AND timestamp < datetime('now', '-12 hours', 'localtime'))
+                         OR (timestamp < datetime('now', '-72 hours', 'localtime')); \
+                      """
+        try:
+            with self._get_connection() as conn:
+                conn.execute(sql_insert, (log['timestamp'], log['level'], log['message'], log['module']))
+                conn.execute(sql_cleanup)
+        except Exception as e:
+            # Use sys.stderr to avoid infinite logging loops
+            import sys
+            print(f"CRITICAL: Failed to write log to DB: {e}", file=sys.stderr)
+
+    def get_latest_logs(self, limit=1000):
+        """Fetch logs for the API."""
+        sql = "SELECT * FROM logs ORDER BY timestamp DESC LIMIT ?"
+        conn = self._get_connection()
+        return [dict(row) for row in conn.execute(sql, (limit,)).fetchall()]
+
+    def store_predicted_prices(self, df: pd.DataFrame):
+        """
+        Saves the predicted prices DataFrame to the database and
+        deletes any predictions older than 14 days.
+        """
+        if df is None or df.empty:
+            return
+
+        # Convert to list of dicts and ensure ISO strings for SQLite
+        records = df.copy()
+        if pd.api.types.is_datetime64_any_dtype(records['timestamp_utc']):
+            records['timestamp_utc'] = records['timestamp_utc'].dt.strftime('%Y-%m-%dT%H:%M:%SZ')
+        data = records.to_dict('records')
+
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=14)).strftime('%Y-%m-%dT%H:%M:%SZ')
+
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+
+                # Insert/Overwrite
+                cursor.executemany("""
+                                   REPLACE INTO predicted_prices
+                                   (timestamp_utc, predicted_gross_price_kwh, solar_factor, wind_factor, grid_load_mwh)
+                                   VALUES (:timestamp_utc, :predicted_gross_price_kwh, :solar_factor, :wind_factor,
+                                           :grid_load_mwh)
+                                   """, data)
+
+                # Cleanup
+                cursor.execute("DELETE FROM predicted_prices WHERE timestamp_utc < ?", (cutoff,))
+                conn.commit()
+
+            logger.debug(f"Saved {len(data)} predictions and cleared old records.")
+
+        except Exception as e:
+            logger.error(f"Error saving predicted prices to DB: {e}", exc_info=True)
+            raise
+
+    def get_predicted_prices_for_date(self, target_date_local: date) -> List[Dict[str, Any]]:
+        """
+        Retrieves predicted prices for a specific target date (UTC).
+        Returns an empty DataFrame if no data is found.
+        """
+        tz = ZoneInfo("Europe/Brussels")
+
+        local_start = datetime.combine(target_date_local, datetime.min.time(), tzinfo=tz)
+        local_end = local_start + timedelta(days=1)
+
+        start_str = local_start.astimezone(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+        end_str = local_end.astimezone(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+
+        try:
+            with self._get_connection() as conn:
+                conn.row_factory = sqlite3.Row  # This allows accessing columns by name
+                cursor = conn.cursor()
+                query = """
+                        SELECT * \
+                        FROM predicted_prices
+                        WHERE timestamp_utc >= ? \
+                          AND timestamp_utc < ?
+                        ORDER BY timestamp_utc ASC \
+                        """
+                cursor.execute(query, (start_str, end_str))
+                # Convert Row objects to standard dictionaries
+                return [dict(row) for row in cursor.fetchall()]
+
+        except Exception as e:
+            logger.error(f"Error retrieving predicted prices for {target_date}: {e}", exc_info=True)
+            return []
+
+    def store_evcc_session(self, timestamp_utc: datetime, current_session_kwh: float):
+        """
+        Snaps to 15m intervals. Updates the previous interval's energy_delta.
+        Backfills missing rows if a gap > 15m is detected.
+        """
+        # 1. Snap current timestamp
+        minute = (timestamp_utc.minute // 15) * 15
+        current_snapped_dt = timestamp_utc.replace(minute=minute, second=0, microsecond=0)
+        current_ts_str = current_snapped_dt.strftime('%Y-%m-%d %H:%M:%S')
+
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+
+                # 2. Get the most recent record
+                cursor.execute("SELECT timestamp_utc, session_energy FROM evcc_log ORDER BY timestamp_utc DESC LIMIT 1")
+                prev_row = cursor.fetchone()
+
+                if prev_row:
+                    prev_ts_str, prev_val = prev_row
+                    prev_dt = datetime.strptime(prev_ts_str, '%Y-%m-%d %H:%M:%S').replace(tzinfo=pytz.UTC)
+
+                    # Calculate the time gap in 15-minute increments
+                    time_diff = current_snapped_dt - prev_dt
+                    intervals = int(time_diff.total_seconds() // 900)  # 900s = 15m
+
+                    if intervals > 0:
+                        # Handle session reset (car unplugged)
+                        total_delta = max(0,
+                                          current_session_kwh - prev_val) if current_session_kwh >= prev_val else current_session_kwh
+                        energy_per_slot = total_delta / intervals
+
+                        # 3. Update the previous row's delta
+                        cursor.execute("""
+                            UPDATE evcc_log 
+                            SET energy_delta = ? 
+                            WHERE timestamp_utc = ?
+                        """, (energy_per_slot, prev_ts_str))
+
+                        # 4. Backfill missing rows if gap > 15 mins
+                        if intervals > 1:
+                            # Start at 1, so we skip the prev_row we just updated
+                            for i in range(1, intervals):
+                                fill_dt = prev_dt + timedelta(minutes=15 * i)
+                                fill_ts_str = fill_dt.strftime('%Y-%m-%d %H:%M:%S')
+
+                                # Calculate a logical session_energy for the gap
+                                simulated_session = prev_val + (
+                                            energy_per_slot * i) if current_session_kwh >= prev_val else current_session_kwh
+
+                                cursor.execute("""
+                                    INSERT OR REPLACE INTO evcc_log (timestamp_utc, session_energy, energy_delta)
+                                    VALUES (?, ?, ?)
+                                """, (fill_ts_str, simulated_session, energy_per_slot))
+
+                # 5. ALWAYS insert the current slot
+                cursor.execute("""
+                    INSERT OR REPLACE INTO evcc_log (timestamp_utc, session_energy, energy_delta)
+                    VALUES (?, ?, 0.0)
+                """, (current_ts_str, current_session_kwh))
+
+                conn.commit()
+
+                if prev_row and intervals > 1:
+                    logger.info(f"EVCC Log: Backfilled {intervals - 1} missing slots.")
+
+        except Exception as e:
+            logger.error(f"Failed to store EVCC database: {e}", exc_info=True)
+
+    def get_evcc_data_for_period(self, start_utc: datetime, end_utc: datetime) -> list[dict]:
+        """Fetches EVCC energy delta logs for a specific period."""
+        try:
+            start_str = start_utc.strftime('%Y-%m-%d %H:%M:%S')
+            end_str = end_utc.strftime('%Y-%m-%d %H:%M:%S')
+            with self._get_connection() as conn:
+                conn.row_factory = sqlite3.Row
+                cursor = conn.cursor()
+                cursor.execute("""
+                    SELECT timestamp_utc, energy_delta 
+                    FROM evcc_log 
+                    WHERE timestamp_utc >= ? AND timestamp_utc <= ?
+                """, (start_str, end_str))
+                return [dict(row) for row in cursor.fetchall()]
+        except Exception as e:
+            logger.error(f"Failed to fetch EVCC data: {e}")
+            return []
+
 
 if __name__ == '__main__':
     logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -1250,11 +1474,12 @@ if __name__ == '__main__':
     # Initialize
     app_config = {"database": {"type": "sqlite", "path": "home_energy.db"}}
     db_handler = DatabaseHandler(app_config['database'])
-    db_handler.initialize_database()
+    # db_handler.initialize_database()
     today_local = datetime.combine(datetime.now(), time.min)
     tomorrow_local = today_local + timedelta(days=1)
     fall_dst = datetime(2024, 10, 27, 0, 0, 0)
 
+    db_handler.store_evcc_session(datetime(2026, 4, 9, 13, 45, 5, tzinfo=pytz.UTC), 4.813)
     # Retrieve solar forecast
     # solar_forecast = db_handler.get_elia_forecasts("solar", fall_dst, fall_dst + timedelta(days=1))
     # print(solar_forecast)
@@ -1297,7 +1522,7 @@ if __name__ == '__main__':
          NetElectricityPriceInterval(datetime(2025, 12, 4, 4, 45), 15, "dynamic", {})
          ]
     # print(db_handler.get_battery_deltas_for_intervals(nepis))
-    print(db_handler.get_energy_deltas_for_intervals(nepis))
+    # print(db_handler.get_energy_deltas_for_intervals(nepis))
 
     # print(db_handler.get_energy_deltas_for_period(date(2025, 5, 1), date(2025, 5, 10)))
 

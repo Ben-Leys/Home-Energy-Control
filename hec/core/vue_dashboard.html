@@ -6,6 +6,11 @@
     <title>Home Energy Controller</title>
     <script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
     <style>
+        #app {
+            display: flex;
+            flex-direction: column;
+            height: 98vh; /* Use almost full viewport height */
+        }
         :root {
             --bg-color: #fafafa;
             --card-bg: #EBEBEB;
@@ -22,14 +27,26 @@
         .tabs { border-bottom: 2px solid var(--border-color); margin-bottom: 20px; }
         .tab { background: none; border: none; color: #888; font-size: 1rem; padding: 10px 20px; cursor: pointer; }
         .tab.active { color: var(--text-color); border-bottom: 3px solid var(--accent); font-weight: bold; }
+        .tab-content-flex {
+            flex-grow: 1;
+            display: flex;
+            flex-direction: column;
+            min-height: 0;
+        }
 
         /* Grid System */
         .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
-        .grid-3 { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 20px; }
 
         /* Cards */
         .card { background: var(--card-bg); border: 1px solid var(--border-color); border-radius: var(--border-radius); padding: 10px; margin-bottom: 10px; }
         .card h3 { font-size: 1.2rem; margin-bottom: 15px; border-bottom: 1px solid var(--border-color); padding-bottom: 10px; }
+        .plan-card {
+            flex-grow: 1;
+            display: flex;
+            flex-direction: column;
+            min-height: 0;
+            padding: 5px !important;
+        }
 
         /* Metrics */
         .metric { display: flex; flex-direction: column; }
@@ -64,7 +81,7 @@
             font-size: 0.7rem;
             padding: 2px 6px;
             border-radius: 4px;
-            background: #D4D4D4;
+            background: white;
             text-transform: uppercase;
         }
         .compact-grid {
@@ -78,6 +95,81 @@
             font-weight: normal;
             margin-left: 4px;
         }
+        .log-container {
+            max-height: 65vh;
+            overflow-y: auto;
+            background: #1e1e1e;
+            padding: 12px;
+            border-radius: 4px;
+            border: 1px solid var(--border-color);
+            font-family: 'Consolas', 'Monaco', monospace;
+            font-size: 0.8rem;
+        }
+        .error { color: #ff5252; }
+        .warning { color: #fb8c00; }
+        .info { color: #e0e0e0; }
+        .debug { color: #9e9e9e; font-style: italic; }
+        .log-line {
+            padding: 2px 0;
+            border-bottom: 1px solid grey;
+            white-space: pre-wrap;
+            line-height: 1.2;
+        }
+        .timestamp {
+            color: white;
+            font-size: 0.8rem;
+            margin-right: 8px;
+        }
+        .table-scroll-container {
+            flex-grow: 1;
+            overflow-y: auto;
+            border: 1px solid var(--border-color);
+        }
+        .plan-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 0.85rem;
+            background: var(--card-bg);
+        }
+        .plan-table th {
+            padding: 4px 8px !important;
+            font-size: 0.8rem;
+            text-align: left
+        }
+        .plan-table td {
+            padding: 2px 8px !important; /* Minimal vertical padding */
+            line-height: 1.1;
+            text-align: left;
+            border-bottom: 1px solid #ddd;
+        }
+        .soc-high-vis {
+            color: #000 !important; /* Force black for contrast on grey */
+            border-radius: 3px;
+            padding: 0 4px;
+        }
+        .plan-table tr:hover { background: #e0e0e0; }
+        .highlight-row { background: #fff5f5; font-weight: bold; }
+        .state-container {
+            background-color: #1e1e1e;
+            border-radius: 8px;
+            padding: 20px;
+            border: 1px solid #333;
+            max-height: 75vh;
+            overflow-y: auto;
+        }
+        .json-render {
+            color: #9cdcfe;
+            font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+            font-size: 0.9rem;
+            margin: 0;
+            white-space: pre-wrap;
+            word-break: break-all;
+        }
+        .json-render {
+            tab-size: 2;
+            scrollbar-width: thin;
+            scrollbar-color: #444 #1e1e1e;
+        }
     </style>
 </head>
 <body>
@@ -87,7 +179,9 @@
 
     <div class="tabs">
         <button class="tab" :class="{active: currentTab === 'dashboard'}" @click="currentTab = 'dashboard'">📊 Dashboard</button>
+        <button class="tab" :class="{active: currentTab === 'plan'}" @click="currentTab = 'plan'">📅 Prediction</button>
         <button class="tab" :class="{active: currentTab === 'logs'}" @click="currentTab = 'logs'">📜 Logs</button>
+        <button class="tab" :class="{active: currentTab === 'state'}" @click="currentTab = 'state'">🔍 App State</button>
     </div>
 
     <div v-show="currentTab === 'dashboard'">
@@ -106,8 +200,8 @@
             <div class="compact-grid">
                 <div class="card">
                     <h4>💡 Price</h4>
-                    <div style="grid-column: span 2; font-size: 0.8rem; color: var(--info-label); margin-bottom: 16px">
-                        Interval: {{ formatTime(currentPrice.start) }} - {{ formatTime(currentPrice.end) }} (LT)
+                    <div style="grid-column: span 2; font-size: 0.8rem; color: var(--info-label); margin-bottom: 12px">
+                        Interval: {{ formatTimeHm(currentPrice.start) }} - {{ formatTimeHm(currentPrice.end) }} (LT)
                     </div>
                     <div v-if="currentPrice" class="grid-2">
                         <div class="metric">
@@ -120,10 +214,11 @@
                         </div>
                         <div class="metric">
                             <span class="metric-label">Net sell</span>
-                            <span v-if="currentPrice.buy !== null">
+                            <span v-if="currentPrice.sell !== null">
                                 <span class="metric-value">{{ (currentPrice.sell * 100).toFixed(1) }}</span>
                                 <span class="unit">€c/kWh</span>
                             </span>
+                            <span v-else class="metric-value">N/A</span>
                         </div>
                     </div>
                     <div v-else style="color: #ffaa00;">Current electricity price data not available.</div>
@@ -131,7 +226,7 @@
 
                 <div class="card">
                     <h4>🔋 Batteries</h4>
-                    <div style="margin-bottom: 10px">Mode: <strong>{{ state.battery_data?.mode || 'UNKNOWN' }}</strong></div>
+                    <div style="margin-bottom: 10px; font-size: small">Mode: <strong>{{ batteryModeDisplay }}</strong></div>
 
                     <div class="grid-2" v-if="state.battery_records && state.battery_records.length > 0">
                         <div class="metric" v-for="(bat, idx) in state.battery_records" :key="idx">
@@ -247,9 +342,113 @@
         </div>
     </div>
 
+    <div v-show="currentTab === 'plan'" class="tab-content-flex">
+        <div class="card plan-card" v-if="state?.prediction_plan">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 5px;">
+                <h5 style="margin: 0;">📅 Prediction Plan</h5>
+                <span class="status-badge" style="background: #333; color: white;">{{ state.prediction_plan.length }} intervals</span>
+            </div>
+
+            <div class="table-scroll-container">
+                <table class="plan-table">
+                    <thead>
+                        <tr>
+                            <th>Time</th>
+                            <th>Net</th>
+                            <th>Sell</th>
+                            <th>🚫D</th>
+                            <th>🚫C</th>
+                            <th>⚡C</th>
+                            <th>SOC%</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr v-for="(row, idx) in state.prediction_plan" :key="idx"
+                            :class="{ 'highlight-row': isCurrentInterval(row.index) }">
+
+                            <td>{{ row.index ? formatTime(row.index).substring(0, 5) : '??:??' }}</td>
+
+                            <td :style="{ color: row.net_kwh > 0 ? '#1b5e20' : '#b71c1c', fontWeight: 'bold' }">
+                                {{ row.net_kwh !== null ? (row.net_kwh * 4000).toFixed(0) : '--' }}
+                            </td>
+
+                            <td>{{ row.sell_price !== null ? (row.sell_price * 100).toFixed(1) + 'c' : '--' }}</td>
+
+                            <td>{{ row.block_d ? '🚫' : '' }}</td>
+                            <td>{{ row.block_c ? '🚫' : '' }}</td>
+                            <td>{{ row.force_c ? '⚡' : '' }}</td>
+
+                            <td>
+                                <span class="soc-high-vis" :style="{ color: row.new_pct < 15 ? '#d32f2f !important' : '#000' }">
+                                    {{ row.new_pct !== null ? row.new_pct.toFixed(0) + '%' : '--' }}
+                                </span>
+                            </td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+        <div v-else class="card">No prediction plan available.</div>
+    </div>
+
     <div v-show="currentTab === 'logs'">
-        <h3>Application Logs</h3>
-        <p style="color: #888;">Log viewing functionality: To be implemented.</p>
+        <h5>Application Logs</h5>
+        <div class="card">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px;">
+                <h4>📜 System Logs</h4>
+                <span class="status-badge">{{ filteredLogs.length }} entries shown</span>
+            </div>
+
+            <div class="control-group" style="margin-bottom: 15px; display: flex; gap: 10px; align-items: center;">
+                <label style="margin: 0;">Filter:</label>
+                <select v-model="logFilter" style="width: auto; min-width: 150px;">
+                    <option value="ALL">Show All</option>
+                    <option value="IMPORTANT">⚠️ Errors & Warnings</option>
+                    <option value="ERROR">🔴 Errors Only</option>
+                    <option value="WARNING">🟠 Warnings Only</option>
+                    <option value="INFO">⚪ Info Only</option>
+                    <option value="DEBUG">🟣 Debug Only</option>
+                </select>
+                <select v-model="logLimit" @change="fetchLogs" style="width: auto;">
+                    <option :value="100">Last 100</option>
+                    <option :value="1000">Last 1000</option>
+                    <option :value="5000">Last 5000</option>
+                    <option :value="10000">Last 10000</option>
+                </select>
+                <button class="btn" @click="fetchLogs" :disabled="isFetchingLogs"
+                        style="padding: 5px 15px; margin-bottom: 10px; background-color: grey">
+                    {{ isFetchingLogs ? '...' : '🔄 Refresh' }}
+                </button>
+            </div>
+
+            <div class="log-container">
+                <div v-if="filteredLogs.length === 0" style="padding: 20px; text-align: center; color: #888;">
+                    No logs match the selected filter.
+                </div>
+
+                <div v-for="log in filteredLogs" :key="log.id" :class="['log-line', log.level.toLowerCase()]">
+                    <span class="timestamp">[{{ formatTime(log.timestamp) }}]</span>
+                    <span class="status-badge" style="margin-right: 8px; font-size: 0.6rem;">{{ log.level }}</span>
+                    <span class="message">{{ log.message }}</span>
+                    <div v-if="log.module" style="font-size: 0.65rem; color: white; margin-left: 5px; display: inline;">
+                        ({{ log.module }})
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div v-show="currentTab === 'state'">
+        <div class="card">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px;">
+                <h5>Raw Application State</h5>
+                <button class="btn" @click="fetchState" style="padding: 5px 15px;">🔄 Refresh State</button>
+            </div>
+
+            <div class="state-container">
+                <pre class="json-render">{{ formattedState }}</pre>
+            </div>
+        </div>
     </div>
 
     <div class="toast" :class="{'toast-hide': !toast.show}">
@@ -259,7 +458,7 @@
 </div>
 
 <script>
-    const { createApp, ref, computed, onMounted, onUnmounted } = Vue
+    const { createApp, ref, computed, watch, nextTick, onMounted, onUnmounted } = Vue
 
     createApp({
         setup() {
@@ -268,15 +467,28 @@
             const state = ref(null);
             const lastSync = ref('');
             const toast = ref({ show: false, message: '' });
+            const logs = ref([]);
+            const isFetchingLogs = ref(false);
+            const logFilter = ref('ALL');
+            const logLimit = ref(100);
             let refreshTimer = null;
 
-            // API URLs (Assumes this page is served from the same server. If not, voeg "http://ip:8213" toe)
+            // API URLs. Assumes this page is served from the same server.
             const API_STATE = '/api/v1/state';
             const API_UPDATE = '/api/v1/settings/update';
+            const API_LOGS = '/api/v1/logs';
+
+            // Watches
+            watch(currentTab, (newTab) => {
+                if (newTab === 'logs') {
+                    fetchLogs();
+                }
+                if (newTab === 'state') {
+                    fetchState();
+                }
+            });
 
             // --- ENUMS CONFIGURATION ---
-            // Aangezien Vue de python imports niet kent, mappen we hier wat de UI toont (.value) naar wat de API verwacht (.name)
-            // PAS DEZE AAN naar de exacte namen/values in je c.py constanten!
             const enums = {
                 OperatingMode: [
                     { name: 'MODE_AUTO', value: 'Auto' },
@@ -284,8 +496,12 @@
                 ],
                 MediatorGoal: [
                     { name: 'NO_CHARGING', value: 'No charging' },
+                    { name: 'CHARGE_WITH_MINIMUM_SOLAR_POWER', value: 'Charge when any solar power' },
                     { name: 'CHARGE_WITH_ONLY_EXCESS_SOLAR_POWER', value: 'Charge with excess solar power' },
                     { name: 'CHARGE_WHEN_SELL_PRICE_NEGATIVE', value: 'Charge when sell price negative' },
+                    { name: 'CHARGE_WHEN_BUY_PRICE_NEGATIVE', value: 'Charge when buy price negative' },
+                    { name: 'CHARGE_NOW_WITH_CAPACITY_RATE', value: 'Charge now with capacity rate' },
+                    { name: 'CHARGE_NOW_NO_CAPACITY_RATE', value: 'Charge now no capacity rate' },
                 ],
                 InverterManualState: [
                     { name: 'INV_CMD_LIMIT_STANDARD', value: 'Standard power limit' },
@@ -300,14 +516,15 @@
                     { name: 'EVCC_CMD_STATE_NOW', value: 'now' }
                 ],
                 BatteryState: [
-                    { name: 'BATTERY_ON', value: 'zero' },
-                    { name: 'BATTERY_OFF', value: 'standby' },
-                    { name: 'BATTERY_FORCE_CHARGE', value: 'to_full' },
-                    { name: 'BATTERY_AUTO', value: 'auto' }
+                    { name: 'BATTERY_ON', value: 'Zero' },
+                    { name: 'BATTERY_OFF', value: 'Off' },
+                    { name: 'BATTERY_FORCE_CHARGE', value: 'Force charge' },
+                    { name: 'BATTERY_BLOCK_CHARGE', value: 'Block charge' },
+                    { name: 'BATTERY_BLOCK_DISCHARGE', value: 'Block discharge'}
                 ]
             };
 
-            // --- Computed Properties (Logica) ---
+            // --- Computed Properties ---
             const statusColor = computed(() => {
                 if (!state.value || !state.value.app_state) return 'white';
                 const s = state.value.app_state;
@@ -321,7 +538,6 @@
 
                 for (let data of state.value.electricity_prices_today) {
                     try {
-                        // De python code doet json.loads, dus we parsen de string
                         const interval = typeof data === 'string' ? JSON.parse(data) : data;
                         const start = new Date(interval.interval_start_local);
                         const end = new Date(start.getTime() + (interval.resolution_minutes * 60000));
@@ -334,16 +550,20 @@
                                 end: end
                             };
                         }
-                    } catch (e) { console.error("Fout bij parsen prijs:", e); }
+                    } catch (e) { console.error("Error when parsing price:", e); }
                 }
                 return null;
             });
 
-            // --- Helper Functions ---
-            const formatTime = (dateObj) => {
-                return dateObj.toLocaleTimeString('nl-BE', { hour: '2-digit', minute: '2-digit' });
-            };
+            const filteredLogs = computed(() => {
+                if (logFilter.value === 'ALL') return logs.value;
+                if (logFilter.value === 'IMPORTANT') {
+                    return logs.value.filter(log => ['ERROR', 'WARNING', 'ALARM'].includes(log.level));
+                }
+                return logs.value.filter(log => log.level === logFilter.value);
+            });
 
+            // --- Helper Functions ---
             const showToast = (msg) => {
                 toast.value = { show: true, message: msg };
                 setTimeout(() => { toast.value.show = false; }, 3000);
@@ -358,6 +578,48 @@
                 return s;
             };
 
+            const formatTime = (ts) => {
+                if (!ts) return '';
+                // Formats ISO string or timestamp to HH:mm
+                const d = new Date(ts);
+                return d.toLocaleTimeString('en-GB', {
+                    hour: '2-digit',
+                    minute: '2-digit',
+                    second: '2-digit',
+                    hour12: false
+                });
+            };
+
+            const formatTimeHm = (ts) => {
+                if (!ts) return '';
+                // Formats ISO string or timestamp to HH:mm
+                const d = new Date(ts);
+                return d.toLocaleTimeString('en-GB', {
+                    hour: '2-digit',
+                    minute: '2-digit',
+                    hour12: false
+                });
+            };
+
+            const formattedState = computed(() => {
+                if (!state.value) return "Loading application state...";
+                return JSON.stringify(state.value, null, 2);
+            });
+
+            const batteryModeDisplay = computed(() => {
+                const rawMode = state.value?.battery_manual_mode;
+                if (!rawMode) return 'UNKNOWN';
+                const match = enums.BatteryState.find(opt => opt.name === rawMode);
+                return match ? match.value : rawMode;
+            });
+
+            const isCurrentInterval = (ts) => {
+                if (!ts) return false;
+                const rowTime = new Date(ts).getTime();
+                const now = new Date().getTime();
+                return now >= rowTime && now < (rowTime + 15 * 60000);
+            };
+
             // --- API Calls ---
             const fetchState = async () => {
                 try {
@@ -367,7 +629,7 @@
                         lastSync.value = new Date().toLocaleTimeString();
                     }
                 } catch (error) {
-                    console.error("Fout bij ophalen state:", error);
+                    console.error("Error when fetching state:", error);
                 }
             };
 
@@ -382,26 +644,43 @@
 
                     if (result.success) {
                         showToast(`Setting '${key}' updated.`);
-                        fetchState(); // Direct refreshen na update
+                        fetchState();
                     } else {
-                        alert(`Fout bij updaten: ${result.error}`);
+                        alert(`Error when updating: ${result.error}`);
                     }
                 } catch (error) {
-                    alert(`API fout: ${error.message}`);
+                    alert(`API error: ${error.message}`);
+                }
+            };
+
+            const fetchLogs = async () => {
+                isFetchingLogs.value = true;
+                try {
+                    const res = await fetch(`${API_LOGS}?limit=${logLimit.value}`);
+                    if (res.ok) {
+                        const data = await res.json();
+                        logs.value = data.logs;
+                    }
+                } catch (error) {
+                    console.error("Error fetching logs:", error);
+                } finally {
+                    isFetchingLogs.value = false;
                 }
             };
 
             // --- Lifecycle Hooks ---
             onMounted(() => {
                 fetchState();
-                refreshTimer = setInterval(fetchState, 10000); // 15 seconden zoals in config
+                refreshTimer = setInterval(fetchState, 10000);
             });
 
             onUnmounted(() => {
                 clearInterval(refreshTimer);
             })
 
-            return { currentTab, state, lastSync, enums, statusColor, currentPrice, formatTime, updateSetting, toast, formatPeakTimestamp }
+            return { currentTab, state, lastSync, enums, statusColor, currentPrice, formatTime, updateSetting, toast,
+                formatPeakTimestamp, logs, fetchLogs, isFetchingLogs, logFilter, filteredLogs, formattedState,
+                isCurrentInterval, fetchState, batteryModeDisplay, logLimit, formatTimeHm}
         }
     }).mount('#app')
 </script>

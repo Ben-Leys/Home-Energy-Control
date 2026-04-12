@@ -3,12 +3,12 @@ import sys
 import time
 from threading import Thread
 
-from hec.core import constants as c
+from hec.core import constants as c, api_server
 from hec.core.api_server import run_api_server
 from hec.core.app_initializer import (populate_app_state, initialize_database_handler,
                                       initialize_external_clients, setup_scheduler, load_app_config,
                                       check_historic_data)
-from hec.core.app_logging import start_logger
+from hec.core.app_logging import start_logger, inject_db_to_logging
 from hec.core.app_state import GLOBAL_APP_STATE
 from hec.core.tariff_manager import initialize_tariff_manager
 from hec.logic_engine import scheduled_tasks
@@ -34,11 +34,12 @@ def run_application():
     logger.debug(f"Initial AppState: {GLOBAL_APP_STATE.get_all()}")
     GLOBAL_APP_STATE.set("app_state", c.AppStatus.STARTING)
 
-    # --- LOAD DATA ---
-    tariff_manager = initialize_tariff_manager(APP_CONFIG)
-
     # --- SETUP DATABASE ---
     db_handler = initialize_database_handler(APP_CONFIG)
+    inject_db_to_logging(db_handler)
+
+    # --- LOAD DATA ---
+    tariff_manager = initialize_tariff_manager(APP_CONFIG)
     fetch_entsoe, fetch_elia = check_historic_data(db_handler, APP_CONFIG)
 
     # --- INITIALIZE EXTERNAL CLIENTS ---
@@ -55,7 +56,7 @@ def run_application():
     # --- START API SERVER ---
     api_thread = None
     if APP_CONFIG.get('api_server', {}).get('enabled', True):
-        api_thread = Thread(target=run_api_server, args=(APP_CONFIG,), daemon=True)
+        api_thread = Thread(target=run_api_server, args=(APP_CONFIG,db_handler), daemon=True)
         api_thread.start()
     else:
         logger.info("API server is disabled in configuration.")

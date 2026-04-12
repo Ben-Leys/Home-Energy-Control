@@ -248,7 +248,7 @@ if __name__ == '__main__':
     logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
     logger_main = logging.getLogger(__name__)
     APP_CONFIG = load_app_config()
-    test_day = (datetime.now()).replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=0)
+    test_day = (datetime.now()).replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
     test_day_winter = datetime(2025, 1, 1).replace(hour=0, minute=0, second=0, microsecond=0)
     fall_dst_day = datetime(2024, 10, 27).replace(hour=0, minute=0, second=0, microsecond=0)
     spring_dst_day = datetime(2025, 3, 30).replace(hour=0, minute=0, second=0, microsecond=0)

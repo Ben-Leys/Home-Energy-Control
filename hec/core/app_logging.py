@@ -1,6 +1,7 @@
 # core/app_logging.py
 import logging
 import sys
+from datetime import datetime
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from hec.core import constants as c
@@ -11,12 +12,42 @@ class GlobalStateHandler(logging.Handler):
     def __init__(self, global_app_state):
         super().__init__()
         self.global_app_state = global_app_state
+        self.db = None
 
     def emit(self, record):
         if record.levelno == logging.WARNING:
             self.global_app_state.set("app_state", c.AppStatus.WARNING)
         elif record.levelno >= logging.ERROR:
             self.global_app_state.set("app_state", c.AppStatus.ALARM)
+
+        # Persist to Database unless exception, don't log to avoid infinite loop
+        if self.db:
+            try:
+                log_entry = {
+                    'timestamp': datetime.fromtimestamp(record.created).isoformat(),
+                    'level': record.levelname,
+                    'message': self.format(record),
+                    'module': record.module
+                }
+                self.db.store_log(log_entry)
+            except Exception:
+                import sys
+                print(f"CRITICAL: Logging to DB failed!", file=sys.stderr)
+
+    def set_db_handler(self, db):
+        self.db = db
+
+
+def inject_db_to_logging(db_handler):
+    """Finds the GlobalStateHandler and injects the database connection."""
+    root_logger = logging.getLogger()
+    for handler in root_logger.handlers:
+        if isinstance(handler, GlobalStateHandler):
+            handler.set_db_handler(db_handler)
+            logging.info("Database handler successfully injected into Logging system.")
+            return True
+    logging.error("Failed to inject DB handler: GlobalStateHandler not found.")
+    return False
 
 
 def start_logger(config, global_app_state=None):
@@ -72,7 +103,8 @@ def start_logger(config, global_app_state=None):
     # Add GlobalStateHandler
     if global_app_state is not None:
         global_state_handler = GlobalStateHandler(global_app_state)
-        global_state_handler.setLevel(logging.WARNING)  # Only WARNING and ERROR
+        global_state_handler.name = "GlobalStateHandler"
+        global_state_handler.setLevel(logging.INFO)  # Only WARNING and ERROR
         root_logger.addHandler(global_state_handler)
 
     root_logger.info(f"Logger started. Level: {log_level}")

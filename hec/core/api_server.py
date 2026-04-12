@@ -3,14 +3,20 @@ import os
 from collections import deque
 from datetime import datetime
 from enum import Enum
+from typing import Optional
 
+import numpy as np
+import pandas as pd
 from flask import Flask, jsonify, request, send_from_directory
 
 from hec.core import constants as c
 from hec.core.app_state import GLOBAL_APP_STATE
+from hec.database_ops import db_handler
 
 api_app = Flask(__name__)
 logger = logging.getLogger(__name__)
+
+_DB_INSTANCE: Optional[db_handler] = None
 
 
 @api_app.route('/api/v1/state', methods=['GET'])
@@ -21,7 +27,7 @@ def get_app_state_api():
     current_raw_state = GLOBAL_APP_STATE.get_all()
 
     # Make a copy to modify for serialization
-    serializable_state = {}
+    clean_state, serializable_state = {}, {}
     for key, value in current_raw_state.items():
         if isinstance(value, datetime):
             serializable_state[key] = value.isoformat()
@@ -30,7 +36,6 @@ def get_app_state_api():
                 isinstance(value, c.OperatingMode) or \
                 isinstance(value, c.InverterStatus) or \
                 isinstance(value, c.InverterManualState) or \
-                isinstance(value, c.EVChargeStatus) or \
                 isinstance(value, c.EVCCManualState) or \
                 isinstance(value, c.BatteryState):
             serializable_state[key] = value.name
@@ -63,7 +68,24 @@ def get_app_state_api():
         else:
             serializable_state[key] = value
 
-    return jsonify(serializable_state)
+        clean_state = clean_nas(serializable_state)
+
+    return jsonify(clean_state)
+
+
+@api_app.route("/api/v1/logs", methods=['GET'])
+def get_logs():
+    if _DB_INSTANCE is None:
+        return jsonify({"error": "Database not initialized in API"}), 500
+
+    try:
+        limit = request.args.get('limit', default=1000, type=int)
+        limit = min(limit, 20000)
+    except ValueError:
+        limit = 1000
+
+    logs = _DB_INSTANCE.get_latest_logs(limit)
+    return jsonify({"logs": logs})
 
 
 @api_app.route('/api/v1/settings/update', methods=['POST'])
@@ -142,18 +164,36 @@ def update_app_setting_api():
         return jsonify({"error": "Internal server error processing update"}), 500
 
 
+def clean_nas(obj):
+    """
+    Recursively replaces NaN/Inf with None so JSON serialization works.
+    """
+    if isinstance(obj, dict):
+        return {k: clean_nas(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [clean_nas(x) for x in obj]
+    elif isinstance(obj, float):
+        # Check for NaN or Infinity
+        if np.isnan(obj) or np.isinf(obj):
+            return None
+    return obj
+
+
 @api_app.route('/')
 def serve_dashboard():
     base_dir = os.path.dirname(os.path.realpath(__file__))
     return send_from_directory(base_dir, 'vue_dashboard.html')
 
 
-def run_api_server(app_config: dict):
+def run_api_server(app_config: dict, db_handler):
     """Runs the Flask API server in a separate thread."""
+    global _DB_INSTANCE
+
     api_config = app_config.get('api_server', {})
     host = api_config.get('host', '0.0.0.0')
     port = api_config.get('port', 8123)
     debug_mode = api_config.get('debug', False)
+    _DB_INSTANCE = db_handler
 
     logger.info(f"Starting API server on http://{host}:{port}")
     try:

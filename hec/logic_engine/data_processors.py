@@ -7,7 +7,7 @@ from hec.core import constants as c
 from hec.core.app_state import GLOBAL_APP_STATE
 from hec.data_sources.api_entsoe import fetch_entsoe_prices
 from hec.database_ops.db_handler import DatabaseHandler
-from hec.utils.utils import process_price_points_to_app_state
+from hec.utils.utils import is_daylight, process_price_points_to_app_state
 
 logger = logging.getLogger(__name__)
 
@@ -24,7 +24,7 @@ MAX_HISTORY_SECONDS = max(AVERAGE_WINDOWS_SECONDS.values())
 
 
 def populate_appstate_with_price_data(db_handler: DatabaseHandler, app_config: dict,
-                                      force_api_fetch_if_missing: bool = False):
+                                      force_api_fetch: bool = False):
     """
     Ensures price data for today and tomorrow is in AppState.
     Tries DB first. If missing and force_api_fetch_if_missing is True, tries API.
@@ -42,8 +42,8 @@ def populate_appstate_with_price_data(db_handler: DatabaseHandler, app_config: d
 
         # If DB is empty and API fetching is allowed, fetch from API
         store_to_db = False
-        if not price_points and force_api_fetch_if_missing:
-            logger.info(f"No DB data for '{key}' on {day.date()}, attempting API fetch.")
+        if not price_points or force_api_fetch:
+            logger.info(f"Attempting API fetch for '{key}' on {day.date()}, .")
             price_points = fetch_entsoe_prices(day, app_config)
             store_to_db = True if price_points else False
         if not price_points:
@@ -55,6 +55,11 @@ def populate_appstate_with_price_data(db_handler: DatabaseHandler, app_config: d
 
     if not GLOBAL_APP_STATE.get("electricity_prices_today"):
         logger.warning("No 'electricity_prices_today' found in AppState. Price-based decisions will fail.")
+
+    # Sunrise and sunset hours
+    _, sunrise, sunset = is_daylight(app_config, db_handler)
+    GLOBAL_APP_STATE.set("sunrise", sunrise)
+    GLOBAL_APP_STATE.set("sunset", sunset)
 
 
 def populate_appstate_with_forecast_data(db_handler: DatabaseHandler):

@@ -22,6 +22,8 @@ class AppState:
             "app_mediator_goal": c.MediatorGoal.NO_CHARGING,
             "reboot_request": False,
             "summary_request": False,
+            "sunrise": None,
+            "sunset": None,
             # P1 meter data, recent import/export samples and averages
             "p1_meter_data": None,
             "p1_meter_last_stored_boundary_slot_utc_iso": None,
@@ -35,9 +37,6 @@ class AppState:
             "inverter_manual_limit": None,
             "recent_solar_production_wh_samples": None,
             "average_solar_production_watts": None,
-            # EV data TODO (Tesla connect?)
-            "ev_data": None,
-            "ev_charge_status": c.EVChargeStatus.UNKNOWN,
             # Electricity prices and solar, wind and grid_load forecasts (forecasts deprecated 19/03/2026)
             "electricity_prices_today": None,
             "electricity_prices_tomorrow": None,
@@ -47,18 +46,26 @@ class AppState:
             "evcc_loadpoint_state": None,
             "evcc_manual_state": None,
             "evcc_manual_limit": None,
+            "evcc_last_logged_slot": None,
             # Battery control
             "battery_data": None,
             "battery_records": [],
             "battery_manual_mode": None,
-            "prediction_plan": None
+            "prediction_plan": None,
+            "plan_generation_date": None,
+            "empty_since": None,
+            "sunrise_block_until": None
         }
+        self.prediction_plan_df = None
 
         self.db_handler: Optional[db_handler] = None
         self.persisted_keys: List[str] = ["app_operating_mode", "app_mediator_goal", "inverter_manual_state",
-                                          "inverter_manual_limit", "evcc_manual_state"]
+                                          "inverter_manual_limit", "evcc_manual_state", "evcc_manual_limit",
+                                          "battery_manual_mode", "empty_since"]
 
     def get(self, key, default=None):
+        if key == "prediction_plan_df":
+            return self.prediction_plan_df
         return self.current_values.get(key, default)
 
     def set(self, key, value):
@@ -66,6 +73,8 @@ class AppState:
             self.current_values[key] = value
             truncated_value = str(value)[:500]
             logger.debug(f"App state updated: {key} = {truncated_value}")
+        elif key == "prediction_plan_df":
+            self.prediction_plan_df = value
         else:
             logger.warning(f"Attempted to update non-existent state key: {key}")
 

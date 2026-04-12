@@ -7,6 +7,7 @@ from typing import Optional, List
 
 logger = logging.getLogger(__name__)
 
+
 class MarketContext:
     def __init__(self):
         self.buy_price: float = 0.0
@@ -47,6 +48,7 @@ class MarketContext:
             if start <= now < (start + timedelta(minutes=inv.resolution_minutes)):
                 return inv
         return None
+
 
 if __name__ == '__main__':
     import pytz

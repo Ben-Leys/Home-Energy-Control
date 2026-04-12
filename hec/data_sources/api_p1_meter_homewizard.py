@@ -2,9 +2,9 @@
 import json
 import logging
 import requests
-import time
+from hec.core import constants as c
 from datetime import datetime, timezone
-from typing import Literal, Optional, Dict, Any
+from typing import Optional, Dict, Any
 
 logger = logging.getLogger(__name__)
 
@@ -132,29 +132,31 @@ class P1MeterHomewizardClient:
             logger.debug(f"P1 Meter: Raw response content: {response.text if response else 'N/A'}")
             return None
 
-    def set_battery_mode(self, mode: Literal["to_full", "zero", "standby"]) -> bool:
+    def set_battery_mode(self, mode: c.BatteryState) -> bool:
         """
-        Sends a command to the battery group to change the operating mode.
-
-        Args:
-            mode: New mode ('to_full', 'zero', or 'standby').
-
-        Returns:
-            True if the mode was changed, False otherwise.
+        Updates the battery behavior based on the BatteryState enum.
+        Handles the internal mapping between 'mode' and 'permissions'.
         """
         if not self.is_initialized:
             logger.warning("P1 Meter: Not initialized, skipping set_battery_mode.")
             return False
 
         if not self.battery_url:
-            logger.error(
-                "P1 Meter: Battery command URL is not set. "
-            )
+            logger.error("P1 Meter: Battery command URL is not set. ")
             return False
 
-        valid_modes = {"to_full", "zero", "standby"}
-        if mode not in valid_modes:
-            logger.warning(f"P1 Meter: Invalid battery mode '{mode}' requested.")
+        state_map = {
+            c.BatteryState.BATTERY_OFF: {"mode": "standby"},
+            c.BatteryState.BATTERY_ON: {"mode": "zero", "permissions": ["charge_allowed", "discharge_allowed"]},
+            c.BatteryState.BATTERY_FORCE_CHARGE: {"mode": "to_full"},
+            c.BatteryState.BATTERY_BLOCK_CHARGE: {"mode": "zero", "permissions": ["discharge_allowed"]},
+            c.BatteryState.BATTERY_BLOCK_DISCHARGE: {"mode": "zero", "permissions": ["charge_allowed"]},
+        }
+
+        payload = state_map.get(mode)
+
+        if not payload:
+            logger.error(f"P1 Meter: No payload mapping found for state {mode}")
             return False
 
         headers = {
@@ -162,9 +164,9 @@ class P1MeterHomewizardClient:
             "X-Api-Version": "2",
             "Content-Type": "application/json",
         }
-        payload = {"mode": mode}
 
         try:
+            logger.info(f"P1 Meter: Setting battery to {mode.name} with payload {payload}")
             response = requests.put(
                 self.battery_url,
                 headers=headers,
@@ -188,33 +190,41 @@ class P1MeterHomewizardClient:
             logger.warning(f"P1 Meter: HTTP error while setting battery mode '{mode}': {e}")
             return False
         except (requests.exceptions.RequestException, json.JSONDecodeError) as e:
-            logger.error(
-                f"P1 Meter: Error while setting battery mode '{mode}': {e}",
-                exc_info=True
-            )
+            logger.error(f"P1 Meter: Error while setting battery mode '{mode}': {e}", exc_info=True)
             return False
-
 
 # Example standalone test (if needed, but better to test via scheduled task)
 # if __name__ == '__main__':
+#     import os
+#     from pathlib import Path
+#     from dotenv import load_dotenv
+#
 #     logging.basicConfig(level=logging.DEBUG)
 #     test_p1_host = "192.168.0.150"  # Actual IP for testing
 #
-#     if test_p1_host:
+#     BASE_DIR = Path(__file__).resolve().parent.parent
+#     env_path = BASE_DIR / ".env"
+#     load_dotenv(dotenv_path=env_path)
+#     token = os.getenv("P1_METER")
+#
+#     if test_p1_host and token:
 #         print(f"--- Testing P1MeterHomeWizard with host: {test_p1_host} ---")
-#         p1_meter = P1MeterHomewizardClient(host=test_p1_host)
+#         p1_meter = P1MeterHomewizardClient(host=test_p1_host, token=token)
 #
 #         if p1_meter.is_initialized:
-#             for _ in range(20):
-#                 test_data = p1_meter.refresh_data()
-#                 if test_data:
-#                     print(f"Fetched at {test_data['timestamp_utc_iso']}:\n"
-#                           f"   Active Power: {test_data.get('active_power_w')} W\n"
-#                           f"   Total Import: {test_data.get('total_power_import_kwh')} kWh\n"
-#                           f"   L1 Voltage: {test_data.get('active_voltage_l1_v')} V")
-#                     print(test_data)
-#                 else:
-#                     print("Failed to fetch P1 data in this attempt.")
-#                 time.sleep(15)
+#             # for _ in range(1):
+#             #     test_data = p1_meter.refresh_meter_data()
+#             #     if test_data:
+#             #         print(f"Fetched at {test_data['timestamp_utc_iso']}:\n"
+#             #               f"   Active Power: {test_data.get('active_power_w')} W\n"
+#             #               f"   Total Import: {test_data.get('total_power_import_kwh')} kWh\n"
+#             #               f"   L1 Voltage: {test_data.get('active_voltage_l1_v')} V")
+#             #         print(test_data)
+#             #     else:
+#             #         print("Failed to fetch P1 data in this attempt.")
+#             #     time.sleep(15)
+#             print(p1_meter.refresh_batteries_data())
+#             # p1_meter.set_battery_mode("zero")
+#             # p1_meter.set_battery_permissions(charge_allowed=True, discharge_allowed=True)
 #         else:
 #             print(f"P1 Meter client could not be initialized with host {test_p1_host}. Check IP and network.")

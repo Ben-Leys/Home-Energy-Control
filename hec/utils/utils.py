@@ -2,17 +2,18 @@
 import logging
 import os
 import smtplib
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta
 from email.mime.image import MIMEImage
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from typing import List, Optional, Tuple
+from zoneinfo import ZoneInfo
 
 from astral import LocationInfo
 from astral.sun import sun
 
 from hec.core.app_state import GLOBAL_APP_STATE
-from hec.core.models import NetElectricityPriceInterval
+from hec.core.models import NetElectricityPriceInterval, PricePoint
 from hec.database_ops.db_handler import DatabaseHandler
 from hec.logic_engine.cost_calculator import calculate_net_intervals_for_day
 
@@ -91,7 +92,40 @@ def process_price_points_to_app_state(price_points: list, target_day: datetime,
     return True
 
 
-def is_daylight(app_config: dict) -> bool:
+def get_predicted_price_points_for_date(db_handler, target_date: date) -> List[PricePoint]:
+    """
+    Fetches raw price data from the database and maps it to a list of PricePoint objects.
+    """
+    # 1. Fetch the raw dicts from the database handler
+    raw_data = db_handler.get_predicted_prices_for_date(target_date)
+
+    if not raw_data:
+        logger.warning(f"No predicted prices found in DB for {target_date}")
+        return []
+
+    # 2. Convert to PricePoint objects
+    price_points = []
+    for i, row in enumerate(raw_data, start=1):
+        try:
+            # Parse the ISO string from SQLite back into a UTC datetime object
+            ts_utc = datetime.fromisoformat(row['timestamp_utc'].replace('Z', '+00:00'))
+
+            price_points.append(
+                PricePoint(
+                    timestamp_utc=ts_utc,
+                    price_eur_per_mwh=float(row['predicted_gross_price_kwh'] * 1000),
+                    position=i,
+                    resolution_minutes=15
+                )
+            )
+        except (ValueError, KeyError) as e:
+            logger.error(f"Failed to parse price row at position {i}: {e}")
+            continue
+
+    return price_points
+
+
+def is_daylight(app_config: dict, return_dt=False) -> bool | tuple[bool, datetime, datetime]:
     """Checks if it's currently daylight hours based on configured location."""
     location_config = app_config.get('inverter').get('location')
     if not location_config or not all(k in location_config for k in ['latitude', 'longitude', 'timezone']):
@@ -112,7 +146,9 @@ def is_daylight(app_config: dict) -> bool:
     is_light = sunrise_local <= now_dt_aware <= sunset_local
     logger.debug(f"Daylight check: Now={now_dt_aware.strftime('%H:%M')}, Sunrise={sunrise_local.strftime('%H:%M')}, "
                  f"Sunset={sunset_local.strftime('%H:%M')} -> Is Daylight: {is_light}")
-    return is_light
+    if not return_dt:
+        return is_light
+    return is_light, sunrise_local, sunset_local
 
 
 def send_email_with_attachments(
@@ -241,20 +277,20 @@ def convert_power(current_a: Optional[float] = None, power_kw: Optional[float] =
         logger.error("Provide exactly one parameter: either 'current_a' or 'power_kw'.")
 
 
-# if __name__ == '__main__':
-#     import os
-#     from dotenv import load_dotenv
-#     from pathlib import Path
-#
-#     BASE_DIR = Path(__file__).resolve().parent.parent
-#     env_path = BASE_DIR / ".env"
-#     load_dotenv(dotenv_path=env_path)
-#
-#     logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-#     test_config = {'inverter': {'location': {'latitude': 51.05483, 'longitude': 4.62877,
-#                                              'timezone': 'Europe/Brussels',
-#                                              'region_name_for_astral_optional': 'Belgium'}}}
-#     print(is_daylight(test_config))
+if __name__ == '__main__':
+    import os
+    from dotenv import load_dotenv
+    from pathlib import Path
+
+    BASE_DIR = Path(__file__).resolve().parent.parent
+    env_path = BASE_DIR / ".env"
+    load_dotenv(dotenv_path=env_path)
+
+    logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    test_config = {'inverter': {'location': {'latitude': 51.05483, 'longitude': 4.62877,
+                                             'timezone': 'Europe/Brussels', 'city': 'Putte',
+                                             'region_name_for_astral_optional': 'Belgium'}}}
+    print(is_daylight(test_config, True))
 #     test_config = {"host": "smtp.gmail.com", "port": 465,
 #                    "user": "", "sender_email": "",
 #                    "default_recipients": ["", ""]}
