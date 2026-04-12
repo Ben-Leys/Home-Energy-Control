@@ -369,11 +369,23 @@ class BatteryPredictor:
         return results
 
     def optimize_plan(self, df_plan, cur_dt, actual_soc_pct, state: Dict, app_config, db_handler,
-                      print_on_screen=False) -> pd.DataFrame:
+                      cur_solar_w: float = 0.0, cur_cons_w: float = 0.0, print_on_screen=False) -> pd.DataFrame:
         self.cur_dt = cur_dt
         plan_start_dt = cur_dt.replace(minute=(cur_dt.minute // 15) * 15, second=0, microsecond=0)
         opt_plan = df_plan[df_plan.index >= plan_start_dt].copy()
         opt_plan = opt_plan[~opt_plan.index.duplicated(keep='first')]
+
+        # Real-time values
+        if not opt_plan.empty:
+            real_solar_kwh = cur_solar_w / 4000.0
+            real_cons_kwh = cur_cons_w / 4000.0
+
+            # Update the first row
+            first_idx = opt_plan.index[0]
+            opt_plan.at[first_idx, 'solar_kwh'] = real_solar_kwh
+            opt_plan.at[first_idx, 'cons_kwh'] = real_cons_kwh
+            opt_plan.at[first_idx, 'net_kwh'] = real_solar_kwh - real_cons_kwh
+            logger.info(f"Plan First Row Updated: Solar {real_solar_kwh:.3f}kWh, Cons {real_cons_kwh:.3f}kWh")
 
         # Extract and align prices from global_app_state
         opt_plan = self.add_prices_to_plan(opt_plan, state, app_config, db_handler)
@@ -390,18 +402,6 @@ class BatteryPredictor:
             new_grid=0.0
         )
 
-        # First line soc is calculated in calculate_impact
-        # if not opt_plan.empty:
-        #     # 1. Calculate the first row's ending SOC
-        #     start_kwh = (actual_soc_pct / 100.0) * self.capacity_kwh
-        #     first_row = opt_plan.iloc[0]
-        #
-        #     # End kWh = Start kWh + Net Flow (Respecting battery limits)
-        #     end_kwh = max(0, min(self.capacity_kwh, start_kwh + first_row['net_kwh']))
-        #
-        #     # Convert back to percent and store in 'new_pct'
-        #     opt_plan.iat[0, opt_plan.columns.get_loc('new_pct')] = (end_kwh / self.capacity_kwh) * 100.0
-
         start_kwh = (actual_soc_pct / 100.0) * self.capacity_kwh
         opt_plan = self.calculate_impact(opt_plan, start_kwh)
         # pre_block_plan = opt_plan.copy()
@@ -416,22 +416,6 @@ class BatteryPredictor:
         # Clean up: remove block_c when battery is full
         opt_plan.loc[opt_plan['new_pct'] >= 98, 'block_c'] = False
         opt_plan = self.calculate_impact(opt_plan)
-
-        # diff_mask = opt_plan['new_pct'] != pre_block_plan['new_pct']
-        # differences = opt_plan[diff_mask]
-
-        # print("\n--- [DEBUG] Optimization Rule Impact ---")
-        # print(f"{'Timestamp':<20} | {'Old New_C':>10} | {'New New_C':>10} | {'Old SoC%':>10} | {'New SoC%':>10} | Blocked_c")
-        # print("-" * 75)
-        # for idx in differences.index:
-        #     old_c = pre_block_plan.at[idx, 'new_c']
-        #     new_c = opt_plan.at[idx, 'new_c']
-        #     old_soc = pre_block_plan.at[idx, 'new_pct']
-        #     new_soc = opt_plan.at[idx, 'new_pct']
-        #     block_c = opt_plan.at[idx, 'block_c']
-        #
-        #     print(f"{str(idx):<20} | {old_c:>10.4f} | {new_c:>10.4f} | {old_soc:>10.2f} | {new_soc:>10.2f} | {block_c}")
-        # print("----------------------------------------\n")
 
         # Apply rule: block discharge if later buy_price is higher
         opt_plan = self.apply_rule_block_discharge(opt_plan)

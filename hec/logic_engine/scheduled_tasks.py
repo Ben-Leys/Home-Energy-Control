@@ -518,7 +518,20 @@ def task_run_battery_predictor(app_config, db_handler: DatabaseHandler):
     try:
         if base_plan_df is not None:
             logger.debug("Optimizing prediction plan for current state...")
-            opt_plan_df = bp.optimize_plan(base_plan_df, now_utc, actual_soc, GLOBAL_APP_STATE, app_config, db_handler)
+            avg_1m_import_w = GLOBAL_APP_STATE.get('average_grid_import_watts', {}).get('60s', 0)
+            avg_1m_export_w = GLOBAL_APP_STATE.get('average_grid_export_watts', {}).get('60s', 0)
+            avg_1m_grid_w = avg_1m_import_w - avg_1m_export_w
+
+            avg_1m_prod_w = GLOBAL_APP_STATE.get('average_solar_production_watts', {}).get('60s', 0)
+
+            bat_w = GLOBAL_APP_STATE.get('battery_data', {}).get('power_w', 0)
+            evcc_w = GLOBAL_APP_STATE.get('evcc_loadpoint_state', {}).get('charge_current', 0) * 230
+
+            gross_consumption_w = avg_1m_prod_w + avg_1m_grid_w - min(0, bat_w)
+            house_consumption_w = max(gross_consumption_w - evcc_w, 0)
+
+            opt_plan_df = bp.optimize_plan(base_plan_df, now_utc, actual_soc, GLOBAL_APP_STATE, app_config, db_handler,
+                                           avg_1m_prod_w, house_consumption_w)
 
             # Store the finalized plan in app_state so the Vue dashboard can pick it up
             plan_list = opt_plan_df.reset_index().to_dict(orient='records')
