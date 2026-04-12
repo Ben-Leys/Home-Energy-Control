@@ -303,7 +303,7 @@ class SystemMediator:
                     and self.new_evcc_state != self.last_evcc_state)
 
         # Trigger A
-        if newly_connected or mode_changed_to_pv:
+        if newly_connected or (mode_changed_to_pv and is_connected):
             self.car_start_deadline = now + timedelta(minutes=2)
             self.car_refused_to_charge = False
             logger.info("Inverter grace period started: Car newly connected or mode changed.")
@@ -394,6 +394,7 @@ class SystemMediator:
             bat_w = GLOBAL_APP_STATE.get('battery_data', {}).get('power_w', 0)
             bat_w = min(bat_w, 0)
             home_use_w = grid_w + prod_w - bat_w
+            logger.info(f"Home use: {home_use_w}")
 
             # 2. Dynamic buffer calculation based on market prices
             buy_price = self.market.buy_price or 1.0
@@ -414,6 +415,7 @@ class SystemMediator:
             # 3. Target calculation
             raw_limit_w = home_use_w + (upper_limit_w / 3)
             desired_limit_w = max(0, min(raw_limit_w, self.inverter_client.standard_power_limit))
+            logger.info(f"Desired limit: {desired_limit_w}")
 
             # 4. Evaluate update condition
             elapsed_min = (now - self.last_pv_limit_change_time).total_seconds() / 60 \
@@ -437,10 +439,10 @@ class SystemMediator:
                 if still_importing and prod_is_capped:
                     desired_limit_w += (avg_5m_import_w * 3)
                     can_update = True
-                    logger.debug(f"Sustained import detected. Boosting limit to {desired_limit_w:.0f} W")
+                    logger.info(f"Sustained import detected. Boosting limit to {desired_limit_w:.0f} W")
 
             # 6 Minimum for battery charging
-            # If battery needs energy (SOC < 95%) and isn't blocked, ensure at least 1800W
+            # If battery needs energy (SOC < 95%) and isn't blocked, ensure at least 1600W
             battery_records = GLOBAL_APP_STATE.get("battery_records") or []
             bat_needing_charge = sum(1 for b in battery_records if b.get("state_of_charge_pct", 0) < 95)
 
@@ -453,14 +455,21 @@ class SystemMediator:
                 battery_count = max(1, battery_data.get('battery_count', 1))
                 max_charge_w = battery_data.get("max_consumption_w", 0)
                 max_charge_per_bat = max_charge_w / battery_count
-                bat_w = max_charge_per_bat * bat_needing_charge
-                new_desired_limit_w = desired_limit_w + bat_w
-                logger.debug(f"{bat_needing_charge} batteries < 95%: Boosting inverter limit from "
-                             f"{desired_limit_w:.0f}W to {new_desired_limit_w}W for charging.")
-                desired_limit_w = new_desired_limit_w
+                floor_w = max_charge_per_bat * bat_needing_charge
+                if desired_limit_w < floor_w:
+                    new_desired_limit_w = floor_w
+                    logger.info(f"{bat_needing_charge} batteries < 95%: Boosting inverter limit from "
+                                 f"{desired_limit_w:.0f}W to {new_desired_limit_w}W for charging.")
+                    desired_limit_w = new_desired_limit_w
+
+                    # Force an update if the current limit is significantly below the floor
+                    if cur_limit_w < floor_w - 200:
+                        can_update = True
+            logger.info(f"Desired limit: {desired_limit_w} W")
 
             # 7. Apply decision
             if can_update:
+                # Hardware limits
                 self.new_inv_limit = int(max(0, min(desired_limit_w, self.inverter_client.standard_power_limit)))
             else:
                 self.new_inv_limit = int(cur_limit_w)
@@ -485,6 +494,7 @@ class SystemMediator:
         """
         now = datetime.now(tz=pytz.UTC)
         lp = GLOBAL_APP_STATE.get('evcc_loadpoint_state', {})
+        bat_data = GLOBAL_APP_STATE.get("battery_data", {})
         bat_records = GLOBAL_APP_STATE.get("battery_records", [])
         lowest_soc = min([b.get("state_of_charge_pct", 5) for b in bat_records]) if bat_records else 5
         would_block_discharge = False
@@ -541,7 +551,7 @@ class SystemMediator:
         # Override if empty for too long
         if empty_too_long:
             if not is_force_plan:
-                logger.warning("Battery empty > 12h. Triggering 5min maintenance charge.")
+                logger.info("Battery empty > 12h. Triggering 5min maintenance charge.")
                 is_force_plan = True
                 plan_minutes_limit = 5.0
 
