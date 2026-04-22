@@ -75,8 +75,8 @@ class EvccApiClient:
             # Add a timestamp to the data for AppState consistency
             if isinstance(data, dict):
                 data["timestamp_utc_iso"] = datetime.now(timezone.utc).isoformat()
-                print(data)
-                logger.debug(f"EVCC API: Successfully fetched state. Grid: {data.get('grid', {}).get('power', 0)}W")
+                grid_power = (data.get('grid') or {}).get('power', 0)
+                logger.debug(f"EVCC API: Successfully fetched state. Grid: {grid_power}W")
                 return data
             else:
                 logger.warning(f"EVCC API: Response is not a dict: {data}")

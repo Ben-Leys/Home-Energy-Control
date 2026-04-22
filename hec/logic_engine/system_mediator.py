@@ -392,13 +392,13 @@ class SystemMediator:
             grid_w = GLOBAL_APP_STATE.get('p1_meter_data', {}).get('active_power_w', 0)
             prod_w = GLOBAL_APP_STATE.get('inverter_data', {}).get('pv_power_watts', 0)
             bat_w = GLOBAL_APP_STATE.get('battery_data', {}).get('power_w', 0)
-            bat_w = min(bat_w, 0)
-            home_use_w = grid_w + prod_w - bat_w
+            bat_discharge_w = abs(bat_w) if bat_w < 0 else 0  # Add battery to home use if discharging
+            home_use_w = grid_w + prod_w + bat_discharge_w
             logger.info(f"Home use: {home_use_w}")
 
             # 2. Dynamic buffer calculation based on market prices
             buy_price = self.market.buy_price or 1.0
-            price_ratio = abs(self.market.sell_price) / buy_price
+            price_ratio = abs(self.market.sell_price or 0) / buy_price
             price_diff = self.market.buy_price - abs(self.market.sell_price)
 
             if price_ratio < 0.166:  # 1/6th
@@ -434,7 +434,7 @@ class SystemMediator:
 
                 # Are we importing while the solar is artificially capped?
                 prod_is_capped = avg_5m_prod_w >= (cur_limit_w - 200)
-                still_importing = (avg_5m_import_w - desired_limit_w) > 150
+                still_importing = avg_5m_import_w > 250
 
                 if still_importing and prod_is_capped:
                     desired_limit_w += (avg_5m_import_w * 3)
@@ -444,7 +444,7 @@ class SystemMediator:
             # 6 Minimum for battery charging
             # If battery needs energy (SOC < 95%) and isn't blocked, ensure at least 1600W
             battery_records = GLOBAL_APP_STATE.get("battery_records") or []
-            bat_needing_charge = sum(1 for b in battery_records if b.get("state_of_charge_pct", 0) < 95)
+            bat_needing_charge = sum(1 for b in (battery_records or []) if (b.get("state_of_charge_pct") or 0) < 95)
 
             # Check if battery is in a state where it CAN charge
             is_charging_allowed = self.new_bat_mode not in [c.BatteryState.BATTERY_OFF,
@@ -455,15 +455,18 @@ class SystemMediator:
                 battery_count = max(1, battery_data.get('battery_count', 1))
                 max_charge_w = battery_data.get("max_consumption_w", 0)
                 max_charge_per_bat = max_charge_w / battery_count
-                floor_w = max_charge_per_bat * bat_needing_charge
-                if desired_limit_w < floor_w:
-                    new_desired_limit_w = floor_w
+                max_capacity_w = max_charge_per_bat * bat_needing_charge
+                bat_charge_w = bat_w if bat_w > 0 else 0
+                actual_capacity_w = max_capacity_w - bat_charge_w
+
+                if actual_capacity_w > 0:
+                    new_desired_limit_w = desired_limit_w + actual_capacity_w
                     logger.info(f"{bat_needing_charge} batteries < 95%: Boosting inverter limit from "
-                                 f"{desired_limit_w:.0f}W to {new_desired_limit_w}W for charging.")
+                                f"{desired_limit_w:.0f}W to {new_desired_limit_w}W for charging.")
                     desired_limit_w = new_desired_limit_w
 
-                    # Force an update if the current limit is significantly below the floor
-                    if cur_limit_w < floor_w - 200:
+                    # Force an update if the current limit is significantly below the new one
+                    if abs(desired_limit_w - cur_limit_w) >= 600:
                         can_update = True
             logger.info(f"Desired limit: {desired_limit_w} W")
 
@@ -720,7 +723,9 @@ class SystemMediator:
         # Validation
         state_changed, amps_changed = False, False
         if self.new_evcc_state is not None:
-            state_changed = self.new_evcc_state != cur_manual_state
+            internal_change = self.new_evcc_state != cur_manual_state
+            hardware_change = lp.mode != self.new_evcc_state.value
+            state_changed = internal_change or hardware_change
         if self.new_max_amps is not None:
             amps_changed = int(self.new_max_amps) != int(lp.max_current)
 

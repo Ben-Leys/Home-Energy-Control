@@ -518,11 +518,11 @@ def task_run_battery_predictor(app_config, db_handler: DatabaseHandler):
     try:
         if base_plan_df is not None:
             logger.debug("Optimizing prediction plan for current state...")
-            avg_1m_import_w = GLOBAL_APP_STATE.get('average_grid_import_watts', {}).get('60s', 0)
-            avg_1m_export_w = GLOBAL_APP_STATE.get('average_grid_export_watts', {}).get('60s', 0)
+            avg_1m_import_w = GLOBAL_APP_STATE.get('average_grid_import_watts', {}).get('60s') or 0
+            avg_1m_export_w = GLOBAL_APP_STATE.get('average_grid_export_watts', {}).get('60s') or 0
             avg_1m_grid_w = avg_1m_import_w - avg_1m_export_w
 
-            avg_1m_prod_w = GLOBAL_APP_STATE.get('average_solar_production_watts', {}).get('60s', 0)
+            avg_1m_prod_w = GLOBAL_APP_STATE.get('average_production_watts', {}).get('60s') or 0
 
             # bat_w = GLOBAL_APP_STATE.get('battery_data', {}).get('power_w', 0)
             evcc_w = GLOBAL_APP_STATE.get('evcc_loadpoint_state', {}).get('charge_current', 0) * 230
