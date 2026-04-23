@@ -291,6 +291,8 @@ class SystemMediator:
         lp = GLOBAL_APP_STATE.get('evcc_loadpoint_state', {})
         is_connected = lp.get('is_connected', False)
         is_charging = lp.get('is_charging', False)
+        inv_data = GLOBAL_APP_STATE.get('inverter_data', {})
+        cur_limit_w = inv_data.get('active_power_limit_watts', self.inverter_client.standard_power_limit)
 
         # 1. Grace period triggers
         # Reset refusal flag
@@ -350,12 +352,18 @@ class SystemMediator:
             self.new_inv_state = c.InverterManualState.INV_CMD_LIMIT_ZERO
             return
 
-        # B: If we are in a grace period or actively charging, we MUST have full production
-        if in_grace_period or is_charging:
+        # B. If actively charging, full production
+        if is_charging:
             self.new_inv_state = c.InverterManualState.INV_CMD_LIMIT_STANDARD
             return
 
-        # C: We pay to export. Limit production to home usage only.
+        # C: If in a grace period add minimum charge Watts to current limit
+        if in_grace_period:
+            self.new_inv_state = c.InverterManualState.INV_CMD_LIMIT_MANUAL
+            self.new_inv_limit = cur_limit_w + 1500
+            return
+
+        # D: We pay to export. Limit production to home usage only.
         if self.market.sell_price < 0:
             self.new_inv_state = c.InverterManualState.INV_CMD_LIMIT_TO_USE
             return
@@ -421,7 +429,7 @@ class SystemMediator:
             elapsed_min = (now - self.last_pv_limit_change_time).total_seconds() / 60 \
                 if self.last_pv_limit_change_time else 10
 
-            is_big_change = abs(raw_limit_w - cur_limit_w) >= 800
+            is_big_change = abs(raw_limit_w - cur_limit_w) >= 900
             is_time_elapsed = elapsed_min >= self.buffer_before_pv_limit_change
             is_over_threshold = abs(desired_limit_w - cur_limit_w) > (abs(upper_limit_w) / 2)
 
@@ -429,8 +437,8 @@ class SystemMediator:
 
             # 5. Long-term import correction
             if elapsed_min >= 5:
-                avg_5m_import_w = GLOBAL_APP_STATE.get('average_grid_import_watts', {}).get('5m', 0)
-                avg_5m_prod_w = GLOBAL_APP_STATE.get('average_solar_production_watts', {}).get('5m', 0)
+                avg_5m_import_w = GLOBAL_APP_STATE.get('average_grid_import_watts', {}).get('5m') or 0
+                avg_5m_prod_w = GLOBAL_APP_STATE.get('average_solar_production_watts', {}).get('5m') or 0
 
                 # Are we importing while the solar is artificially capped?
                 prod_is_capped = avg_5m_prod_w >= (cur_limit_w - 200)
