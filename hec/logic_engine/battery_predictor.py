@@ -494,137 +494,9 @@ class BatteryPredictor:
             blocked_candidates = [ts for ts in all_opt_solar_ts if ts not in allowed_timestamps]
 
             # Guard: Never block negative sell prices
-            blocked_candidates = [ts for ts in blocked_candidates if df_opt.at[ts, 'sell_price'] >= 0]
+            blocked_candidates = [ts for ts in blocked_candidates if df_opt.at[ts, 'buy_price'] >= 0]
 
             df_opt.loc[blocked_candidates, 'block_c'] = True
-
-        return df_opt
-
-    def apply_rule_block_charge_old(self, df_opt: pd.DataFrame) -> pd.DataFrame:
-        """
-        Blocks charging during the most expensive export periods of the day
-        if solar production exceeds battery capacity.
-        """
-        # Process each day independently
-        for date in pd.to_datetime(df_opt.index).normalize().unique():
-            day_mask = pd.to_datetime(df_opt.index).normalize() == date
-            day_df = df_opt[day_mask].copy()
-
-            day_excess = day_df.loc[day_df['net_kwh'] > 0, 'net_kwh'].sum()
-            if day_excess <= self.capacity_kwh * 1.3:
-                logger.debug(f"Rule Block Charge: Skipped {date.date()} - "
-                             f"Excess production ({day_excess:.1f} kWh) is insufficient "
-                             f"(threshold: {self.capacity_kwh * 1.2:.1f} kWh)")
-                continue
-
-            # 1. Identify all intervals where the battery COULD charge (net_energy > 0)
-            charge_intervals = day_df[day_df['net_kwh'] > 0].copy()
-
-            if charge_intervals.empty:
-                continue
-
-            # 2. Sort these intervals by Export Price (Ascending)
-            # We want to "allow" charging when selling to the grid earns us the LEAST.
-            charge_intervals = charge_intervals.sort_values(by='sell_price', ascending=True)
-
-            theoretical_soc = 0.0  # We start from "empty" to see how much daily solar we can fit
-            allowed_timestamps = []
-
-            for ts, row in charge_intervals.iterrows():
-                if theoretical_soc >= self.capacity_kwh:
-                    break
-
-                potential_charge = min(row['net_kwh'], self.max_charge_kw * self.dt_hours)
-                actual_added = min(potential_charge * self.charge_eff, self.capacity_kwh - theoretical_soc)
-
-                theoretical_soc += actual_added
-                allowed_timestamps.append(ts)
-
-            # 3. Block charge on any interval that wasn't in our "allowed" (cheapest) list
-            # only for rows where there is actually solar production (net_energy > 0)
-            all_solar_ts = day_df[day_df['net_kwh'] > 0].index
-            blocked_candidates = [ts for ts in all_solar_ts if ts not in allowed_timestamps]
-
-            # If sell_price is < 0, we MUST NOT block charging.
-            blocked_candidates = [
-                ts for ts in blocked_candidates
-                if df_opt.at[ts, 'sell_price'] >= 0
-            ]
-
-            df_opt.loc[blocked_candidates, 'block_c'] = True
-
-        # Remove last block_c in block of 4 or more as a buffer
-        is_blocked = df_opt['block_c'].astype(int)
-        # Check if the next interval is the end of the block
-        is_end_of_block = (is_blocked == 1) & (is_blocked.shift(-1, fill_value=0) == 0)
-        # Check if we have had at least 4 consecutive True values leading up to/including this one
-        has_four_consecutive = is_blocked.rolling(window=4).sum() >= 4
-        # Identify the specific index to flip
-        tail_buffer_mask = is_end_of_block & has_four_consecutive
-        # Flip those specific True values back to False
-        df_opt.loc[tail_buffer_mask, 'block_c'] = False
-        logger.debug(f"Rule Block Charge: Removed {tail_buffer_mask.sum()} tail-buffer slots.")
-
-        return df_opt
-
-    def apply_rule_block_discharge_old(self, df_opt: pd.DataFrame, min_price_diff: float = 0.01) -> pd.DataFrame:
-        """
-        Reactive Peak Shaving: Solves the most expensive grid-import peak,
-        recalculates the plan, and repeats until no solvable peaks remain.
-        """
-        max_iterations = 96  # Safety cap to prevent infinite loops
-        iteration = 0
-
-        while iteration < max_iterations:
-            # 1. Recalculate impact to get the latest 'new_grid' and 'new_pct'
-            df_opt = self.calculate_impact(df_opt)
-
-            # 2. Find the current WORST peak (highest buy_price not necessarily importing)
-            # Sort by price descending to fix the most expensive problem first
-            worst_peak = df_opt.sort_values(by='buy_price', ascending=False).iloc[0]
-            t_peak = worst_peak.name
-            peak_price = worst_peak['buy_price']
-            energy_needed = abs(worst_peak['new_grid'])
-
-            # 3. Find candidates to block (Look BACKWARDS from this peak)
-            # Stop at the most recent "Full Battery" event
-            full_times = df_opt.index[(df_opt.index < t_peak) & (df_opt['new_pct'] >= 98.0)]
-            t_start_search = full_times[-1] if not full_times.empty else df_opt.index[0]
-
-            # Candidates are cheaper slots currently discharging before the peak
-            candidates = df_opt.loc[t_start_search:t_peak].iloc[:-1]
-            candidates = candidates[
-                (candidates['block_d'] == False) &  # Not already blocked
-                (candidates['buy_price'] <= peak_price - min_price_diff)
-                ]
-            candidates = candidates.sort_values(by='buy_price', ascending=True)
-
-            if candidates.empty:
-                break
-
-            # 4. Attempt to solve this specific peak by blocking candidates
-            saved_for_this_peak = 0
-            for t_cand, _ in candidates.iterrows():
-                if saved_for_this_peak >= energy_needed:
-                    break
-
-                # Block the slot
-                df_opt.at[t_cand, 'block_d'] = True
-
-                # We must recalculate within the candidate loop to see if the "bridge"
-                # to the peak is actually working
-                df_opt = self.calculate_impact(df_opt)
-
-                # Check if our target peak actually improved
-                new_peak_grid = df_opt.at[t_peak, 'new_grid']
-                improvement = new_peak_grid - worst_peak['new_grid']
-
-                if improvement > 0.001:
-                    saved_for_this_peak += improvement
-                    # Update our reference for the next candidate in this inner loop
-                    worst_peak['new_grid'] = new_peak_grid
-
-            iteration += 1
 
         return df_opt
 
@@ -765,149 +637,6 @@ class BatteryPredictor:
 
         return df_opt
 
-    def apply_rule_force_charge_v2(self, df_opt: pd.DataFrame, min_price_diff: float = 0.05) -> pd.DataFrame:
-        """
-        Opportunistic Force Charge: Starts from the cheapest hours and checks if
-        charging there reduces total cost before the battery next hits 98%.
-        """
-        # 1. Baseline
-        df_opt = self.calculate_impact(df_opt)
-        best_total_cost = float(self.calculate_cost(df_opt).get('total_net_cost', 0))
-
-        # 2. Candidates: Sort all intervals by buy_price (cheapest first)
-        # We skip intervals where battery is already full
-        cheap_candidates = df_opt[df_opt['new_pct'] < 98.0].sort_values(by='buy_price', ascending=True)
-
-        for t_cand, cand_row in cheap_candidates.iterrows():
-            cand_price = float(cand_row['buy_price'])
-            print(f"Force charge test for {t_cand}: {cand_price}")
-
-            # 3. Define the look-ahead window: from now until the battery is full (>=98%)
-            future_full = df_opt.index[(df_opt.index > t_cand) & (df_opt['new_pct'] >= 98.0)]
-            t_end_search = future_full[0] if not future_full.empty else df_opt.index[-1]
-
-            window = df_opt.loc[t_cand:t_end_search]
-
-            # 4. Quick filter: Is there any price in this window high enough to justify charging?
-            # If the highest price in the window isn't at least min_price_diff higher, skip.
-            if window['buy_price'].max() < (cand_price + min_price_diff):
-                continue
-
-            # 5. Trial durations
-            for minutes in [15, 10, 5]:
-                print(f"   {minutes} minutes")
-                # Save original state
-                old_force_c = df_opt.at[t_cand, 'force_c']
-                old_force_time = df_opt.at[t_cand, 'force_time']
-
-                # Apply force charge
-                df_opt.at[t_cand, 'force_c'] = True
-                df_opt.at[t_cand, 'force_time'] = minutes
-
-                # Calculate impact and check cost
-                df_opt = self.calculate_impact(df_opt)
-                df_opt = self.apply_rule_block_discharge(df_opt)
-                df_opt = self.calculate_impact(df_opt)
-                trial_cost = float(self.calculate_cost(df_opt, False).get('total_net_cost', 0))
-                print(f"   New limit_i {df_opt.at[t_cand, 'limit_i']}")
-                print(f"   {trial_cost} new cost. Old cost was {best_total_cost}")
-                # Profit check: Did we actually save money?
-                if trial_cost < (best_total_cost - 0.005):
-                    best_total_cost = trial_cost
-                    logger.info(f"Force Charge: {t_cand} ({minutes}m) saved cost. New Total: €{best_total_cost:.4f}")
-                    break  # Keep these minutes and move to the next cheapest interval
-                else:
-                    # REVERT
-                    df_opt.at[t_cand, 'force_c'] = old_force_c
-                    df_opt.at[t_cand, 'force_time'] = old_force_time
-                    df_opt = self.calculate_impact(df_opt)
-                # input("continue?")
-
-        return df_opt
-
-    def apply_rule_force_charge_v3(self, df_opt: pd.DataFrame, min_price_diff: float = 0.05) -> pd.DataFrame:
-        """
-        Cumulative Force Charge: Stacks the cheapest intervals of the day and
-        re-calculates the block-discharge logic to find the true global minimum.
-        """
-        # 1. Setup
-        df_working = df_opt.copy()
-        unique_days = df_working.index.normalize().unique()
-
-        # Track the absolute best version of the whole plan
-        final_best_df = df_working.copy()
-        current_best_total_cost = float(self.calculate_cost(final_best_df).get('total_net_cost_and_inventory', 0))
-
-        for day in unique_days:
-            logger.info(f"Analyzing Force Charge potential for {day.date()}...")
-
-            # Get candidates for this day, sorted by buy_price
-            day_mask = df_working.index.normalize() == day
-            day_df = df_working[day_mask]
-
-            # We only look at the first 15 cheapest slots (approx 3.75h of charging)
-            # Skip slots where battery is already 100% or price is too high vs the day's max
-            day_max_price = day_df['buy_price'].max()
-            candidates = day_df[day_df['buy_price'] < (day_max_price - min_price_diff)]
-            candidates = candidates.sort_values(by='buy_price', ascending=True).head(15)
-
-            if candidates.empty:
-                continue
-
-            best_day_df = final_best_df.copy()
-            best_day_cost = current_best_total_cost
-
-            # Cumulative stack: Each loop keeps the previous ones 'Forced'
-            trial_df = final_best_df.copy()
-
-            for i, (t_cand, _) in enumerate(candidates.iterrows()):
-                # 4. Set current candidate to 15 mins
-                trial_df.at[t_cand, 'force_c'] = True
-                trial_df.at[t_cand, 'force_time'] = 15
-
-                # 5. The "Truth" Calculation: Impact -> Blocks -> Impact
-                temp_df = trial_df.copy()
-                temp_df = self.calculate_impact(temp_df)
-                temp_df = self.apply_rule_block_discharge(temp_df)
-                temp_df = self.calculate_impact(temp_df)
-
-                # 6. Cost Evaluation
-                trial_cost = float(self.calculate_cost(temp_df).get('total_net_cost_and_inventory', 0))
-
-                if trial_cost < (best_day_cost - 0.005):
-                    # 7. Refinement: Check if 10 or 5 minutes is even better for this specific slot
-                    refined_best_t = 15
-                    refined_best_cost = trial_cost
-
-                    for mins in [10, 5]:
-                        refine_df = trial_df.copy()
-                        refine_df.at[t_cand, 'force_time'] = mins
-                        refine_df = self.calculate_impact(refine_df)
-                        refine_df = self.apply_rule_block_discharge(refine_df)
-                        refine_df = self.calculate_impact(refine_df)
-
-                        refine_cost = float(self.calculate_cost(refine_df).get('total_net_cost_and_inventory', 0))
-                        if refine_cost < (refined_best_cost - 0.005):
-                            refined_best_cost = refine_cost
-                            refined_best_t = mins
-
-                    # Commit this slot to the cumulative trial
-                    trial_df.at[t_cand, 'force_time'] = refined_best_t
-                    best_day_cost = refined_best_cost
-                    best_day_df = temp_df.copy()
-                    logger.debug(f"Added {t_cand} ({refined_best_t}m) to stack. New cost: {best_day_cost:.4f}")
-                else:
-                    # If adding the i-th cheapest slot doesn't help,
-                    # we don't 'Force' it in trial_df for the next iterations
-                    trial_df.at[t_cand, 'force_c'] = False
-                    trial_df.at[t_cand, 'force_time'] = 0
-
-            # Update the global plan with the best version found for this day
-            final_best_df = best_day_df
-            current_best_total_cost = best_day_cost
-
-        return final_best_df
-
 
 if __name__ == "__main__":
     import pytz
@@ -928,8 +657,8 @@ if __name__ == "__main__":
     cd = ConsumptionPredictor(db_handler)
 
     # Fill app_state with NEPIs from PricePoints in database
-    first_day_start = datetime(2026, 4, 2, 23, 00, 0, tzinfo=pytz.UTC)
-    first_day_end = datetime(2026, 4, 3, 21, 45, 0, tzinfo=pytz.UTC)
+    first_day_start = datetime(2026, 4, 24, 22, 00, 0, tzinfo=pytz.UTC)
+    first_day_end = datetime(2026, 4, 25, 21, 45, 0, tzinfo=pytz.UTC)
     price_points = db_handler.get_da_prices(first_day_start.astimezone(local_tz))
     process_price_points_to_app_state(price_points, first_day_start, "electricity_prices_today", config, db_handler)
 
@@ -939,8 +668,8 @@ if __name__ == "__main__":
     last_soc_day1 = first_plan_df['soc_pct'].iloc[-1]
 
     # Fill app_state with NEPIs
-    second_day_start = datetime(2026, 4, 3, 22, 00, 0, tzinfo=pytz.UTC)
-    second_day_end = datetime(2026, 4, 4, 21, 45, 0, tzinfo=pytz.UTC)
+    second_day_start = datetime(2026, 4, 25, 22, 00, 0, tzinfo=pytz.UTC)
+    second_day_end = datetime(2026, 4, 26, 21, 45, 0, tzinfo=pytz.UTC)
     price_points = db_handler.get_da_prices(second_day_start.astimezone(local_tz))
     process_price_points_to_app_state(price_points, second_day_start, "electricity_prices_tomorrow", config, db_handler)
 

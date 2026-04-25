@@ -218,8 +218,7 @@ class SystemMediator:
         cur_state = GLOBAL_APP_STATE.get('evcc_manual_state', None)
 
         # Is amperage calculation needed?
-        is_managed_charging = (lp.smart_cost_active or lp.plan_active or
-                               self.app_mediator_goal == c.MediatorGoal.CHARGE_NOW_WITH_CAPACITY_RATE)
+        is_managed_charging = (lp.smart_cost_active or lp.plan_active or lp.mode == 'now')
         if not is_managed_charging or self.app_mediator_goal == c.MediatorGoal.CHARGE_NOW_NO_CAPACITY_RATE:
             self.new_max_amps = self.evcc_client.max_current
             return
@@ -234,9 +233,10 @@ class SystemMediator:
 
         # Starting charging, force 6A
         if is_starting and is_managed_charging and not lp.is_charging:
-            self.new_max_amps = self.evcc_client.min_current
-            logger.info(f"Initial charge command: Starting at {self.new_max_amps}A.")
-            return
+            start_at_lowest_amp = True
+            logger.info(f"Initial charge command: Starting at lowest A.")
+        else:
+            start_at_lowest_amp = False
 
         # Calculate Available Power
         grid_kw = GLOBAL_APP_STATE.get('p1_meter_data', {}).get('active_power_w', 0) / 1000
@@ -264,6 +264,7 @@ class SystemMediator:
 
         # Stop or start
         if target_amp >= self.evcc_client.min_current:
+            target_amp = self.evcc_client.min_current if start_at_lowest_amp else target_amp
             self._resume_charging(target_amp)
         else:
             self._pause_charging(target_amp, lp)
@@ -349,11 +350,11 @@ class SystemMediator:
         # 3. Apply rules
         # A: We pay to use grid power. Turn off inverter immediately.
         if self.market.buy_price < 0:
-            self.new_inv_state = c.InverterManualState.INV_CMD_LIMIT_ZERO
+            self.new_inv_state = c.InverterManualState.INV_CMD_LIMIT_TO_USE
             return
 
         # B. If actively charging, full production
-        if is_charging:
+        if is_charging and self.new_evcc_state != c.EVCCManualState.EVCC_CMD_STATE_OFF:
             self.new_inv_state = c.InverterManualState.INV_CMD_LIMIT_STANDARD
             return
 
@@ -404,8 +405,36 @@ class SystemMediator:
             home_use_w = grid_w + prod_w + bat_discharge_w
             logger.info(f"Home use: {home_use_w}")
 
-            # 2. Dynamic buffer calculation based on market prices
             buy_price = self.market.buy_price or 1.0
+            # NEGATIVE BUY PRICE
+            if buy_price < 0:
+                capacity_w = self.current_max_peak_kw * 1000
+                negative_price_reserve_w = 200
+                target_import_w = capacity_w - negative_price_reserve_w
+
+                desired_limit_w = max(0, home_use_w - target_import_w)
+                logger.info(
+                    f"Negative price mode: capacity={capacity_w:.0f}W, "
+                    f"target_import={target_import_w:.0f}W, "
+                    f"desired_limit={desired_limit_w:.0f}W"
+                )
+
+                elapsed_min = (now - self.last_pv_limit_change_time).total_seconds() / 60 \
+                    if self.last_pv_limit_change_time else 10
+                cur_limit_w = inv_data.get('active_power_limit_watts',
+                                           self.inverter_client.standard_power_limit)
+                is_big_change = abs(desired_limit_w - cur_limit_w) >= 300
+                is_time_elapsed = elapsed_min >= self.buffer_before_pv_limit_change
+                is_over_threshold = abs(desired_limit_w - cur_limit_w) > 150
+
+                if is_big_change or (is_time_elapsed and is_over_threshold):
+                    self.new_inv_limit = int(max(0, min(desired_limit_w, self.inverter_client.standard_power_limit)))
+                else:
+                    self.new_inv_limit = int(cur_limit_w)
+                return
+
+            # NORMAL BUY PRICE >= 0
+            # 2. Dynamic buffer calculation based on market prices
             price_ratio = abs(self.market.sell_price or 0) / buy_price
             price_diff = self.market.buy_price - abs(self.market.sell_price)
 
@@ -620,7 +649,7 @@ class SystemMediator:
             self.new_bat_mode = c.BatteryState.BATTERY_BLOCK_CHARGE
             return
 
-        if is_block_d or would_block_discharge:
+        if is_block_d or would_block_discharge or self.market.buy_price < 0:
             avg_kw_2m = (GLOBAL_APP_STATE.get('average_grid_import_watts', {}).get("2m", 0)) / 1000
             may_cause_peak = avg_kw_2m > self.current_max_peak_kw
             if not may_cause_peak:

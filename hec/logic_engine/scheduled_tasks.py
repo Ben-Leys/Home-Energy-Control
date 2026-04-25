@@ -254,7 +254,8 @@ def task_poll_evcc_state(evcc_client: Optional[EvccApiClient], db_handler: Datab
     if evcc_state:
         cur_state = EVCCOverallState(timestamp_utc_iso=evcc_state.get("timestamp_utc_iso"),
                                      residual_power=evcc_state.get('residualPower'))
-        lp_data = evcc_state.get('loadpoints')[0]
+        loadpoints = evcc_state.get('loadpoints')
+        lp_data = loadpoints[0] if loadpoints else None
         currents = lp_data.get("chargeCurrents", [])
         charge_current = sum(currents) if currents else None
         cur_lp = EVCCLoadpointState(loadpoint_id=1,
