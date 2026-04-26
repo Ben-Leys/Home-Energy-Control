@@ -160,12 +160,12 @@ class SystemMediator:
         self._determine_evcc_state()
         self._recalculate_charging_amperage()
 
+        # Battery
+        self._determine_battery_state()
+
         # Inverter
         self._determine_inverter_state()
         self._recalculate_inverter_limit()
-
-        # Battery
-        self._determine_battery_state()
 
         logger.debug(
             f"Auto Mode Logic: Goal={self.app_mediator_goal} | "
@@ -348,7 +348,7 @@ class SystemMediator:
         self.last_evcc_state = self.new_evcc_state
 
         # 3. Apply rules
-        # A: We pay to use grid power. Turn off inverter immediately.
+        # A: Grid pays to consume. Inverter limit to use minus capacity rate.
         if self.market.buy_price < 0:
             self.new_inv_state = c.InverterManualState.INV_CMD_LIMIT_TO_USE
             return
