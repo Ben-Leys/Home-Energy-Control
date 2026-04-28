@@ -494,7 +494,7 @@ class BatteryPredictor:
             blocked_candidates = [ts for ts in all_opt_solar_ts if ts not in allowed_timestamps]
 
             # Guard: Never block negative sell prices
-            blocked_candidates = [ts for ts in blocked_candidates if df_opt.at[ts, 'buy_price'] >= 0]
+            blocked_candidates = [ts for ts in blocked_candidates if df_opt.at[ts, 'sell_price'] >= 0]
 
             df_opt.loc[blocked_candidates, 'block_c'] = True
 
