@@ -218,12 +218,13 @@ class SystemMediator:
         cur_state = GLOBAL_APP_STATE.get('evcc_manual_state', None)
 
         # Is amperage calculation needed?
-        is_managed_charging = (lp.smart_cost_active or lp.plan_active or lp.mode == 'now')
+        is_managed_charging = (lp.smart_cost_active or lp.plan_active or
+                               self.app_mediator_goal == c.MediatorGoal.CHARGE_NOW_WITH_CAPACITY_RATE)
         if not is_managed_charging or self.app_mediator_goal == c.MediatorGoal.CHARGE_NOW_NO_CAPACITY_RATE:
             self.new_max_amps = self.evcc_client.max_current
             return
 
-        # Is charging, starting or paused?
+        # Is charging starting?
         is_starting = (self.new_evcc_state != cur_state and
                        self.new_evcc_state != c.EVCCManualState.EVCC_CMD_STATE_OFF)
 
@@ -232,7 +233,7 @@ class SystemMediator:
             return
 
         # Starting charging, force 6A
-        if is_starting and is_managed_charging and not lp.is_charging:
+        if is_starting and self.new_evcc_state != c.EVCCManualState.EVCC_CMD_STATE_PV and not lp.is_charging:
             start_at_lowest_amp = True
             logger.info(f"Initial charge command: Starting at lowest A.")
         else:
@@ -553,7 +554,8 @@ class SystemMediator:
 
         # B: Car is charging
         if lp.get('is_charging', False):
-            self.new_bat_mode = c.BatteryState.BATTERY_BLOCK_DISCHARGE
+            # Blocked by evcc
+            # self.new_bat_mode = c.BatteryState.BATTERY_BLOCK_DISCHARGE
             # Clear any ongoing force-charge timers
             self.battery_force_start_time = None
             return
@@ -649,7 +651,7 @@ class SystemMediator:
             self.new_bat_mode = c.BatteryState.BATTERY_BLOCK_CHARGE
             return
 
-        if is_block_d or would_block_discharge or self.market.buy_price < 0:
+        if is_block_d or would_block_discharge:
             avg_kw_2m = (GLOBAL_APP_STATE.get('average_grid_import_watts', {}).get("2m", 0)) / 1000
             may_cause_peak = avg_kw_2m > self.current_max_peak_kw
             if not may_cause_peak:

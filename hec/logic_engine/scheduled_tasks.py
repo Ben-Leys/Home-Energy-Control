@@ -526,7 +526,7 @@ def task_run_battery_predictor(app_config, db_handler: DatabaseHandler):
             avg_1m_prod_w = GLOBAL_APP_STATE.get('average_production_watts', {}).get('60s') or 0
 
             # bat_w = GLOBAL_APP_STATE.get('battery_data', {}).get('power_w', 0)
-            evcc_w = GLOBAL_APP_STATE.get('evcc_loadpoint_state', {}).get('charge_current', 0) * 230
+            evcc_w = (GLOBAL_APP_STATE.get('evcc_loadpoint_state', {}).get('charge_current') or 0) * 230
 
             gross_consumption_w = avg_1m_prod_w + avg_1m_grid_w # - min(0, bat_w)
             house_consumption_w = gross_consumption_w - evcc_w
