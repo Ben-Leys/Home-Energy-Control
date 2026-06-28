@@ -12,6 +12,7 @@ from hec.database_ops.db_handler import DatabaseHandler
 from hec.logic_engine.cost_calculator import calculate_total_costs_for_period, calculate_battery_saving_for_period
 from hec.logic_engine.price_predictor import EnergyPricePredictor
 from hec.reporting.plot_generator import generate_price_solar_plot, generate_future_price_plot
+from hec.reporting.summary_timing import DailySummaryTimingProfiler
 from hec.utils.utils import send_email_with_attachments
 
 logger = logging.getLogger(__name__)
@@ -253,166 +254,184 @@ class DailySummaryGenerator:
 
         return "".join(html)
 
-    def generate_and_send_summary(self, app_config) -> bool:
+    def generate_and_send_summary(self, app_config, profiler: Optional[DailySummaryTimingProfiler] = None) -> bool:
         """Orchestrates data fetching, processing, plotting, and emailing."""
         logger.info("Starting generation of daily energy summary email.")
-        # n_date = now, t_date = tomorrow, y_date = yesterday
-        n_date = datetime.now().astimezone()
-        t_date = (n_date + timedelta(days=1)).date()
-        y_date = (n_date - timedelta(days=1)).date()
+        profiler = profiler or DailySummaryTimingProfiler()
+        status = "error"
 
-        # --- 1. Get (D+1) Processed Net Prices from AppState ---
-        n_date_nepi = GLOBAL_APP_STATE.get("electricity_prices_today", [])
-        t_date_nepi = GLOBAL_APP_STATE.get("electricity_prices_tomorrow", [])
-        if not (len(n_date_nepi) == 24 or len(n_date_nepi) == 96) or not \
-                (len(t_date_nepi) == 24 or len(t_date_nepi) == 96):
-            logger.info(f"Electricity price data length not as expected: 24 or 96. "
-                        f"Today: {len(n_date_nepi)}, tomorrow: {len(t_date_nepi)}. DST change?")
+        try:
+            with profiler.step("data_loading"):
+                # n_date = now, t_date = tomorrow, y_date = yesterday
+                n_date = datetime.now().astimezone()
+                t_date = (n_date + timedelta(days=1)).date()
+                y_date = (n_date - timedelta(days=1)).date()
 
-        # --- 2. Get Elia Solar Forecast for "Tomorrow" (D+1) ---
-        local_tz = n_date.tzinfo
-        t_date_start = datetime.combine(t_date, datetime.min.time(), tzinfo=local_tz).astimezone(timezone.utc)
-        t_date_end = t_date_start + timedelta(days=1)
+                # --- 1. Get (D+1) Processed Net Prices from AppState ---
+                n_date_nepi = GLOBAL_APP_STATE.get("electricity_prices_today", [])
+                t_date_nepi = GLOBAL_APP_STATE.get("electricity_prices_tomorrow", [])
+                if not (len(n_date_nepi) == 24 or len(n_date_nepi) == 96) or not \
+                        (len(t_date_nepi) == 24 or len(t_date_nepi) == 96):
+                    logger.info(f"Electricity price data length not as expected: 24 or 96. "
+                                f"Today: {len(n_date_nepi)}, tomorrow: {len(t_date_nepi)}. DST change?")
 
-        elia_solar_fc_raw = [f for f in self.forecasts.get("solar")
-                             if t_date_start <= f["timestamp_utc"] < t_date_end]
+                # --- 2. Get Elia Solar Forecast for "Tomorrow" (D+1) ---
+                local_tz = n_date.tzinfo
+                t_date_start = datetime.combine(t_date, datetime.min.time(), tzinfo=local_tz).astimezone(timezone.utc)
+                t_date_end = t_date_start + timedelta(days=1)
 
-        forecast_resolution = 15
-        t_date_solar: List[Optional[float]] = [None] * (24 * 60 // 15)  # Init empty list with expected interval
-        inverter_kw = self.app_config.get('inverter', {}).get('standard_power_limit') / 1000
-        if elia_solar_fc_raw:
-            forecast_resolution = elia_solar_fc_raw[0].get("resolution_minutes", 15)
-            num_intervals_per_day = (24 * 60) // forecast_resolution
-            t_date_solar: List[Optional[float]] = [None] * num_intervals_per_day
-            panel_kw = self.app_config.get('inverter', {}).get('panel_peak_w') / 1000
+                elia_solar_fc_raw = [f for f in self.forecasts.get("solar")
+                                     if t_date_start <= f["timestamp_utc"] < t_date_end]
 
-            for item in elia_solar_fc_raw:
-                # Map to interval index
-                item_ts_utc = item['timestamp_utc']
-                item_ts_local = item_ts_utc.astimezone(local_tz)
+                forecast_resolution = 15
+                t_date_solar: List[Optional[float]] = [None] * (24 * 60 // 15)
+                inverter_kw = self.app_config.get('inverter', {}).get('standard_power_limit') / 1000
+                if elia_solar_fc_raw:
+                    forecast_resolution = elia_solar_fc_raw[0].get("resolution_minutes", 15)
+                    num_intervals_per_day = (24 * 60) // forecast_resolution
+                    t_date_solar: List[Optional[float]] = [None] * num_intervals_per_day
+                    panel_kw = self.app_config.get('inverter', {}).get('panel_peak_w') / 1000
 
-                interval_index = (item_ts_local.hour * (60 // forecast_resolution)) + (
-                        item_ts_local.minute // forecast_resolution)
-                if 0 <= interval_index < num_intervals_per_day:
-                    forecast_mwh = item.get('most_recent_forecast_mwh', 0.0)
-                    capacity_mw = item.get('monitored_capacity_mw')
-                    estimated_kw = (forecast_mwh / capacity_mw) * panel_kw if capacity_mw > 0 else 0
-                    t_date_solar[interval_index] = min(estimated_kw, inverter_kw)  # Cap at inverter_kw
+                    for item in elia_solar_fc_raw:
+                        # Map to interval index
+                        item_ts_utc = item['timestamp_utc']
+                        item_ts_local = item_ts_utc.astimezone(local_tz)
 
-        # --- 3. Generate Price/Solar Plot for "Tomorrow" (D+1) ---
-        price_resolution = n_date_nepi[0].resolution_minutes
-        fix_buy = t_date_nepi[0].net_prices_eur_per_kwh.get("fixed").get("buy")
-        fix_sell = t_date_nepi[0].net_prices_eur_per_kwh.get("fixed").get("sell")
-        plot_buffer_d1 = generate_price_solar_plot(
-            t_date_local=t_date,
-            n_date_nepi=n_date_nepi[- (10 * (60 // price_resolution)):],  # Today's 10 hours for context
-            t_date_nepi=t_date_nepi,
-            t_date_solar=t_date_solar,
-            fixed_buy_price=fix_buy,
-            fixed_sell_price=fix_sell,
-            forecast_resolution=forecast_resolution,
-            inverter_kw=inverter_kw
-        )
+                        interval_index = (item_ts_local.hour * (60 // forecast_resolution)) + (
+                                item_ts_local.minute // forecast_resolution)
+                        if 0 <= interval_index < num_intervals_per_day:
+                            forecast_mwh = item.get('most_recent_forecast_mwh', 0.0)
+                            capacity_mw = item.get('monitored_capacity_mw')
+                            estimated_kw = (forecast_mwh / capacity_mw) * panel_kw if capacity_mw > 0 else 0
+                            t_date_solar[interval_index] = min(estimated_kw, inverter_kw)
 
-        # --- 4. Price Prediction for D+1 to D+5 ---
-        predicted_prices_dfs = []
-        if not self.price_predictor.is_trained:
-            logger.info("Price predictor model not trained. Training now for email report...")
-            train_end = y_date
-            train_start = date.fromisoformat(self.app_config.get('historic_data').get('start_date'))
+            with profiler.step("plotting"):
+                # --- 3. Generate Price/Solar Plot for "Tomorrow" (D+1) ---
+                price_resolution = n_date_nepi[0].resolution_minutes
+                fix_buy = t_date_nepi[0].net_prices_eur_per_kwh.get("fixed").get("buy")
+                fix_sell = t_date_nepi[0].net_prices_eur_per_kwh.get("fixed").get("sell")
+                plot_buffer_d1 = generate_price_solar_plot(
+                    t_date_local=t_date,
+                    n_date_nepi=n_date_nepi[- (10 * (60 // price_resolution)):],
+                    t_date_nepi=t_date_nepi,
+                    t_date_solar=t_date_solar,
+                    fixed_buy_price=fix_buy,
+                    fixed_sell_price=fix_sell,
+                    forecast_resolution=forecast_resolution,
+                    inverter_kw=inverter_kw
+                )
 
-            prediction_start_dt = datetime.now()
-            self.price_predictor.train_model(train_start, train_end)
-            logger.info(f"Training finished. Trained {(train_end - train_start).days} days of data "
-                        f"in {(datetime.now() - prediction_start_dt).total_seconds():.2f} seconds")
+            predicted_prices_dfs = []
+            with profiler.step("price_model_training"):
+                # --- 4. Price Prediction for D+1 to D+5 ---
+                if not self.price_predictor.is_trained:
+                    logger.info("Price predictor model not trained. Training now for email report...")
+                    train_end = y_date
+                    train_start = date.fromisoformat(self.app_config.get('historic_data').get('start_date'))
 
-        if self.price_predictor.is_trained:
-            elia_forecasts_d1_d5 = self._get_elia_forecasts_for_days(
-                start_date_local=t_date,
-                num_days=5
-            )
-            for i in range(5):  # D+1 to D+5
-                predict_date = t_date + timedelta(days=i)
-                # Prepare Elia forecasts for this specific predict_date
-                daily_elia_fc_for_predictor = {}
-                for fc_type in ["solar", "wind", "grid_load"]:
-                    daily_elia_fc_for_predictor[fc_type] = [
-                        rec for rec in elia_forecasts_d1_d5.get(fc_type)
-                        if rec['timestamp_utc'].astimezone(local_tz).date() == predict_date
-                    ]
+                    prediction_start_dt = datetime.now()
+                    self.price_predictor.train_model(train_start, train_end)
+                    logger.info(f"Training finished. Trained {(train_end - train_start).days} days of data "
+                                f"in {(datetime.now() - prediction_start_dt).total_seconds():.2f} seconds")
 
-                day_prediction_df = self.price_predictor.predict_prices_for_day(predict_date,
-                                                                                daily_elia_fc_for_predictor)
-                if day_prediction_df is not None:
-                    predicted_prices_dfs.append(day_prediction_df)
+            with profiler.step("price_prediction"):
+                if self.price_predictor.is_trained:
+                    elia_forecasts_d1_d5 = self._get_elia_forecasts_for_days(
+                        start_date_local=t_date,
+                        num_days=5
+                    )
+                    for i in range(5):  # D+1 to D+5
+                        predict_date = t_date + timedelta(days=i)
+                        # Prepare Elia forecasts for this specific predict_date
+                        daily_elia_fc_for_predictor = {}
+                        for fc_type in ["solar", "wind", "grid_load"]:
+                            daily_elia_fc_for_predictor[fc_type] = [
+                                rec for rec in elia_forecasts_d1_d5.get(fc_type)
+                                if rec['timestamp_utc'].astimezone(local_tz).date() == predict_date
+                            ]
 
-        plot_buffer_predictions = None
-        if predicted_prices_dfs:
-            plot_buffer_predictions = generate_future_price_plot(self.db_handler, app_config, predicted_prices_dfs,
-                                                                 t_date, inverter_kw)
+                        day_prediction_df = self.price_predictor.predict_prices_for_day(predict_date,
+                                                                                        daily_elia_fc_for_predictor)
+                        if day_prediction_df is not None:
+                            predicted_prices_dfs.append(day_prediction_df)
 
-        # --- 5. Calculate recent costs ---
-        if n_date.day == 1:  # First day of the month
-            end_date = n_date.date() - timedelta(days=1)
-            start_date = end_date.replace(day=1)
-        else:  # Within the current month
-            start_date = n_date.replace(day=1).date()
-            end_date = (start_date + timedelta(days=31)).replace(day=1) - timedelta(days=1)
-            end_date = min(end_date, y_date)
-        first_day_of_year = start_date.replace(day=1, month=1)
+            plot_buffer_predictions = None
+            with profiler.step("plotting"):
+                if predicted_prices_dfs:
+                    plot_buffer_predictions = generate_future_price_plot(self.db_handler, app_config,
+                                                                         predicted_prices_dfs,
+                                                                         t_date, inverter_kw)
 
-        y_date_costs = calculate_total_costs_for_period(y_date, y_date, self.app_config,
-                                                        self.db_handler, self.tariff_manager)
-        n_month_costs = calculate_total_costs_for_period(start_date, end_date, self.app_config,
-                                                         self.db_handler, self.tariff_manager)
-        n_year_costs = calculate_total_costs_for_period(first_day_of_year, end_date, self.app_config,
-                                                        self.db_handler, self.tariff_manager)
+            with profiler.step("cost_calculation"):
+                # --- 5. Calculate recent costs ---
+                if n_date.day == 1:  # First day of the month
+                    end_date = n_date.date() - timedelta(days=1)
+                    start_date = end_date.replace(day=1)
+                else:  # Within the current month
+                    start_date = n_date.replace(day=1).date()
+                    end_date = (start_date + timedelta(days=31)).replace(day=1) - timedelta(days=1)
+                    end_date = min(end_date, y_date)
+                first_day_of_year = start_date.replace(day=1, month=1)
 
-        # --- 5.B Calculate battery savings ---
-        y_date_savings = calculate_battery_saving_for_period(y_date, y_date, self.app_config,
-                                                             self.db_handler, self.tariff_manager)
-        n_month_savings = calculate_battery_saving_for_period(start_date, end_date, self.app_config,
-                                                              self.db_handler, self.tariff_manager)
-        n_year_savings = calculate_battery_saving_for_period(first_day_of_year, end_date, self.app_config,
-                                                             self.db_handler, self.tariff_manager)
-        total_savings = calculate_battery_saving_for_period(date(2025, 10, 28), end_date,
-                                                            self.app_config, self.db_handler, self.tariff_manager)
-        # --- 6. Prepare Email Content ---
-        email_data = {
-            "target_day_date_str": t_date.strftime('%d-%m-%Y (%A)'),
-            "target_day_prices": t_date_nepi,
-            "t_date_solar": t_date_solar,
-            "predicted_prices_df": pd.concat(predicted_prices_dfs) if predicted_prices_dfs else None,
-            "yesterday_date_str": y_date.strftime('%d-%m'),
-            "month_name": start_date.strftime("%B"),
-            "year": start_date.strftime("%Y"),
-            "d_costs": y_date_costs,
-            "m_costs": n_month_costs,
-            "y_costs": n_year_costs,
-            "d_savings": y_date_savings,
-            "m_savings": n_month_savings,
-            "y_savings": n_year_savings,
-            "t_savings": total_savings,
-        }
-        html_body = self._generate_html_content(email_data)
+                y_date_costs = calculate_total_costs_for_period(y_date, y_date, self.app_config,
+                                                                self.db_handler, self.tariff_manager)
+                n_month_costs = calculate_total_costs_for_period(start_date, end_date, self.app_config,
+                                                                 self.db_handler, self.tariff_manager)
+                n_year_costs = calculate_total_costs_for_period(first_day_of_year, end_date, self.app_config,
+                                                                self.db_handler, self.tariff_manager)
 
-        # --- 7. Send Email ---
-        images_to_attach = []
-        if plot_buffer_d1:
-            images_to_attach.append(
-                (plot_buffer_d1.getvalue(), "price_solar_tomorrow.png", "price_solar_plot_tomorrow"))
-        if plot_buffer_predictions:
-            images_to_attach.append(
-                (plot_buffer_predictions.getvalue(), "price_prediction_multiday.png", "price_prediction_plot"))
+                # --- 5.B Calculate battery savings ---
+                y_date_savings = calculate_battery_saving_for_period(y_date, y_date, self.app_config,
+                                                                     self.db_handler, self.tariff_manager)
+                n_month_savings = calculate_battery_saving_for_period(start_date, end_date, self.app_config,
+                                                                      self.db_handler, self.tariff_manager)
+                n_year_savings = calculate_battery_saving_for_period(first_day_of_year, end_date, self.app_config,
+                                                                     self.db_handler, self.tariff_manager)
+                total_savings = calculate_battery_saving_for_period(date(2025, 10, 28), end_date,
+                                                                    self.app_config, self.db_handler,
+                                                                    self.tariff_manager)
+                # --- 6. Prepare Email Content ---
+                email_data = {
+                    "target_day_date_str": t_date.strftime('%d-%m-%Y (%A)'),
+                    "target_day_prices": t_date_nepi,
+                    "t_date_solar": t_date_solar,
+                    "predicted_prices_df": pd.concat(predicted_prices_dfs) if predicted_prices_dfs else None,
+                    "yesterday_date_str": y_date.strftime('%d-%m'),
+                    "month_name": start_date.strftime("%B"),
+                    "year": start_date.strftime("%Y"),
+                    "d_costs": y_date_costs,
+                    "m_costs": n_month_costs,
+                    "y_costs": n_year_costs,
+                    "d_savings": y_date_savings,
+                    "m_savings": n_month_savings,
+                    "y_savings": n_year_savings,
+                    "t_savings": total_savings,
+                }
+                html_body = self._generate_html_content(email_data)
 
-        smtp_cfg = self.app_config.get('smtp', {})
+            with profiler.step("smtp"):
+                # --- 7. Send Email ---
+                images_to_attach = []
+                if plot_buffer_d1:
+                    images_to_attach.append(
+                        (plot_buffer_d1.getvalue(), "price_solar_tomorrow.png", "price_solar_plot_tomorrow"))
+                if plot_buffer_predictions:
+                    images_to_attach.append(
+                        (plot_buffer_predictions.getvalue(), "price_prediction_multiday.png",
+                         "price_prediction_plot"))
 
-        success = send_email_with_attachments(
-            smtp_config=smtp_cfg,
-            sender_email=smtp_cfg.get('sender_email'),
-            recipients=smtp_cfg.get('default_recipients'),
-            subject=f"Energy summary and forecast for {t_date.strftime('%d-%m-%Y')}",
-            html_body=html_body,
-            images=images_to_attach
-        )
-        return success
+                smtp_cfg = self.app_config.get('smtp', {})
+
+                success = send_email_with_attachments(
+                    smtp_config=smtp_cfg,
+                    sender_email=smtp_cfg.get('sender_email'),
+                    recipients=smtp_cfg.get('default_recipients'),
+                    subject=f"Energy summary and forecast for {t_date.strftime('%d-%m-%Y')}",
+                    html_body=html_body,
+                    images=images_to_attach
+                )
+
+            status = "success" if success else "failed"
+            return success
+        finally:
+            profiler.log_report(logger, status)
