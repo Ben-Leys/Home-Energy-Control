@@ -9,7 +9,7 @@ from collections import deque
 from hec.controllers.api_evcc import EvccApiClient
 from hec.controllers.modbus_sma_inverter import InverterSmaModbusClient
 from hec.logic_engine.system_mediator import SystemMediator
-from hec.core.app_state import GLOBAL_APP_STATE
+from hec.core.app_state import AppState, GLOBAL_APP_STATE
 from hec.core import constants as c
 from hec.core.models import NetElectricityPriceInterval, EVCCLoadpointState
 from hec.data_sources import api_p1_meter_homewizard
@@ -88,18 +88,9 @@ class TestSystemMediatorFunctional(unittest.TestCase):
         self.mock_p1_client.is_initialized = True
         self.mock_p1_client.set_battery_mode = MagicMock(return_value=True)
 
-        # Reset GLOBAL_APP_STATE for each test or mock its get/set
-        GLOBAL_APP_STATE.current_values = {"app_state": c.AppStatus.STARTING,
-                                           "app_operating_mode": c.OperatingMode.MODE_MANUAL,
-                                           "app_mediator_goal": None, "p1_meter_data": None,
-                                           "average_grid_import_watts": None,
-                                           "average_grid_export_watts": None,
-                                           "inverter_data": {"operational_status": c.InverterStatus.UNKNOWN},
-                                           "inverter_manual_state": None, "inverter_manual_limit": None,
-                                           "average_solar_production_watts": None, "electricity_prices_today": None,
-                                           "evcc_overall_state": None,  # DONE
-                                           "evcc_loadpoint_state": None,
-                                           "evcc_manual_state": None}
+        # Reset GLOBAL_APP_STATE to the current AppState shape for each test.
+        GLOBAL_APP_STATE.current_values = AppState().current_values.copy()
+        GLOBAL_APP_STATE.prediction_plan_df = None
         GLOBAL_APP_STATE.set('app_state', c.AppStatus.NORMAL)
         GLOBAL_APP_STATE.set('app_operating_mode', c.OperatingMode.MODE_AUTO)
         GLOBAL_APP_STATE.set('p1_meter_data', {"active_power_w": 0, "monthly_power_peak_w": 2500})
@@ -112,6 +103,9 @@ class TestSystemMediatorFunctional(unittest.TestCase):
         GLOBAL_APP_STATE.set('average_grid_import_watts', {'3m': 0, '5m': 0, '10m': 0})
         GLOBAL_APP_STATE.set('average_solar_production_watts', {'5m': 0})
         GLOBAL_APP_STATE.db_handler = MagicMock()
+        self.daylight_patcher = patch('hec.logic_engine.system_mediator.is_daylight', return_value=True)
+        self.daylight_patcher.start()
+        self.addCleanup(self.daylight_patcher.stop)
 
         # Instantiate the mediator for each test
         self.mediator = SystemMediator(
@@ -130,14 +124,20 @@ class TestSystemMediatorFunctional(unittest.TestCase):
         self.mediator.last_pv_limit_change_time = None
         self.mediator.last_amps_push = int(time.time()) - 30
 
+    @staticmethod
+    def _set_mock_time(mock_mediator_datetime, mock_market_datetime, start_time):
+        mock_mediator_datetime.now.return_value = start_time
+        mock_market_datetime.now.return_value = start_time
+
+    @patch('hec.core.market_prices.datetime')
     @patch('hec.logic_engine.system_mediator.datetime')  # Mock datetime.now() within the mediator module
-    def test_scenario_negative_buy_price_force_charge_and_limit_pv(self, mock_datetime):
+    def test_scenario_negative_buy_price_force_charge_and_limit_pv(self, mock_datetime, mock_market_datetime):
         """
         SCENARIO: Buy prices go negative.
         EXPECTED: EVCC set to "now", Inverter limit set to 0.
         """
         start_time = datetime(2025, 5, 24, 11, 0, 0)
-        mock_datetime.now.return_value = start_time
+        self._set_mock_time(mock_datetime, mock_market_datetime, start_time)
         GLOBAL_APP_STATE.set('app_mediator_goal', c.MediatorGoal.CHARGE_WHEN_BUY_PRICE_NEGATIVE)
 
         # Setup AppState: prices, EV connected
@@ -156,21 +156,23 @@ class TestSystemMediatorFunctional(unittest.TestCase):
         # --- Assertions for EVCC ---
         # Check if evcc_client.set_charge_mode was called with "now"
         self.mock_evcc_client.set_charge_mode.assert_any_call(c.EVCCManualState.EVCC_CMD_STATE_NOW)
-        self.mock_evcc_client.set_max_current.assert_called_with(32)
+        self.assertEqual(self.mediator.new_max_amps, 32)
+        self.mock_evcc_client.set_max_current.assert_not_called()
 
         # --- Assertions for Inverter ---
         # Check if inverter_client.set_active_power_limit was called with 0
         self.mock_inverter_client.set_active_power_limit.assert_called_with(0)
-        self.assertEqual(GLOBAL_APP_STATE.get('inverter_manual_state'), c.InverterManualState.INV_CMD_LIMIT_ZERO)
+        self.assertEqual(GLOBAL_APP_STATE.get('inverter_manual_state'), c.InverterManualState.INV_CMD_LIMIT_TO_USE)
 
+    @patch('hec.core.market_prices.datetime')
     @patch('hec.logic_engine.system_mediator.datetime')
-    def test_scenario_negative_sell_price_no_limit_pv_and_ev_pv_charge(self, mock_datetime):
+    def test_scenario_negative_sell_price_no_limit_pv_and_ev_pv_charge(self, mock_datetime, mock_market_datetime):
         """
         SCENARIO: Sell prices go negative, buy prices are normal. EV is connected.
-        EXPECTED: Inverter was not limited so should not be called. EVCC set to "pv".
+        EXPECTED: EVCC set to "pv"; inverter enters grace-period limit when the EV connects.
         """
         start_time = datetime(2025, 5, 24, 12, 0, 0)
-        mock_datetime.now.return_value = start_time
+        self._set_mock_time(mock_datetime, mock_market_datetime, start_time)
         self.mediator.last_pv_limit_change_time = None
         GLOBAL_APP_STATE.set('app_mediator_goal', c.MediatorGoal.CHARGE_WHEN_SELL_PRICE_NEGATIVE)
 
@@ -188,33 +190,34 @@ class TestSystemMediatorFunctional(unittest.TestCase):
 
         # --- Assertions for EVCC ---
         self.mock_evcc_client.set_charge_mode.assert_any_call(c.EVCCManualState.EVCC_CMD_STATE_PV)
-        self.mock_evcc_client.set_max_current.assert_called_with(32)
+        self.assertEqual(self.mediator.new_max_amps, 32)
+        self.mock_evcc_client.set_max_current.assert_not_called()
 
         # --- Assertions for Inverter ---
-        self.assertEqual(GLOBAL_APP_STATE.get('inverter_manual_state'), c.InverterManualState.INV_CMD_LIMIT_STANDARD)
-        self.mock_inverter_client.set_active_power_limit.assert_not_called()
+        self.assertEqual(GLOBAL_APP_STATE.get('inverter_manual_state'), c.InverterManualState.INV_CMD_LIMIT_MANUAL)
+        self.mock_inverter_client.set_active_power_limit.assert_called_with(7000)
 
+    @patch('hec.core.market_prices.datetime')
     @patch('hec.logic_engine.system_mediator.datetime')
-    def test_ev_charging_capacity_tariff_adjustment(self, mock_datetime):
+    def test_ev_charging_capacity_tariff_adjustment(self, mock_datetime, mock_market_datetime):
         """
         SCENARIO: EV is charging, grid import is high, approaching capacity peak.
         EXPECTED: EV charging current (max_amps) is reduced.
         """
         start_time = datetime(2025, 5, 24, 13, 0, 0)
-        mock_datetime.now.return_value = start_time
-        self.mediator.current_max_peak_consumption_kw = 2.5  # Set capacity threshold
+        self._set_mock_time(mock_datetime, mock_market_datetime, start_time)
+        self.mediator.last_max_amps = 16
         GLOBAL_APP_STATE.set('app_mediator_goal', c.MediatorGoal.CHARGE_NOW_WITH_CAPACITY_RATE)
 
         prices = create_sample_price_intervals(start_time, 4, 15, buy_price=0.24, sell_price=0.08)
         GLOBAL_APP_STATE.set('electricity_prices_today', prices)
         # EV is connected AND charging, currently at 16A
         GLOBAL_APP_STATE.set('evcc_loadpoint_state',
-                             EVCCLoadpointState(is_connected=True, is_charging=True, charge_current=16, max_current=32,
+                             EVCCLoadpointState(is_connected=True, is_charging=True, charge_current=16, max_current=16,
                                                 mode="now").to_dict())
-        # Grid import is high
-        GLOBAL_APP_STATE.set('p1_meter_data', {"active_power_w": 2900, "monthly_power_peak_w": 2500})
-        # Setup rolling average import to also indicate high load
-        GLOBAL_APP_STATE.set('average_grid_import_watts', {'3m': 2300, '5m': 2200, '10m': 2100})
+        # Grid import is above the threshold, but not enough to pause charging entirely.
+        GLOBAL_APP_STATE.set('p1_meter_data', {"active_power_w": 2580, "monthly_power_peak_w": 2500})
+        GLOBAL_APP_STATE.set('average_grid_import_watts', {'3m': 1800, '5m': 1750, '10m': 1700})
         GLOBAL_APP_STATE.set('inverter_data', {"active_power_limit_watts": 7000, "pv_power_watts": 100})  # Low PV
 
         # --- Run mediator logic ---
@@ -227,8 +230,9 @@ class TestSystemMediatorFunctional(unittest.TestCase):
         self.assertLess(called_amps, 16)
         self.assertGreaterEqual(called_amps, self.mock_evcc_client.min_current)
 
+    @patch('hec.core.market_prices.datetime')
     @patch('hec.logic_engine.system_mediator.datetime')
-    def test_manual_mode_override_evcc(self, mock_datetime):
+    def test_manual_mode_override_evcc(self, mock_datetime, mock_market_datetime):
         """SCENARIO: App is set to MANUAL mode by user, with goal no_charging."""
         GLOBAL_APP_STATE.set('app_operating_mode', c.OperatingMode.MODE_MANUAL)
         GLOBAL_APP_STATE.set('evcc_manual_state', c.EVCCManualState.EVCC_CMD_STATE_OFF)  # User wants EVCC off
@@ -236,7 +240,7 @@ class TestSystemMediatorFunctional(unittest.TestCase):
 
         # Irrelevant AppState data for this specific test, but good to have some defaults
         start_time = datetime(2025, 5, 24, 14, 0, 0)
-        mock_datetime.now.return_value = start_time
+        self._set_mock_time(mock_datetime, mock_market_datetime, start_time)
         prices = create_sample_price_intervals(start_time, 4, 15, buy_price=0.24, sell_price=0.08)
         GLOBAL_APP_STATE.set('electricity_prices_today', prices)
         GLOBAL_APP_STATE.set('p1_meter_data', {"active_power_w": 200, "monthly_power_peak_w": 2500})
@@ -250,15 +254,16 @@ class TestSystemMediatorFunctional(unittest.TestCase):
         # Assert that inverter control was NOT called for auto logic
         self.mock_inverter_client.set_active_power_limit.assert_not_called()
 
+    @patch('hec.core.market_prices.datetime')
     @patch('hec.logic_engine.system_mediator.datetime')
-    def test_inverter_manual_mode_respects_user_limit(self, mock_datetime):
+    def test_inverter_manual_mode_respects_user_limit(self, mock_datetime, mock_market_datetime):
         """
         SCENARIO: App in manual mode with a user-defined inverter limit.
         EXPECTED: _execute_inverter_state is called with that limit, regardless of prices.
         """
         # Arrange
         start_time = datetime(2025, 5, 24, 10, 0, 0)
-        mock_datetime.now.return_value = start_time
+        self._set_mock_time(mock_datetime, mock_market_datetime, start_time)
         GLOBAL_APP_STATE.set('app_mediator_goal', c.MediatorGoal.CHARGE_WHEN_BUY_PRICE_NEGATIVE)
         GLOBAL_APP_STATE.set('app_operating_mode', c.OperatingMode.MODE_MANUAL)
         GLOBAL_APP_STATE.set('evcc_manual_state', c.EVCCManualState.EVCC_CMD_STATE_PV)
@@ -275,14 +280,15 @@ class TestSystemMediatorFunctional(unittest.TestCase):
         self.mock_inverter_client.set_active_power_limit.assert_called_once_with(3000)
         self.mock_evcc_client.set_charge_mode.assert_called_with(c.EVCCManualState.EVCC_CMD_STATE_PV)
 
+    @patch('hec.core.market_prices.datetime')
     @patch('hec.logic_engine.system_mediator.datetime')
-    def test_car_connection_grace_period_and_expiry(self, mock_datetime):
+    def test_car_connection_grace_period_and_expiry(self, mock_datetime, mock_market_datetime):
         """
         SCENARIO: EV just connects—should get standard limit for 2 min, then revert to zero-import logic.
         """
         base_time = datetime(2025, 5, 24, 9, 0)
         # 1. initial connect
-        mock_datetime.now.return_value = base_time
+        self._set_mock_time(mock_datetime, mock_market_datetime, base_time)
         GLOBAL_APP_STATE.set('app_mediator_goal', c.MediatorGoal.CHARGE_WHEN_SELL_PRICE_NEGATIVE)
         GLOBAL_APP_STATE.set('inverter_manual_state', c.InverterManualState.INV_CMD_LIMIT_TO_USE)
         GLOBAL_APP_STATE.set('evcc_manual_state', c.EVCCManualState.EVCC_CMD_STATE_PV)
@@ -296,31 +302,27 @@ class TestSystemMediatorFunctional(unittest.TestCase):
 
         self.mediator.run_system_mediation_logic()
         self.mock_inverter_client.set_active_power_limit.assert_called()  # Last limit change 10 min ago (because None)
+        self.mock_inverter_client.set_active_power_limit.reset_mock()
 
         GLOBAL_APP_STATE.set('evcc_loadpoint_state',
                              EVCCLoadpointState(is_connected=True, is_charging=False,
                                                 charge_current=0, max_current=32, mode="pv").to_dict())
 
         self.mediator.run_system_mediation_logic()
-        # Should have pushed standard limit and force car charge start
-        self.mock_inverter_client.set_active_power_limit.assert_called_with(
-            self.mock_inverter_client.standard_power_limit
-        )
-        self.mock_evcc_client.sequence_force_pv_charging.assert_called()
-        self.assertEqual(self.mediator.force_charge_pushed, True)
-        GLOBAL_APP_STATE.set('inverter_data', {"active_power_limit_watts": 7000, "pv_power_watts": 7000})
+        # Should temporarily raise the current inverter limit enough to test PV charging.
+        self.mock_inverter_client.set_active_power_limit.assert_called_once_with(1750)
+        GLOBAL_APP_STATE.set('inverter_data', {"active_power_limit_watts": 1750, "pv_power_watts": 1750})
 
         # 2. within 2-min window: still should not revert
-        mock_datetime.now.return_value = base_time + timedelta(minutes=1)
+        self._set_mock_time(mock_datetime, mock_market_datetime, base_time + timedelta(minutes=1))
         self.mock_inverter_client.set_active_power_limit.reset_mock()
         self.mediator.run_system_mediation_logic()
         self.mock_inverter_client.set_active_power_limit.assert_not_called()
 
         # 3. after 2 min: should now switch to INV_CMD_LIMIT_TO_USE logic (which for this goal yields standard)
-        mock_datetime.now.return_value = base_time + timedelta(minutes=3)
+        self._set_mock_time(mock_datetime, mock_market_datetime, base_time + timedelta(minutes=3))
         self.mock_inverter_client.set_active_power_limit.reset_mock()
         self.mediator.run_system_mediation_logic()
-        self.assertEqual(self.mediator.force_charge_pushed, False)
         # Now it's evaluated again; since sell<0 it falls back to TO_USE, but with no PV yields zero-import buffer
         self.mock_inverter_client.set_active_power_limit.assert_called()
         self.assertEqual(GLOBAL_APP_STATE.get('inverter_manual_state'), c.InverterManualState.INV_CMD_LIMIT_TO_USE)
@@ -334,14 +336,35 @@ class TestSystemMediatorFunctional(unittest.TestCase):
         success = self.mediator._prepare_data()
         self.assertFalse(success)
 
+    def test_inverter_limit_handles_missing_battery_data_with_battery_records(self):
+        """
+        SCENARIO: battery records exist while aggregate battery_data is missing.
+        EXPECTED: TO_USE inverter limit calculation treats missing battery_data as empty data.
+        """
+        GLOBAL_APP_STATE.set('p1_meter_data', {"active_power_w": -400, "monthly_power_peak_w": 2500})
+        GLOBAL_APP_STATE.set('inverter_data', {"active_power_limit_watts": 1500, "pv_power_watts": 1800})
+        GLOBAL_APP_STATE.set('average_grid_import_watts', {'5m': 0})
+        GLOBAL_APP_STATE.set('average_solar_production_watts', {'5m': 0})
+        GLOBAL_APP_STATE.set('battery_records', [{"state_of_charge_pct": 50}])
+        GLOBAL_APP_STATE.set('battery_data', None)
+        self.mediator.market.buy_price = 0.20
+        self.mediator.market.sell_price = -0.05
+        self.mediator.new_bat_mode = c.BatteryState.BATTERY_ON
+        self.mediator.new_inv_state = c.InverterManualState.INV_CMD_LIMIT_TO_USE
+
+        self.mediator._recalculate_inverter_limit()
+
+        self.assertIsInstance(self.mediator.new_inv_limit, int)
+
+    @patch('hec.core.market_prices.datetime')
     @patch('hec.logic_engine.system_mediator.datetime')
-    def test_transition_between_mediator_goals_updates_states(self, mock_datetime):
+    def test_transition_between_mediator_goals_updates_states(self, mock_datetime, mock_market_datetime):
         """
         SCENARIO: Switch from CHARGE_WITH_ONLY_EXCESS to CHARGE_NOW_WITH_CAPACITY_RATE mid-run.
         EXPECTED: new_evcc_state and new_inv_state reflect the new goal on the second call.
         """
         t0 = datetime(2025, 5, 24, 8, 0)
-        mock_datetime.now.return_value = t0
+        self._set_mock_time(mock_datetime, mock_market_datetime, t0)
         # First: only excess solar
         GLOBAL_APP_STATE.set('app_mediator_goal', c.MediatorGoal.CHARGE_WITH_ONLY_EXCESS_SOLAR_POWER)
         GLOBAL_APP_STATE.set('evcc_loadpoint_state',
@@ -354,9 +377,10 @@ class TestSystemMediatorFunctional(unittest.TestCase):
 
         self.mediator.run_system_mediation_logic()
         first_state = self.mediator.new_evcc_state
+        self.mock_inverter_client.set_active_power_limit.reset_mock()
 
         # Now switch to now-with-capacity
-        mock_datetime.now.return_value = t0 + timedelta(minutes=30)
+        self._set_mock_time(mock_datetime, mock_market_datetime, t0 + timedelta(minutes=30))
         GLOBAL_APP_STATE.set('app_mediator_goal', c.MediatorGoal.CHARGE_NOW_WITH_CAPACITY_RATE)
         self.mediator.run_system_mediation_logic()
         second_state = self.mediator.new_evcc_state

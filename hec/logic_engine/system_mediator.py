@@ -53,6 +53,7 @@ class SystemMediator:
         self.car_was_connected: bool = False
         self.last_evcc_state = None
         self.car_start_deadline = None
+        self.car_start_grace_limit = None
         self.last_solar_retry = None
         self.car_refused_to_charge = False
         self.buffer_before_pv_limit_change: int = 2
@@ -155,6 +156,7 @@ class SystemMediator:
     def _handle_auto_mode(self):
         """Handles auto mode by determining controller states based on the mediator's goal."""
         self.app_mediator_goal = GLOBAL_APP_STATE.get('app_mediator_goal')
+        self.new_inv_limit = None
 
         # EVCC
         self._determine_evcc_state()
@@ -178,6 +180,7 @@ class SystemMediator:
         """Syncs manual UI settings to the mediator's target variables."""
         self.new_evcc_state = GLOBAL_APP_STATE.get('evcc_manual_state')
         self.new_inv_state = GLOBAL_APP_STATE.get('inverter_manual_state')
+        self.new_inv_limit = None
         self.new_max_amps = GLOBAL_APP_STATE.get('evcc_manual_limit')
         self.new_bat_mode = GLOBAL_APP_STATE.get("battery_manual_mode")
         self._recalculate_inverter_limit()
@@ -309,6 +312,7 @@ class SystemMediator:
         # Trigger A
         if newly_connected or (mode_changed_to_pv and is_connected):
             self.car_start_deadline = now + timedelta(minutes=2)
+            self.car_start_grace_limit = min(cur_limit_w + 1500, self.inverter_client.standard_power_limit)
             self.car_refused_to_charge = False
             logger.info("Inverter grace period started: Car newly connected or mode changed.")
 
@@ -325,6 +329,7 @@ class SystemMediator:
 
             elif (now - self.last_solar_retry).total_seconds() > 2700:
                 self.car_start_deadline = now + timedelta(minutes=2)
+                self.car_start_grace_limit = min(cur_limit_w + 1500, self.inverter_client.standard_power_limit)
                 self.last_solar_retry = now
                 logger.info("Inverter grace period started: Periodic 30-min solar test.")
         else:
@@ -343,6 +348,7 @@ class SystemMediator:
                 self.car_refused_to_charge = True
                 logger.debug("Car did not start charging during grace period. Suspending retries.")
             self.car_start_deadline = None
+            self.car_start_grace_limit = None
 
         # Track states for next loop
         self.car_was_connected = is_connected
@@ -362,7 +368,7 @@ class SystemMediator:
         # C: If in a grace period add minimum charge Watts to current limit
         if in_grace_period:
             self.new_inv_state = c.InverterManualState.INV_CMD_LIMIT_MANUAL
-            self.new_inv_limit = cur_limit_w + 1500
+            self.new_inv_limit = self.car_start_grace_limit
             return
 
         # D: We pay to export. Limit production to home usage only.
@@ -391,7 +397,9 @@ class SystemMediator:
             return
 
         if self.new_inv_state == c.InverterManualState.INV_CMD_LIMIT_MANUAL:
-            self.new_inv_limit = GLOBAL_APP_STATE.get('inverter_manual_limit', cur_limit_w)
+            if self.new_inv_limit is None:
+                manual_limit = GLOBAL_APP_STATE.get('inverter_manual_limit')
+                self.new_inv_limit = manual_limit if manual_limit is not None else cur_limit_w
             return
 
         # 2. Home usage state
@@ -401,7 +409,8 @@ class SystemMediator:
             # 1. Current power data
             grid_w = GLOBAL_APP_STATE.get('p1_meter_data', {}).get('active_power_w', 0)
             prod_w = GLOBAL_APP_STATE.get('inverter_data', {}).get('pv_power_watts', 0)
-            bat_w = GLOBAL_APP_STATE.get('battery_data', {}).get('power_w', 0)
+            bat_data = GLOBAL_APP_STATE.get('battery_data') or {}
+            bat_w = bat_data.get('power_w', 0)
             bat_discharge_w = abs(bat_w) if bat_w < 0 else 0  # Add battery to home use if discharging
             home_use_w = grid_w + prod_w + bat_discharge_w
             logger.info(f"Home use: {home_use_w}")
@@ -489,7 +498,7 @@ class SystemMediator:
                                                             c.BatteryState.BATTERY_BLOCK_CHARGE]
 
             if bat_needing_charge > 0 and is_charging_allowed:
-                battery_data = GLOBAL_APP_STATE.get("battery_data", {})
+                battery_data = bat_data
                 battery_count = max(1, battery_data.get('battery_count', 1))
                 max_charge_w = battery_data.get("max_consumption_w", 0)
                 max_charge_per_bat = max_charge_w / battery_count
