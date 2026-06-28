@@ -2,6 +2,11 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:
 > executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+>
+> **Branching instruction:** Create a new branch for each individual improvement or suggested batch before making code
+> changes, so each improvement can be tested, reviewed, and committed separately. Keep `master` as the currently
+> deployed working branch, `master-working-v2` as the safety copy from before this professionalization update, and
+> `codex-improvements` as the planning branch that contains agent instructions, Codex setup, and this roadmap.
 
 **Goal:** Evolve Home Energy Control into a reliable, maintainable, secure, lightweight NAS-hosted application while
 preserving the currently effective mediator and battery optimizer behavior.
