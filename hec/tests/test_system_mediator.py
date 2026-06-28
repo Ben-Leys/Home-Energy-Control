@@ -2,6 +2,8 @@
 import unittest
 import logging
 import time
+import pandas as pd
+import pytz
 from datetime import datetime, timedelta
 from unittest.mock import MagicMock, patch
 from collections import deque
@@ -396,6 +398,75 @@ class TestSystemMediatorFunctional(unittest.TestCase):
         # --- Assertions for Inverter ---
         self.assertEqual(GLOBAL_APP_STATE.get('inverter_manual_state'), c.InverterManualState.INV_CMD_LIMIT_STANDARD)
         self.mock_inverter_client.set_active_power_limit.assert_not_called()
+
+    def _set_prediction_plan_row(self, timestamp, **flags):
+        defaults = {
+            "block_c": False,
+            "block_d": False,
+            "force_c": False,
+            "force_time": 0,
+        }
+        defaults.update(flags)
+        plan_df = pd.DataFrame([defaults], index=pd.DatetimeIndex([timestamp]))
+        GLOBAL_APP_STATE.set("prediction_plan_df", plan_df)
+
+    @patch('hec.logic_engine.system_mediator.datetime')
+    def test_prediction_plan_block_flags_translate_to_battery_modes(self, mock_datetime):
+        """
+        SCENARIO: The optimizer publishes block flags for the active interval.
+        EXPECTED: The mediator translates those flags to the current battery command.
+        """
+        now = datetime(2025, 5, 24, 15, 0, tzinfo=pytz.UTC)
+        mock_datetime.now.return_value = now
+        GLOBAL_APP_STATE.set('evcc_loadpoint_state',
+                             EVCCLoadpointState(is_connected=False, is_charging=False).to_dict())
+        GLOBAL_APP_STATE.set("battery_records", [{"state_of_charge_pct": 50}])
+        GLOBAL_APP_STATE.set("battery_data", {"max_consumption_w": 1600})
+        GLOBAL_APP_STATE.set("average_grid_import_watts", {"2m": 0, "5m": 0})
+        self.mediator.current_max_peak_kw = 2.5
+
+        cases = [
+            ({"block_c": True}, c.BatteryState.BATTERY_BLOCK_CHARGE),
+            ({"block_d": True}, c.BatteryState.BATTERY_BLOCK_DISCHARGE),
+            ({"block_c": True, "block_d": True}, c.BatteryState.BATTERY_OFF),
+            ({}, c.BatteryState.BATTERY_ON),
+        ]
+
+        for flags, expected_mode in cases:
+            with self.subTest(flags=flags):
+                self.mediator.battery_force_start_time = None
+                self.mediator.last_processed_interval = None
+                self._set_prediction_plan_row(now, **flags)
+
+                self.mediator._determine_battery_state()
+
+                self.assertEqual(self.mediator.new_bat_mode, expected_mode)
+
+    @patch('hec.logic_engine.system_mediator.datetime')
+    def test_prediction_force_charge_obeys_peak_safety_budget(self, mock_datetime):
+        """
+        SCENARIO: The optimizer requests force charging for the active interval.
+        EXPECTED: The mediator force-charges only while peak-budget safety allows it.
+        """
+        now = datetime(2025, 5, 24, 15, 0, tzinfo=pytz.UTC)
+        mock_datetime.now.return_value = now
+        self._set_prediction_plan_row(now, force_c=True, force_time=15)
+        GLOBAL_APP_STATE.set('evcc_loadpoint_state',
+                             EVCCLoadpointState(is_connected=False, is_charging=False).to_dict())
+        GLOBAL_APP_STATE.set("battery_records", [{"state_of_charge_pct": 50}])
+        GLOBAL_APP_STATE.set("battery_data", {"max_consumption_w": 1600})
+
+        with patch.object(self.mediator, '_calculate_safe_force_charge_minutes', return_value=5):
+            self.mediator._determine_battery_state()
+
+        self.assertEqual(self.mediator.new_bat_mode, c.BatteryState.BATTERY_FORCE_CHARGE)
+        self.assertEqual(self.mediator.battery_force_start_time, now)
+        self.assertEqual(self.mediator.last_processed_interval, now)
+
+        with patch.object(self.mediator, '_calculate_safe_force_charge_minutes', return_value=0):
+            self.mediator._determine_battery_state()
+
+        self.assertEqual(self.mediator.new_bat_mode, c.BatteryState.BATTERY_BLOCK_DISCHARGE)
 
 
 if __name__ == '__main__':
