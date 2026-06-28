@@ -31,3 +31,4 @@ data/
 /sql_dump/
 /hec/logfile.log*
 /bfg-1.15.0.jar
+.aider*
