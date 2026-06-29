@@ -636,7 +636,7 @@ class TestPhase4PredictionAndSummary(unittest.TestCase):
             GLOBAL_APP_STATE.prediction_plan_df = previous_prediction_plan_df
             scheduled_tasks._summary_job_thread = previous_summary_thread
 
-    def test_manual_summary_request_does_not_force_price_refresh(self):
+    def test_manual_summary_request_forces_price_refresh(self):
         previous_values = GLOBAL_APP_STATE.current_values.copy()
         previous_prediction_plan_df = GLOBAL_APP_STATE.prediction_plan_df
         previous_summary_thread = scheduled_tasks._summary_job_thread
@@ -665,7 +665,7 @@ class TestPhase4PredictionAndSummary(unittest.TestCase):
                 scheduled_tasks.task_system_mediator(RecordingMediator(), {}, MagicMock(), MagicMock())
 
             self.assertIsNotNone(FakeThread.captured_args)
-            self.assertFalse(FakeThread.captured_args[3])
+            self.assertTrue(FakeThread.captured_args[3])
         finally:
             GLOBAL_APP_STATE.current_values = previous_values
             GLOBAL_APP_STATE.prediction_plan_df = previous_prediction_plan_df
