@@ -1,12 +1,14 @@
 # database_ops/db_handler.py
+from contextlib import contextmanager
 import json
 import logging
 import sqlite3
+import threading
 from time import sleep
 from datetime import datetime, timezone, timedelta, time, date
 from enum import Enum
 from pathlib import Path
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Iterator
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -18,6 +20,18 @@ from hec.core.models import PricePoint, NetElectricityPriceInterval
 
 logger = logging.getLogger(__name__)
 
+CURRENT_SCHEMA_VERSION = 1
+INITIAL_SCHEMA_MIGRATION_DESCRIPTION = "001_noop_initial_schema"
+
+ENERGY_HISTORY_RETENTION_TABLES = {
+    "belpex_da_prices": ("timestamp_utc", False, None),
+    "elia_open_data": ("timestamp_utc", False, None),
+    "p1_meter_log": ("timestamp_utc", True, None),
+    "inverter_log": ("timestamp_utc", True, None),
+    "battery_log": ("timestamp_utc", True, "battery_name"),
+    "evcc_log": ("timestamp_utc", False, None),
+}
+
 
 class DatabaseHandler:
     def __init__(self, db_config: dict):
@@ -26,32 +40,80 @@ class DatabaseHandler:
             raise ValueError("Database path is not specified in the configuration.")
 
         project_root = Path(__file__).resolve().parent.parent
-        self.db_path = project_root / db_path_str
+        configured_path = Path(db_path_str)
+        self.db_path = configured_path if configured_path.is_absolute() else project_root / configured_path
+        self.busy_timeout_ms = int(db_config.get("busy_timeout_ms", 10000))
+        self.history_retention_days = int(db_config.get("history_retention_days", 365 * 3))
+        self.log_retention_hours = int(db_config.get("log_retention_hours", 72))
+        self.info_debug_log_retention_hours = int(db_config.get("info_debug_log_retention_hours", 12))
         self.conn: Optional[sqlite3.Connection] = None
+        self._connection_lock = threading.Lock()
+        self._thread_connections: Dict[int, sqlite3.Connection] = {}
         logger.info(f"Database handler initialized for SQLite DB at: {self.db_path}")
 
-    def _get_connection(self) -> sqlite3.Connection:
-        """Establishes and returns a database connection."""
-        if self.conn is None or self._is_connection_closed():
-            try:
-                # Ensure parent directory exists
-                self.db_path.parent.mkdir(parents=True, exist_ok=True)
-                self.conn = sqlite3.connect(self.db_path, timeout=10,
-                                            detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES,
-                                            check_same_thread=False)
-                self.conn.row_factory = sqlite3.Row  # Access columns by name
-                logger.info(f"Successfully connected to SQLite database: {self.db_path}")
-            except sqlite3.Error as e:
-                logger.error(f"Error connecting to SQLite database {self.db_path}: {e}", exc_info=True)
-                raise
-        return self.conn
+    def _open_connection(self) -> sqlite3.Connection:
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(
+            self.db_path,
+            timeout=self.busy_timeout_ms / 1000,
+            detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES,
+            check_same_thread=False,
+        )
+        conn.row_factory = sqlite3.Row
+        self._configure_connection(conn)
+        return conn
 
-    def _is_connection_closed(self) -> bool:
+    def _configure_connection(self, conn: sqlite3.Connection) -> None:
+        conn.execute(f"PRAGMA busy_timeout = {self.busy_timeout_ms}")
+        conn.execute("PRAGMA foreign_keys = ON")
+        conn.execute("PRAGMA journal_mode = WAL")
+        conn.execute("PRAGMA synchronous = NORMAL")
+
+    @contextmanager
+    def connection(self) -> Iterator[sqlite3.Connection]:
+        """Yield a short-lived SQLite connection configured for this application."""
+        conn = self._open_connection()
+        try:
+            yield conn
+        finally:
+            conn.close()
+
+    @contextmanager
+    def transaction(self, immediate: bool = True) -> Iterator[sqlite3.Connection]:
+        """Run SQL in an explicit transaction with predictable commit or rollback."""
+        with self.connection() as conn:
+            try:
+                conn.execute("BEGIN IMMEDIATE" if immediate else "BEGIN")
+                yield conn
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+
+    def _get_connection(self) -> sqlite3.Connection:
+        """Returns a configured SQLite connection scoped to the current thread."""
+        thread_id = threading.get_ident()
+        with self._connection_lock:
+            conn = self._thread_connections.get(thread_id)
+            if conn is None or self._is_connection_closed(conn):
+                try:
+                    conn = self._open_connection()
+                    self._thread_connections[thread_id] = conn
+                    if thread_id == threading.main_thread().ident:
+                        self.conn = conn
+                    logger.info(f"Successfully connected to SQLite database: {self.db_path}")
+                except sqlite3.Error as e:
+                    logger.error(f"Error connecting to SQLite database {self.db_path}: {e}", exc_info=True)
+                    raise
+            return conn
+
+    def _is_connection_closed(self, conn: Optional[sqlite3.Connection] = None) -> bool:
         """Checks if the connection is closed or unusable."""
-        if self.conn is None:
+        conn = conn or self.conn
+        if conn is None:
             return True
         try:
-            self.conn.execute("SELECT 1").fetchone()
+            conn.execute("SELECT 1").fetchone()
             return False
         except sqlite3.ProgrammingError:
             return True
@@ -59,15 +121,25 @@ class DatabaseHandler:
             return True
 
     def close_connection(self):
-        if self.conn:
-            self.conn.close()
+        with self._connection_lock:
+            connections = list(self._thread_connections.values())
+            self._thread_connections.clear()
             self.conn = None
-            logger.info("SQLite database connection closed.")
+
+        seen_connection_ids = set()
+        for conn in connections:
+            if id(conn) in seen_connection_ids:
+                continue
+            seen_connection_ids.add(id(conn))
+            conn.close()
+
+        if connections:
+            logger.info("SQLite database connection(s) closed.")
 
     def initialize_database(self):
         """Creates necessary tables if they don't exist."""
         try:
-            with self._get_connection() as conn:
+            with self.transaction(immediate=False) as conn:
                 cursor = conn.cursor()
 
                 # --- Day-Ahead Price Forecasts Table ---
@@ -217,11 +289,72 @@ class DatabaseHandler:
                             """)
                 logger.info("Table evcc_log checked/created.")
 
+                cursor.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_p1_meter_log_timestamp "
+                    "ON p1_meter_log (timestamp_utc);"
+                )
+                cursor.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_inverter_log_timestamp "
+                    "ON inverter_log (timestamp_utc);"
+                )
+                cursor.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_battery_log_timestamp_name "
+                    "ON battery_log (timestamp_utc, battery_name);"
+                )
+                cursor.execute("CREATE INDEX IF NOT EXISTS idx_evcc_log_timestamp ON evcc_log (timestamp_utc);")
+                cursor.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_predicted_prices_timestamp "
+                    "ON predicted_prices (timestamp_utc);"
+                )
+                cursor.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_belpex_da_prices_timestamp_resolution "
+                    "ON belpex_da_prices (timestamp_utc, resolution_minutes);"
+                )
+                logger.info("Common report and retention indexes checked/created.")
+
+                self._run_migrations(conn)
+
         except sqlite3.Error as e:
             logger.error(f"Error initializing database tables: {e}", exc_info=True)
             raise
         finally:
             pass
+
+    def _run_migrations(self, conn: sqlite3.Connection) -> None:
+        """Create schema version tracking and apply idempotent migrations."""
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS schema_version (
+                version INTEGER PRIMARY KEY,
+                description TEXT NOT NULL,
+                applied_at_utc TEXT NOT NULL
+            );
+            """
+        )
+
+        row = conn.execute(
+            "SELECT version FROM schema_version WHERE version = ?",
+            (CURRENT_SCHEMA_VERSION,),
+        ).fetchone()
+        if row:
+            return
+
+        conn.execute(
+            """
+            INSERT INTO schema_version (version, description, applied_at_utc)
+            VALUES (?, ?, ?)
+            """,
+            (
+                CURRENT_SCHEMA_VERSION,
+                INITIAL_SCHEMA_MIGRATION_DESCRIPTION,
+                datetime.now(timezone.utc).isoformat(),
+            ),
+        )
+        logger.info(
+            "Applied database schema migration %s: %s",
+            CURRENT_SCHEMA_VERSION,
+            INITIAL_SCHEMA_MIGRATION_DESCRIPTION,
+        )
 
     def store_da_prices(self, price_points: List[PricePoint]) -> int:
         """
@@ -1286,18 +1419,104 @@ class DatabaseHandler:
             logger.error(f"DBHandler: Error retrieving battery data: {e}", exc_info=True)
             return []
 
+    def apply_energy_history_retention(
+        self,
+        retention_days: Optional[int] = None,
+        reference_utc: Optional[datetime] = None
+    ) -> Dict[str, int]:
+        """Delete old energy/history rows while preserving boundary rows for cumulative calculations."""
+        days_to_keep = retention_days if retention_days is not None else self.history_retention_days
+        reference = reference_utc or datetime.now(timezone.utc)
+        cutoff = reference - timedelta(days=days_to_keep)
+        cutoff_str = cutoff.isoformat()
+        deleted_by_table: Dict[str, int] = {}
+
+        with self.transaction() as conn:
+            for table_name, retention_config in ENERGY_HISTORY_RETENTION_TABLES.items():
+                timestamp_column, preserve_boundary, group_column = retention_config
+                if preserve_boundary and group_column:
+                    sql = f"""
+                        DELETE FROM {table_name}
+                        WHERE {timestamp_column} < ?
+                          AND EXISTS (
+                              SELECT 1
+                              FROM {table_name} newer
+                              WHERE newer.{group_column} = {table_name}.{group_column}
+                                AND newer.{timestamp_column} < ?
+                                AND newer.{timestamp_column} > {table_name}.{timestamp_column}
+                          )
+                    """
+                    cursor = conn.execute(sql, (cutoff_str, cutoff_str))
+                elif preserve_boundary:
+                    sql = f"""
+                        DELETE FROM {table_name}
+                        WHERE {timestamp_column} < ?
+                          AND rowid NOT IN (
+                              SELECT rowid
+                              FROM {table_name}
+                              WHERE {timestamp_column} < ?
+                              ORDER BY {timestamp_column} DESC
+                              LIMIT 1
+                          )
+                    """
+                    cursor = conn.execute(sql, (cutoff_str, cutoff_str))
+                else:
+                    cursor = conn.execute(
+                        f"DELETE FROM {table_name} WHERE {timestamp_column} < ?",
+                        (cutoff_str,),
+                    )
+                deleted_by_table[table_name] = max(cursor.rowcount, 0)
+
+        return deleted_by_table
+
+    def apply_log_retention(
+        self,
+        log_retention_hours: Optional[int] = None,
+        info_debug_retention_hours: Optional[int] = None,
+        reference_utc: Optional[datetime] = None
+    ) -> Dict[str, int]:
+        """Delete old logs independently from energy-history retention."""
+        reference = reference_utc or datetime.now(timezone.utc)
+        with self.transaction() as conn:
+            deleted_count = self._delete_old_logs(
+                conn,
+                reference,
+                log_retention_hours=log_retention_hours,
+                info_debug_retention_hours=info_debug_retention_hours,
+            )
+        return {"logs": deleted_count}
+
+    def _delete_old_logs(
+        self,
+        conn: sqlite3.Connection,
+        reference_utc: datetime,
+        log_retention_hours: Optional[int] = None,
+        info_debug_retention_hours: Optional[int] = None
+    ) -> int:
+        all_logs_hours = log_retention_hours if log_retention_hours is not None else self.log_retention_hours
+        info_debug_hours = (
+            info_debug_retention_hours
+            if info_debug_retention_hours is not None
+            else self.info_debug_log_retention_hours
+        )
+        info_debug_cutoff = (reference_utc - timedelta(hours=info_debug_hours)).isoformat()
+        all_logs_cutoff = (reference_utc - timedelta(hours=all_logs_hours)).isoformat()
+        cursor = conn.execute(
+            """
+            DELETE FROM logs
+            WHERE (level IN ('INFO', 'DEBUG') AND timestamp < ?)
+               OR (timestamp < ?)
+            """,
+            (info_debug_cutoff, all_logs_cutoff),
+        )
+        return max(cursor.rowcount, 0)
+
     def store_log(self, log: dict):
         sql_insert = "INSERT INTO logs (timestamp, level, message, module) VALUES (?, ?, ?, ?)"
-        sql_cleanup = """
-                      DELETE \
-                      FROM logs
-                      WHERE (level IN ('INFO', 'DEBUG') AND timestamp < datetime('now', '-12 hours', 'localtime'))
-                         OR (timestamp < datetime('now', '-72 hours', 'localtime')); \
-                      """
         try:
-            with self._get_connection() as conn:
+            with self.transaction() as conn:
                 conn.execute(sql_insert, (log['timestamp'], log['level'], log['message'], log['module']))
-                conn.execute(sql_cleanup)
+                self._delete_old_logs(conn, datetime.now(timezone.utc))
         except Exception as e:
             # Use sys.stderr to avoid infinite logging loops
             import sys
