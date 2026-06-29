@@ -201,7 +201,7 @@
                 <div class="card">
                     <h4>💡 Price</h4>
                     <div style="grid-column: span 2; font-size: 0.8rem; color: var(--info-label); margin-bottom: 12px">
-                        Interval: {{ formatTimeHm(currentPrice.start) }} - {{ formatTimeHm(currentPrice.end) }} (LT)
+                        Interval: {{ formatTime(currentPrice.start) }} - {{ formatTime(currentPrice.end) }} (LT)
                     </div>
                     <div v-if="currentPrice" class="grid-2">
                         <div class="metric">
@@ -369,7 +369,7 @@
                             <td>{{ row.index ? formatTime(row.index).substring(0, 5) : '??:??' }}</td>
 
                             <td :style="{ color: row.net_kwh > 0 ? '#1b5e20' : '#b71c1c', fontWeight: 'bold' }">
-                                {{ row.net_kwh !== null ? (row.net_kwh * 4000).toFixed(0) : '--' }}
+                                {{ row.net_kwh !== null ? row.net_kwh.toFixed(2) : '--' }}
                             </td>
 
                             <td>{{ row.sell_price !== null ? (row.sell_price * 100).toFixed(1) + 'c' : '--' }}</td>
@@ -590,17 +590,6 @@
                 });
             };
 
-            const formatTimeHm = (ts) => {
-                if (!ts) return '';
-                // Formats ISO string or timestamp to HH:mm
-                const d = new Date(ts);
-                return d.toLocaleTimeString('en-GB', {
-                    hour: '2-digit',
-                    minute: '2-digit',
-                    hour12: false
-                });
-            };
-
             const formattedState = computed(() => {
                 if (!state.value) return "Loading application state...";
                 return JSON.stringify(state.value, null, 2);
@@ -680,7 +669,7 @@
 
             return { currentTab, state, lastSync, enums, statusColor, currentPrice, formatTime, updateSetting, toast,
                 formatPeakTimestamp, logs, fetchLogs, isFetchingLogs, logFilter, filteredLogs, formattedState,
-                isCurrentInterval, fetchState, batteryModeDisplay, logLimit, formatTimeHm}
+                isCurrentInterval, fetchState, batteryModeDisplay, logLimit}
         }
     }).mount('#app')
 </script>

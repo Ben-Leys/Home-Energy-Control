@@ -7,7 +7,7 @@ from tools.reproduce_db_lock import run_db_lock_reproduction
 
 class TestDbLockReproduction(unittest.TestCase):
     def test_reproduction_reports_locked_writes_against_isolated_database(self):
-        scratch_dir = Path.cwd() / "hec" / "tests" / "_scratch"
+        scratch_dir = Path.cwd() / "_scratch"  # / "hec" / "tests" / "_scratch"
         scratch_dir.mkdir(exist_ok=True)
         db_path = scratch_dir / "lock-test.sqlite"
         _remove_sqlite_artifacts(db_path)

@@ -34,12 +34,12 @@ def run_application():
     logger.debug(f"Initial AppState: {GLOBAL_APP_STATE.get_all()}")
     GLOBAL_APP_STATE.set("app_state", c.AppStatus.STARTING)
 
+    # --- LOAD DATA ---
+    tariff_manager = initialize_tariff_manager(APP_CONFIG)
+
     # --- SETUP DATABASE ---
     db_handler = initialize_database_handler(APP_CONFIG)
     inject_db_to_logging(db_handler)
-
-    # --- LOAD DATA ---
-    tariff_manager = initialize_tariff_manager(APP_CONFIG)
     fetch_entsoe, fetch_elia = check_historic_data(db_handler, APP_CONFIG)
 
     # --- INITIALIZE EXTERNAL CLIENTS ---
