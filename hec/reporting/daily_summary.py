@@ -19,12 +19,53 @@ logger = logging.getLogger(__name__)
 
 
 class DailySummaryGenerator:
+    FUTURE_PREDICTION_DAYS = 4
+
     def __init__(self, app_config: dict, db_handler: DatabaseHandler, tariff_manager: TariffManager, forecasts: Dict):
         self.app_config = app_config
         self.db_handler = db_handler
         self.tariff_manager = tariff_manager
-        self.price_predictor = EnergyPricePredictor(db_handler)  # Init predictor
+        self.price_predictor = EnergyPricePredictor(db_handler, app_config)
         self.forecasts = forecasts
+
+    def _get_historic_training_start(self) -> Optional[date]:
+        start_date = self.app_config.get('historic_data', {}).get('start_date')
+        if not start_date:
+            return None
+        return date.fromisoformat(start_date)
+
+    def _get_cached_prediction_dfs(self, start_date_local: date, num_days: int) -> List[pd.DataFrame]:
+        prediction_dfs = []
+        required_columns = [
+            'timestamp_utc',
+            'predicted_gross_price_kwh',
+            'solar_factor',
+            'wind_factor',
+            'grid_load_mwh',
+        ]
+
+        for i in range(num_days):
+            predict_date = start_date_local + timedelta(days=i)
+            rows = self.db_handler.get_predicted_prices_for_date(predict_date)
+            if not isinstance(rows, (list, tuple)) or not rows:
+                logger.info("No cached price predictions found for %s. Skipping future plot day.", predict_date)
+                continue
+
+            day_df = pd.DataFrame(rows)
+            missing_columns = [col for col in required_columns if col not in day_df.columns]
+            if missing_columns:
+                logger.warning(
+                    "Cached price predictions for %s are missing columns %s. Skipping future plot day.",
+                    predict_date,
+                    missing_columns,
+                )
+                continue
+
+            day_df = day_df[required_columns].copy()
+            day_df['timestamp_utc'] = pd.to_datetime(day_df['timestamp_utc'], utc=True)
+            prediction_dfs.append(day_df)
+
+        return prediction_dfs
 
     def _get_elia_forecasts_for_days(self, start_date_local: date, num_days: int) -> Dict[str, List[Dict[str, Any]]]:
         """Helper to fetch Elia forecasts for multiple days, keyed by forecast_type."""
@@ -254,7 +295,8 @@ class DailySummaryGenerator:
 
         return "".join(html)
 
-    def generate_and_send_summary(self, app_config, profiler: Optional[DailySummaryTimingProfiler] = None) -> bool:
+    def generate_and_send_summary(self, app_config, profiler: Optional[DailySummaryTimingProfiler] = None,
+                                  force_prediction_refresh: bool = False) -> bool:
         """Orchestrates data fetching, processing, plotting, and emailing."""
         logger.info("Starting generation of daily energy summary email.")
         profiler = profiler or DailySummaryTimingProfiler()
@@ -323,11 +365,11 @@ class DailySummaryGenerator:
 
             predicted_prices_dfs = []
             with profiler.step("price_model_training"):
-                # --- 4. Price Prediction for D+1 to D+5 ---
-                if not self.price_predictor.is_trained:
+                # --- 4. Price Prediction for D+1 to D+4 ---
+                if force_prediction_refresh and self.price_predictor.needs_training():
                     logger.info("Price predictor model not trained. Training now for email report...")
                     train_end = y_date
-                    train_start = date.fromisoformat(self.app_config.get('historic_data').get('start_date'))
+                    train_start = self._get_historic_training_start()
 
                     prediction_start_dt = datetime.now()
                     self.price_predictor.train_model(train_start, train_end)
@@ -335,12 +377,12 @@ class DailySummaryGenerator:
                                 f"in {(datetime.now() - prediction_start_dt).total_seconds():.2f} seconds")
 
             with profiler.step("price_prediction"):
-                if self.price_predictor.is_trained:
+                if force_prediction_refresh and self.price_predictor.is_trained:
                     elia_forecasts_d1_d5 = self._get_elia_forecasts_for_days(
                         start_date_local=t_date,
-                        num_days=5
+                        num_days=self.FUTURE_PREDICTION_DAYS
                     )
-                    for i in range(5):  # D+1 to D+5
+                    for i in range(self.FUTURE_PREDICTION_DAYS):  # D+1 to D+4
                         predict_date = t_date + timedelta(days=i)
                         # Prepare Elia forecasts for this specific predict_date
                         daily_elia_fc_for_predictor = {}
@@ -354,6 +396,12 @@ class DailySummaryGenerator:
                                                                                         daily_elia_fc_for_predictor)
                         if day_prediction_df is not None:
                             predicted_prices_dfs.append(day_prediction_df)
+                else:
+                    logger.info("Using cached price predictions for daily summary future plot.")
+                    predicted_prices_dfs = self._get_cached_prediction_dfs(
+                        t_date,
+                        self.FUTURE_PREDICTION_DAYS,
+                    )
 
             plot_buffer_predictions = None
             with profiler.step("plotting"):

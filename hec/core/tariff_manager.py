@@ -1,7 +1,8 @@
 # hec/core/tariff_manager.py
 import yaml
 import logging
-from datetime import date, datetime
+import threading
+from datetime import date, datetime, timedelta, timezone
 from typing import List, Dict, Optional, Any
 from pathlib import Path
 
@@ -13,10 +14,16 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 
 class TariffManager:
-    def __init__(self, app_config: Dict):
-        self.tariffs_file_path = PROJECT_ROOT / app_config.get('application').get('tariffs_file_name',
-                                                                                  DEFAULT_TARIFFS_FILE_NAME)
+    def __init__(self, app_config: Dict, reload_interval: Optional[timedelta] = None):
+        tariffs_file_name = (
+            app_config.get('application', {}).get('tariffs_file_name', DEFAULT_TARIFFS_FILE_NAME)
+            if app_config else DEFAULT_TARIFFS_FILE_NAME
+        )
+        self.tariffs_file_path = PROJECT_ROOT / tariffs_file_name
         self.all_tariffs: Dict[str, Dict[str, Any | Dict[str, Any]]] = {}
+        self.reload_interval = reload_interval or timedelta(days=1)
+        self._last_loaded_at_utc: Optional[datetime] = None
+        self._reload_lock = threading.RLock()
         self._load_tariffs()
 
     def _load_tariffs(self):
@@ -34,24 +41,42 @@ class TariffManager:
                 logger.warning(f"Tariff file '{self.tariffs_file_path}' is empty.")
                 return
 
-            # Process energy supplier section
+            # Process energy supplier section first, then swap the full tariff
+            # structure atomically so a failed reload keeps the previous tariffs.
             energy_supplier_tariffs = {}
             for contract_type, tariffs in raw_tariffs.get("energy_supplier", {}).items():
                 energy_supplier_tariffs[contract_type] = self.process_section(tariffs)
 
             # Process other sections
-            self.all_tariffs = {
+            loaded_tariffs = {
                 "contract_types": raw_tariffs.get("contract_types", []),
                 "active_contract": raw_tariffs.get("active_contract", {}),
                 "energy_supplier": energy_supplier_tariffs,
                 "grid_operator": self.process_section(raw_tariffs.get("grid_operator", {})),
                 "government": self.process_section(raw_tariffs.get("government", {})),
             }
+            self.all_tariffs = loaded_tariffs
+            self._last_loaded_at_utc = datetime.now(timezone.utc)
 
         except yaml.YAMLError as e:
             logger.error(f"Error parsing YAML tariff file '{self.tariffs_file_path}': {e}", exc_info=True)
         except Exception as e:
             logger.error(f"Unexpected error loading tariffs: {e}", exc_info=True)
+
+    def reload_if_stale(self, reference_time_utc: Optional[datetime] = None, force: bool = False) -> bool:
+        """Reload tariffs when the configured staleness window has elapsed."""
+        reference_time_utc = reference_time_utc or datetime.now(timezone.utc)
+        if reference_time_utc.tzinfo is None:
+            reference_time_utc = reference_time_utc.replace(tzinfo=timezone.utc)
+
+        with self._reload_lock:
+            if not force and self._last_loaded_at_utc is not None:
+                if reference_time_utc - self._last_loaded_at_utc < self.reload_interval:
+                    return False
+
+            before_loaded_at = self._last_loaded_at_utc
+            self._load_tariffs()
+            return self._last_loaded_at_utc != before_loaded_at
 
     @staticmethod
     def process_section(section: Dict[str, List[Dict[str, Any]]]) -> Dict[str, List[Dict[str, Any]]]:
@@ -80,6 +105,7 @@ class TariffManager:
 
     def get_all_tariffs(self, target_date: date) -> Dict[str, Any]:
         """Get all active tariffs, including all energy_supplier contracts and the active one."""
+        self.reload_if_stale()
         contract_type = self.get_active_contract_type(target_date)
         if not contract_type:
             logger.warning(f"No active contract type found for {target_date}.")

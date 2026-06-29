@@ -3,6 +3,7 @@ import logging
 import os
 import signal
 import sys
+import threading
 from time import sleep
 from datetime import datetime, timedelta, timezone, time, date
 from typing import Optional, List, Dict, Any
@@ -27,6 +28,7 @@ from hec.logic_engine.battery_predictor import BatteryPredictor
 from hec.logic_engine.consumption_predictor import ConsumptionPredictor
 from hec.logic_engine.data_processors import populate_appstate_with_price_data, populate_appstate_with_forecast_data, \
     update_rolling_averages
+from hec.logic_engine.price_predictor import EnergyPricePredictor
 from hec.logic_engine.system_mediator import SystemMediator
 from hec.reporting.daily_summary import DailySummaryGenerator
 from hec.utils.utils import process_price_points_to_app_state, is_daylight
@@ -45,10 +47,15 @@ INVERTER_FOR_DB_JOB_ID = "inverter_update_for_db"
 INVERTER_FOR_MEDIATOR_JOB_ID = "inverter_update_for_mediator"
 POLL_EVCC_JOB_ID = "evcc_update"
 DAILY_SUMMARY_EMAIL_JOB_ID = "daily_summary_email"
+PRICE_PREDICTION_JOB_ID = "price_prediction"
+TARIFF_RELOAD_JOB_ID = "tariff_reload"
 MEDIATOR_LOGIC_JOB_ID = "mediator_logic"
 BATTERY_UPDATE_FOR_DB_JOB_ID = "battery_update_for_db"
 BATTERY_UPDATE_JOB_ID = "battery_update"
 BATTERY_PREDICTOR_JOB_ID = "battery_prediction"
+
+_summary_job_lock = threading.Lock()
+_summary_job_thread: Optional[threading.Thread] = None
 
 
 def task_fetch_and_store_day_ahead_prices(scheduler: BaseScheduler, db_handler: DatabaseHandler, app_config: dict,
@@ -376,6 +383,76 @@ def task_fetch_elia_forecasts(db_handler: DatabaseHandler, app_config: dict):
         logger.warning(f"No Elia forecast data fetched for {days_to_fetch} days. Check API.")
 
 
+def task_reload_tariffs(tariff_manager: TariffManager):
+    """Force a daily tariff file reload so corrected historic prices are picked up."""
+    if not tariff_manager:
+        logger.warning("Tariff reload task skipped: tariff manager is not initialized.")
+        return
+
+    tariff_manager.reload_if_stale(force=True)
+
+
+def _get_elia_forecasts_for_prediction_day(
+        db_handler: DatabaseHandler,
+        predict_date: date,
+) -> Dict[str, List[Dict[str, Any]]]:
+    local_tz = datetime.now().astimezone().tzinfo
+    day_start = datetime.combine(predict_date, time.min, tzinfo=local_tz)
+    day_end = day_start + timedelta(days=1)
+    return {
+        forecast_type: db_handler.get_elia_forecasts(
+            forecast_type=forecast_type,
+            start_date_local=day_start,
+            end_date_local=day_end,
+        )
+        for forecast_type in ("solar", "wind", "grid_load")
+    }
+
+
+def task_refresh_price_predictions(
+        app_config: dict,
+        db_handler: DatabaseHandler,
+        force_train: bool = False,
+) -> List[date]:
+    """
+    Refresh D+1 through D+4 cached price predictions without involving summary generation.
+    Training is bounded and only runs when the persisted model is missing/stale or explicitly forced.
+    """
+    logger.info("Running task: Refresh Price Prediction Cache.")
+    predictor = EnergyPricePredictor(db_handler, app_config)
+    now_local = datetime.now().astimezone()
+    train_end = now_local.date() - timedelta(days=1)
+    train_start_raw = app_config.get("historic_data", {}).get("start_date")
+    train_start = date.fromisoformat(train_start_raw) if train_start_raw else train_end
+
+    if force_train or predictor.needs_training():
+        predictor.train_model(train_start, train_end)
+
+    if not predictor.is_trained:
+        logger.warning("Price prediction cache refresh skipped because no trained model is available.")
+        return []
+
+    first_predict_date = now_local.date() + timedelta(days=1)
+    refreshed_dates = []
+    for day_offset in range(DailySummaryGenerator.FUTURE_PREDICTION_DAYS):
+        predict_date = first_predict_date + timedelta(days=day_offset)
+        forecasts_for_day = _get_elia_forecasts_for_prediction_day(db_handler, predict_date)
+        prediction_df = predictor.predict_prices_for_day(predict_date, forecasts_for_day)
+        if prediction_df is not None:
+            refreshed_dates.append(predict_date)
+
+    logger.info("Refreshed cached price predictions for %s", refreshed_dates)
+    return refreshed_dates
+
+
+def _set_summary_job_status(state: str, message: str):
+    GLOBAL_APP_STATE.set("summary_job_status", {
+        "state": state,
+        "message": message,
+        "updated_at_utc": datetime.now(timezone.utc).isoformat(),
+    })
+
+
 def task_send_daily_energy_summary_email(app_config, db_handler, tariff_manager, renew_prices=False):
     """
     Scheduled task to generate and send the daily energy summary email.
@@ -395,8 +472,39 @@ def task_send_daily_energy_summary_email(app_config, db_handler, tariff_manager,
             logger.info("Daily energy summary email generated and sent successfully.")
         else:
             logger.error("Failed to generate or send daily energy summary email.")
+        return success
     except Exception as e:
         logger.error(f"Error in task_send_daily_energy_summary_email: {e}", exc_info=True)
+        return False
+
+
+def _run_daily_summary_background_job(app_config, db_handler, tariff_manager, renew_prices=False):
+    _set_summary_job_status("running", "Daily summary is running")
+    success = task_send_daily_energy_summary_email(app_config, db_handler, tariff_manager, renew_prices)
+    if success:
+        _set_summary_job_status("success", "Daily summary email sent")
+    else:
+        _set_summary_job_status("failed", "Daily summary email failed")
+
+
+def request_daily_summary_background_job(app_config, db_handler, tariff_manager, renew_prices=False) -> bool:
+    """Start a non-blocking summary job for dashboard-triggered requests."""
+    global _summary_job_thread
+
+    with _summary_job_lock:
+        if _summary_job_thread is not None and _summary_job_thread.is_alive():
+            _set_summary_job_status("running", "Daily summary is already running")
+            return False
+
+        _set_summary_job_status("queued", "Daily summary queued")
+        _summary_job_thread = threading.Thread(
+            target=_run_daily_summary_background_job,
+            args=(app_config, db_handler, tariff_manager, renew_prices),
+            name="daily-summary-email",
+            daemon=True,
+        )
+        _summary_job_thread.start()
+        return True
 
 
 def fetch_historic_da_data(db_handler: DatabaseHandler, app_config: dict, hist_start_date):
@@ -577,7 +685,7 @@ def task_system_mediator(system_mediator: SystemMediator, app_config,
     if GLOBAL_APP_STATE.get('summary_request', False):
         logger.info('Summary e-mail requested')
         GLOBAL_APP_STATE.set('summary_request', False)
-        task_send_daily_energy_summary_email(app_config, db_handler, tariff_manager, True)
+        request_daily_summary_background_job(app_config, db_handler, tariff_manager, True)
     if GLOBAL_APP_STATE.get('prediction_plan', None) is None:
         task_run_battery_predictor(app_config, db_handler)
 
@@ -624,6 +732,24 @@ def register_all_jobs(scheduler: BaseScheduler, db_handler: DatabaseHandler, app
                 "job_args": [db_handler, app_config],
                 "name": "Fetch Elia Forecasts",
                 "misfire_grace_time": 3600,  # 1 hour
+            },
+            {
+                "job_id": TARIFF_RELOAD_JOB_ID,
+                "task_function": task_reload_tariffs,
+                "trigger": "cron",
+                "trigger_args": {"hour": 3, "minute": 5},
+                "job_args": [tariff_manager],
+                "name": "Reload tariff file",
+                "misfire_grace_time": 3600,
+            },
+            {
+                "job_id": PRICE_PREDICTION_JOB_ID,
+                "task_function": task_refresh_price_predictions,
+                "trigger": "cron",
+                "trigger_args": {"hour": 3, "minute": 20},
+                "job_args": [app_config, db_handler],
+                "name": "Refresh price prediction cache",
+                "misfire_grace_time": 3600,
             },
             {
                 "job_id": MEDIATOR_LOGIC_JOB_ID,

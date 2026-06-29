@@ -61,7 +61,7 @@ def make_savings():
 
 
 class FakePricePredictor:
-    def __init__(self, db_handler):
+    def __init__(self, db_handler, app_config=None):
         self.is_trained = True
 
     def train_model(self, train_start, train_end):
@@ -126,6 +126,7 @@ class TestDailySummaryGeneratorProfiling(unittest.TestCase):
             },
         }
         generator = DailySummaryGenerator(app_config, db_handler, MagicMock(), {"solar": []})
+        db_handler.get_predicted_prices_for_date.return_value = []
 
         self.assertTrue(generator.generate_and_send_summary(app_config, profiler=profiler))
 

@@ -1,7 +1,9 @@
 # hec/forecasting/price_predictor.py
 import logging
+import pickle
 from datetime import datetime, timedelta, date, timezone, time
 from typing import List, Dict, Any, Optional
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -14,11 +16,108 @@ logger = logging.getLogger(__name__)
 
 
 class EnergyPricePredictor:
-    def __init__(self, db_handler: DatabaseHandler):
+    def __init__(self, db_handler: DatabaseHandler, app_config: Optional[Dict[str, Any]] = None):
         self.db_handler = db_handler
-        self.model = RandomForestRegressor(n_estimators=100, random_state=42, n_jobs=-1)
+        self.app_config = app_config or {}
+        predictor_config = self._prediction_config(self.app_config)
+        n_estimators = int(predictor_config.get("random_forest_estimators",
+                                                predictor_config.get("n_estimators", 100)))
+        n_jobs = int(predictor_config.get("random_forest_n_jobs", predictor_config.get("n_jobs", 1)))
+        self.training_window_days = int(predictor_config.get("training_window_days", 400))
+        self.retrain_after_days = int(predictor_config.get("retrain_after_days", 7))
+        self.model_path = self._resolve_model_path(predictor_config)
+        self.model = RandomForestRegressor(n_estimators=n_estimators, random_state=42, n_jobs=n_jobs)
         self.is_trained = False
         self.features: List[str] = []
+        self.trained_at_utc: Optional[datetime] = None
+        self.training_start_date: Optional[date] = None
+        self.training_end_date: Optional[date] = None
+        self.load_model()
+
+    @staticmethod
+    def _prediction_config(app_config: Dict[str, Any]) -> Dict[str, Any]:
+        if "price_prediction" in app_config:
+            return app_config.get("price_prediction") or {}
+        return app_config or {}
+
+    def _resolve_model_path(self, predictor_config: Dict[str, Any]) -> Optional[Path]:
+        db_path = getattr(self.db_handler, "db_path", None)
+        db_path_is_concrete = isinstance(db_path, (str, Path))
+
+        configured_path = predictor_config.get("model_path")
+        if configured_path:
+            path = Path(configured_path)
+            if not path.is_absolute() and db_path_is_concrete:
+                path = Path(db_path).parent / path
+            return path
+
+        if db_path_is_concrete:
+            return Path(db_path).with_suffix(".price_predictor.pkl")
+
+        return None
+
+    def resolve_training_window(self, start_train_date: date, end_train_date: date) -> tuple[date, date]:
+        """Bound model training to the configured trailing history window."""
+        if end_train_date is None:
+            end_train_date = datetime.now().astimezone().date() - timedelta(days=1)
+
+        if start_train_date is None:
+            start_train_date = end_train_date
+
+        if self.training_window_days > 0:
+            earliest_allowed_start = end_train_date - timedelta(days=self.training_window_days - 1)
+            start_train_date = max(start_train_date, earliest_allowed_start)
+
+        return start_train_date, end_train_date
+
+    def needs_training(self, reference_time_utc: Optional[datetime] = None) -> bool:
+        if not self.is_trained or self.trained_at_utc is None:
+            return True
+
+        reference_time_utc = reference_time_utc or datetime.now(timezone.utc)
+        if reference_time_utc.tzinfo is None:
+            reference_time_utc = reference_time_utc.replace(tzinfo=timezone.utc)
+
+        return reference_time_utc - self.trained_at_utc >= timedelta(days=self.retrain_after_days)
+
+    def load_model(self) -> bool:
+        if self.model_path is None or not self.model_path.exists():
+            return False
+
+        try:
+            with self.model_path.open("rb") as model_file:
+                payload = pickle.load(model_file)
+            self.model = payload["model"]
+            self.features = payload.get("features", [])
+            self.trained_at_utc = payload.get("trained_at_utc")
+            if isinstance(self.trained_at_utc, str):
+                self.trained_at_utc = datetime.fromisoformat(self.trained_at_utc)
+            self.training_start_date = payload.get("training_start_date")
+            self.training_end_date = payload.get("training_end_date")
+            self.is_trained = bool(self.features)
+            logger.info("Loaded persisted price prediction model from %s", self.model_path)
+            return self.is_trained
+        except Exception as e:
+            logger.warning("Could not load persisted price prediction model from %s: %s", self.model_path, e,
+                           exc_info=True)
+            self.is_trained = False
+            return False
+
+    def save_model(self) -> None:
+        if self.model_path is None or not self.is_trained:
+            return
+
+        payload = {
+            "model": self.model,
+            "features": self.features,
+            "trained_at_utc": self.trained_at_utc.isoformat() if self.trained_at_utc else None,
+            "training_start_date": self.training_start_date,
+            "training_end_date": self.training_end_date,
+        }
+        self.model_path.parent.mkdir(parents=True, exist_ok=True)
+        with self.model_path.open("wb") as model_file:
+            pickle.dump(payload, model_file)
+        logger.info("Persisted price prediction model to %s", self.model_path)
 
     def get_historical_training_data(self, start_train_date: date, end_train_date: date) \
             -> Optional[pd.DataFrame]:
@@ -103,6 +202,7 @@ class EnergyPricePredictor:
 
     def train_model(self, start_train_date: date = None, end_train_date: date = None):
         """Trains the Random Forest Regressor model."""
+        start_train_date, end_train_date = self.resolve_training_window(start_train_date, end_train_date)
         historical_df = self.get_historical_training_data(start_train_date, end_train_date)
         if historical_df is None or historical_df.empty:
             logger.error("Price predictor training failed: No historical data.")
@@ -126,6 +226,10 @@ class EnergyPricePredictor:
         try:
             self.model.fit(X, y)
             self.is_trained = True
+            self.trained_at_utc = datetime.now(timezone.utc)
+            self.training_start_date = start_train_date
+            self.training_end_date = end_train_date
+            self.save_model()
             logger.info("Price prediction model trained successfully.")
         except Exception as e:
             logger.error(f"Error during model training: {e}", exc_info=True)

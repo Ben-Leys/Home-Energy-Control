@@ -250,7 +250,14 @@ def generate_future_price_plot(
     Returns:
         BytesIO of a PNG plot, or None on error.
     """
-    future_dates = [datetime.combine(future_date, time(0, 0, 0)) + timedelta(days=i) for i in range(5)]
+    if not future_dfs:
+        logger.warning("No future price data to plot.")
+        return None
+
+    future_dates = [
+        datetime.combine(future_date, time(0, 0, 0)) + timedelta(days=i)
+        for i in range(len(future_dfs))
+    ]
     logger.info(f"Generating future price plot for "
                 f"{future_dates[0]}–{future_dates[-1]}")
 

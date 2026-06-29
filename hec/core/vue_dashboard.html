@@ -379,6 +379,9 @@
                     Daily summary
                 </button>
             </div>
+            <div class="sub-value" v-if="summaryJobStatusText">
+                Summary: {{ summaryJobStatusText }}
+            </div>
 
             <p style="color: #666; font-size: 0.8rem; margin-top: 10px;">Last sync: {{ lastSync }}</p>
         </div>
@@ -670,6 +673,13 @@
                 return match ? match.value : rawMode;
             });
 
+            const summaryJobStatusText = computed(() => {
+                const status = state.value?.summary_job_status;
+                if (!status || status.state === 'idle') return '';
+                const label = String(status.state || '').replace('_', ' ');
+                return status.message ? `${label}: ${status.message}` : label;
+            });
+
             const isCurrentInterval = (ts) => {
                 if (!ts) return false;
                 const rowTime = new Date(ts).getTime();
@@ -950,7 +960,8 @@
             return { currentTab, state, lastSync, enums, statusColor, currentPrice, formatTime, updateSetting, toast,
                 formatPeakTimestamp, logs, fetchLogs, isFetchingLogs, logFilter, filteredLogs, formattedState,
                 isCurrentInterval, fetchState, batteryModeDisplay, logLimit, formatTimeHm, authChecked, auth,
-                loginPassword, loginError, isLoggingIn, login, logout, requestShutdown, requestSummary, isPending}
+                loginPassword, loginError, isLoggingIn, login, logout, requestShutdown, requestSummary, isPending,
+                summaryJobStatusText}
         }
     }).mount('#app')
 </script>

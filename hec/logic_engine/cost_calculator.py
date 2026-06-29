@@ -14,7 +14,9 @@ debug_logger.setLevel(logging.INFO)
 
 
 def calculate_net_intervals_for_day(db: DatabaseHandler, app_config, target_date_local: datetime,
-                                    price_points: List[PricePoint] = None) -> List[NetElectricityPriceInterval]:
+                                    price_points: List[PricePoint] = None,
+                                    tariff_manager: Optional[TariffManager] = None
+                                    ) -> List[NetElectricityPriceInterval]:
     """
     Fetches all price points for `target_date` if None received, computes net buy/sell prices
     according to that day’s tariffs, and returns a list of price intervals.
@@ -39,8 +41,9 @@ def calculate_net_intervals_for_day(db: DatabaseHandler, app_config, target_date
         logger.warning(f"No price points found for target date {target_date_local}")
         return []
 
-    # 2. Fetch the day's tariffs once
-    tm = initialize_tariff_manager(app_config)
+    # 2. Fetch the day's tariffs once. Callers that already own a TariffManager
+    # pass it in so its daily reload policy is reused instead of reparsing per day.
+    tm = tariff_manager or initialize_tariff_manager(app_config)
     tariffs = tm.get_all_tariffs(target_date_local.date())
 
     intervals: List[NetElectricityPriceInterval] = []
@@ -172,7 +175,12 @@ def calculate_battery_saving_for_period(start_date: date, end_date: date, app_co
         debug_logger.debug(f"Calculating battery savings for {midnight}")
 
         # --- 2. Fetch Price Intervals ---
-        intervals: List['NetElectricityPriceInterval'] = calculate_net_intervals_for_day(db, app_config, midnight)
+        intervals: List['NetElectricityPriceInterval'] = calculate_net_intervals_for_day(
+            db,
+            app_config,
+            midnight,
+            tariff_manager=tm,
+        )
         if not intervals:
             logger.warning(f"No net intervals found for {day}. Skipping calculation.")
             day += timedelta(days=1)
@@ -343,8 +351,13 @@ def calculate_total_costs_for_period(start_date: date, end_date: date, app_confi
         debug_logger.debug(f"Calculating total costs for {midnight}")
 
         # 2. Fetch tariffs and price intervals
-        tariffs = tm.get_all_tariffs(start_date)
-        intervals: List[NetElectricityPriceInterval] = calculate_net_intervals_for_day(db, app_config, midnight)
+        tariffs = tm.get_all_tariffs(day)
+        intervals: List[NetElectricityPriceInterval] = calculate_net_intervals_for_day(
+            db,
+            app_config,
+            midnight,
+            tariff_manager=tm,
+        )
         if not intervals:
             logger.warning(f"No net intervals found for {day}. Skipping calculation.")
             day += timedelta(days=1)

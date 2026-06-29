@@ -28,6 +28,11 @@ class AppState:
             "app_mediator_goal": c.MediatorGoal.NO_CHARGING,
             "reboot_request": False,
             "summary_request": False,
+            "summary_job_status": {
+                "state": "idle",
+                "message": "No summary requested",
+                "updated_at_utc": None,
+            },
             "sunrise": None,
             "sunset": None,
             # P1 meter data, recent import/export samples and averages
