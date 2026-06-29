@@ -139,6 +139,8 @@ The app should support graceful shutdown and restart boundaries:
 - Protect `/api/v1/state`, `/api/v1/logs`, and `/api/v1/settings/update`.
 - Add CSRF or same-origin protection for state-changing POST requests.
 - Replace generic "any AppState key" mutation with an allowlist of settings and commands.
+- Validate the real dashboard/AppState setting keys, including `evcc_manual_limit`, and remove stale aliases such as
+  `evcc_manual_limit_amps`.
 - Add command audit logging for setting changes, summary requests, restart requests, and alert acknowledgements.
 - Until restart is redesigned, make the dashboard restart/shutdown action explicit and guarded by confirmation.
 
@@ -155,6 +157,7 @@ The app should support graceful shutdown and restart boundaries:
 - Unauthenticated requests cannot read logs or change settings.
 - A browser login persists across restarts using a configured cookie secret.
 - Allowed settings update successfully; unknown keys are rejected.
+- EVCC manual current updates are coerced to integers and rejected outside the configured safe range.
 - Security remains lightweight and works over LAN and VPN without external identity services.
 
 **Risks:**
@@ -165,7 +168,7 @@ The app should support graceful shutdown and restart boundaries:
 **Suggested batches:**
 
 - PR 1.1: Add auth config, password verification, signed cookie, and login/logout.
-- PR 1.2: Add settings/command allowlist and audit entries.
+- PR 1.2: Add settings/command allowlist, fix EVCC manual limit validation, and audit entries.
 - PR 1.3: Add frontend login state and guarded destructive actions.
 
 ### Phase 2: SQLite Reliability And Professional DB Handling
@@ -271,12 +274,16 @@ responsive enough.
 **Work:**
 
 - Add a thread-safe `AppState` lock and monotonically increasing `state_version`.
+- Give each mediator decision tick one immutable state snapshot, so EV amperage, peak-shaving, inverter, and battery
+  decisions cannot read mixed inputs from different poll updates.
 - Return canonical state and `state_version` from setting update calls.
 - Frontend keeps a pending local edit until backend confirms or rejects it.
 - Poll only changed state when possible.
+- Move `/api/v1/state` serialization cleanup outside the per-key serialization loop so polling work scales linearly with
+  state size.
 - Split command state from observed hardware state where it matters.
-- Fix the current key mismatch where `task_run_battery_predictor` reads `average_production_watts` instead of
-  `average_solar_production_watts`.
+- Fix predictor state-read bugs: `task_run_battery_predictor` reads `average_production_watts` instead of
+  `average_solar_production_watts`, and battery SOC input uses a `-0.001` sentinel instead of explicit no-data handling.
 
 **Files likely touched:**
 
@@ -292,6 +299,7 @@ responsive enough.
 - A polling refresh does not revert confirmed values to old values.
 - Failed updates show a clear error and restore the last confirmed value.
 - Sensor values stay reasonably live without heavy CPU/network usage.
+- A single mediator run uses one consistent snapshot even if poll jobs update AppState during the run.
 
 **Risks:**
 
@@ -303,7 +311,7 @@ responsive enough.
 - PR 3.1: Add AppState locking/versioning and tests.
 - PR 3.2: Make update API return canonical state and reject non-allowlisted keys.
 - PR 3.3: Update Vue pending-state behavior and polling interval.
-- PR 3.4: Fix the solar average key bug with a regression test.
+- PR 3.4: Fix battery predictor AppState input bugs with regression tests.
 
 ### Phase 4: Daily Summary And Forecast Performance
 
@@ -320,22 +328,32 @@ the email request path unless explicitly forced.
 - Separate "train price predictor", "predict D+1 to D+5", "generate plots", and "send email" into independently timed
   steps.
 - Persist and reuse the price model or cache predictions in `predicted_prices`.
-- Train at most once per day, preferably during a low-impact window.
+- Train on a bounded trailing history window and persist the fitted model. Default to a configurable weekly retraining
+  cadence during a low-impact window, with a manual force-train path for testing or recovery.
 - Make `RandomForestRegressor` resource use configurable; default to `n_jobs=1` on NAS and consider fewer estimators
   after accuracy comparison.
+- Add a `daily_costs` or equivalent rollup table after migrations exist, compute yesterday once, and build month/year
+  summary totals from rollups instead of reprocessing raw interval rows every email.
+- Pass the already-initialized `TariffManager` through net-interval and report calculations instead of reparsing tariffs
+  inside per-day loops.
 - Generate the daily email from cached predictions. If predictions are missing or stale, send the summary without
   blocking for a full model train.
 - Reduce plot resource use: lower DPI, smaller figure size, close figures reliably, and skip optional future plot when
   stale.
+- If the cached/rollup path still starves control jobs after measurement, move remaining CPU-heavy report work to a
+  `ProcessPoolExecutor` or a separate scheduled reporting process.
 - Move manual "Daily summary" dashboard action to a non-blocking job request with progress/status.
 
 **Files likely touched:**
 
 - `hec/reporting/daily_summary.py`
 - `hec/logic_engine/price_predictor.py`
+- `hec/logic_engine/cost_calculator.py`
+- `hec/core/tariff_manager.py`
 - `hec/reporting/plot_generator.py`
 - `hec/logic_engine/scheduled_tasks.py`
 - `hec/database_ops/db_handler.py`
+- new migration/table support for daily rollups
 - `hec/core/app_state.py`
 - `hec/tests/`
 
@@ -344,6 +362,8 @@ the email request path unless explicitly forced.
 - Daily email generation completes within a defined NAS budget, suggested target: under 2 minutes for normal cached
   path.
 - Price model training does not use all CPU cores by default.
+- Normal daily email generation does not train a price model and does not recalculate month/year totals from raw
+  interval rows.
 - Other scheduler jobs continue to run while summary/report jobs execute.
 - Manual summary request returns immediately in the UI and exposes progress.
 - If forecasting fails, the daily email still sends core energy information and records a persistent incident.
@@ -357,9 +377,10 @@ the email request path unless explicitly forced.
 
 - PR 4.1: Add summary timing instrumentation and tests around non-blocking request behavior.
 - PR 4.2: Split training/prediction/email steps without changing output.
-- PR 4.3: Add prediction cache reuse and stale-cache fallback.
-- PR 4.4: Tune NAS resource limits and plot generation.
-- PR 4.5: Add dashboard progress/status for report jobs.
+- PR 4.3: Add bounded persisted price-model training, prediction cache reuse, and stale-cache fallback.
+- PR 4.4: Add daily rollups and remove repeated tariff parsing from report calculations.
+- PR 4.5: Tune NAS resource limits and plot generation; add process isolation only if measurement still requires it.
+- PR 4.6: Add dashboard progress/status for report jobs.
 
 ### Phase 5: Restart And Runtime Lifecycle
 
@@ -488,8 +509,18 @@ controllable server.
 - Document deployment on NAS, backup/restore, restart, troubleshooting, and device configuration.
 - Add CI running unit tests.
 - Add dependency lock/audit workflow.
+- Convert `requirements.txt` to UTF-8 and add lightweight lint/format configuration, keeping the tooling development-side
+  so NAS deployment stays simple.
 - Vendor or pin frontend assets and add a basic Content Security Policy.
 - Improve dashboard accessibility: labels, focus, keyboard support, confirmation flows.
+- Introduce a shared HTTP session/retry helper for HTTP integrations, then migrate HomeWizard, EVCC, ENTSO-E, and Elia
+  clients opportunistically.
+- Split the P1 meter read client from the HomeWizard battery group-command gateway so the dependency graph matches the
+  device capabilities.
+- Centralize timezone helpers for UTC/local conversion and migrate mixed `pytz`, `zoneinfo`, and system-local timezone
+  usage as adjacent code is touched.
+- After deciding whether the Streamlit dashboard remains useful, remove or clearly quarantine the deprecated Streamlit
+  UI and any unused dashboard dependencies.
 - Add a project license and privacy/data-retention note.
 
 **Files likely touched:**
@@ -500,12 +531,17 @@ controllable server.
 - `.github/workflows/` if GitHub Actions is used
 - `hec/core/app_initializer.py`
 - `hec/core/vue_dashboard.html`
+- `hec/data_sources/`
+- `hec/controllers/`
+- new shared HTTP/time utility modules if introduced
 
 **Acceptance criteria:**
 
 - A new developer can configure and run the app from docs without private knowledge.
 - CI catches failing tests.
+- Standard Python packaging and audit tools can read `requirements.txt` without encoding-specific workarounds.
 - Dependency updates are deliberate and auditable.
+- HTTP integrations reuse connections and have one place for retry, timeout, and TLS policy.
 - Dashboard remains usable from keyboard and does not depend on unpinned CDN code.
 
 **Risks:**
@@ -517,7 +553,10 @@ controllable server.
 - PR 7.1: Add config schema and example config.
 - PR 7.2: Add NAS deployment and backup docs.
 - PR 7.3: Add CI and dependency audit.
-- PR 7.4: Improve frontend asset handling and accessibility.
+- PR 7.4: Convert requirements encoding and add lint/format configuration.
+- PR 7.5: Introduce shared HTTP client helpers and split P1 meter from battery gateway responsibilities.
+- PR 7.6: Centralize timezone helpers and migrate high-risk date/time paths.
+- PR 7.7: Improve frontend asset handling and accessibility.
 
 ## Behavior Preservation Gates
 
@@ -536,9 +575,17 @@ Before changing any of these areas, add or update characterization tests and get
 Allowed narrow bug fixes still need tests:
 
 - `hec/logic_engine/scheduled_tasks.py:526` uses the wrong solar average key.
+- `hec/logic_engine/scheduled_tasks.py:452-459` uses a `-0.001` battery SOC sentinel instead of explicit no-data
+  handling.
 - `hec/database_ops/db_handler.py:226-265` returns an inserted count that is never incremented.
 - `hec/database_ops/db_handler.py:1350-1380` logs `target_date` in an exception path even though the parameter is
   `target_date_local`.
+- `hec/core/models.py:59` evaluates the default `EVCCOverallState.timestamp_utc_iso` once at import time instead of
+  per instance.
+- `hec/controllers/api_evcc.py:164-169` logs an invalid EVCC minimum-current command but still sends it.
+- `hec/logic_engine/battery_predictor.py:329` hard-codes `5.36` kWh in optimizer cost valuation instead of using the
+  configured battery capacity. Because this touches trusted optimizer behavior, keep it behind the battery predictor
+  characterization and user-approval gate.
 
 ## Edge Cases To Design And Test
 

@@ -1,79 +1,301 @@
 import logging
 import os
+import hmac
+import secrets
 from collections import deque
-from datetime import datetime
+from datetime import datetime, timedelta
 from enum import Enum
+from functools import wraps
 from typing import Optional
+from urllib.parse import urlparse
 
 import numpy as np
 import pandas as pd
-from flask import Flask, jsonify, request, send_from_directory
+from flask import Flask, jsonify, request, send_from_directory, session
+from werkzeug.security import check_password_hash
 
 from hec.core import constants as c
 from hec.core.app_state import GLOBAL_APP_STATE
 from hec.database_ops import db_handler
 
 api_app = Flask(__name__)
+api_app.secret_key = "hec-auth-disabled-session-secret"
 logger = logging.getLogger(__name__)
 
 _DB_INSTANCE: Optional[db_handler] = None
+_CSRF_SESSION_KEY = "csrf_token"
+_AUTH_CONFIG = {
+    "enabled": False,
+    "password": None,
+    "password_hash": None,
+    "csrf_enabled": True,
+    "same_origin_enabled": True,
+}
+
+_SETTING_TYPE_MAP = {
+    "app_operating_mode": c.OperatingMode,
+    "app_mediator_goal": c.MediatorGoal,
+    "inverter_manual_state": c.InverterManualState,
+    "evcc_manual_state": c.EVCCManualState,
+    "battery_manual_mode": c.BatteryState,
+    "inverter_manual_limit": int,
+    "evcc_manual_limit": int,
+}
+
+_COMMAND_TYPE_MAP = {
+    "summary_request": bool,
+    "reboot_request": bool,
+}
+
+_ALLOWED_UPDATE_TYPE_MAP = {**_SETTING_TYPE_MAP, **_COMMAND_TYPE_MAP}
+_RANGE_LIMITS = {
+    "inverter_manual_limit": (0, 7000, "Inverter limit must be between 0 and 7000 W"),
+    "evcc_manual_limit": (6, 32, "EVCC amps must be between 6 and 32"),
+}
+
+
+def configure_api_security(app_config: dict):
+    """Configures lightweight local dashboard authentication."""
+    global _AUTH_CONFIG
+
+    api_config = app_config.get("api_server", app_config) if app_config else {}
+    auth_config = api_config.get("auth", {})
+
+    password_env = auth_config.get("password_env", "HEC_AUTH_PASSWORD")
+    password_hash_env = auth_config.get("password_hash_env", "HEC_AUTH_PASSWORD_HASH")
+    cookie_secret_env = auth_config.get("cookie_secret_env", "HEC_AUTH_COOKIE_SECRET")
+
+    password = auth_config.get("password") or os.getenv(password_env)
+    password_hash = auth_config.get("password_hash") or os.getenv(password_hash_env)
+    cookie_secret = auth_config.get("cookie_secret") or os.getenv(cookie_secret_env)
+    enabled = bool(auth_config.get("enabled", bool(password or password_hash)))
+
+    if enabled and not (password or password_hash):
+        logger.warning("API auth is enabled but no password or password hash is configured. Disabling API auth.")
+        enabled = False
+
+    if enabled and not cookie_secret:
+        cookie_secret = secrets.token_urlsafe(32)
+        logger.info(
+            "API auth is enabled without a configured cookie secret. "
+            "Generated a transient secret; sessions will not survive app restarts."
+        )
+
+    cookie_max_age_days = int(auth_config.get("cookie_max_age_days", 365))
+    api_app.secret_key = cookie_secret or "hec-auth-disabled-session-secret"
+    api_app.permanent_session_lifetime = timedelta(days=max(1, cookie_max_age_days))
+    api_app.config.update(
+        SESSION_COOKIE_HTTPONLY=True,
+        SESSION_COOKIE_SAMESITE=auth_config.get("cookie_samesite", "Lax"),
+        SESSION_COOKIE_SECURE=bool(auth_config.get("secure_cookie", False)),
+    )
+
+    _AUTH_CONFIG = {
+        "enabled": enabled,
+        "password": password,
+        "password_hash": password_hash,
+        "csrf_enabled": bool(auth_config.get("csrf_enabled", True)),
+        "same_origin_enabled": bool(auth_config.get("same_origin_enabled", True)),
+    }
+
+
+def _auth_enabled() -> bool:
+    return bool(_AUTH_CONFIG.get("enabled"))
+
+
+def _is_authenticated() -> bool:
+    if not _auth_enabled():
+        return True
+    return bool(session.get("authenticated"))
+
+
+def _verify_password(candidate: str) -> bool:
+    if not candidate:
+        return False
+
+    configured_hash = _AUTH_CONFIG.get("password_hash")
+    if configured_hash:
+        return check_password_hash(configured_hash, candidate)
+
+    configured_password = _AUTH_CONFIG.get("password")
+    if configured_password:
+        return hmac.compare_digest(str(configured_password), str(candidate))
+
+    return False
+
+
+def _ensure_csrf_token() -> str:
+    token = session.get(_CSRF_SESSION_KEY)
+    if not token:
+        token = secrets.token_urlsafe(32)
+        session[_CSRF_SESSION_KEY] = token
+    return token
+
+
+def _json_error(message: str, status_code: int):
+    return jsonify({"error": message}), status_code
+
+
+def require_auth(view_func):
+    @wraps(view_func)
+    def wrapper(*args, **kwargs):
+        if not _is_authenticated():
+            return _json_error("Authentication required", 401)
+        return view_func(*args, **kwargs)
+
+    return wrapper
+
+
+def _same_origin_request() -> bool:
+    origin = request.headers.get("Origin")
+    referer = request.headers.get("Referer")
+    candidate = origin or referer
+    if not candidate:
+        return True
+
+    parsed = urlparse(candidate)
+    host_url = urlparse(request.host_url)
+    return parsed.scheme == host_url.scheme and parsed.netloc == host_url.netloc
+
+
+def require_csrf(view_func):
+    @wraps(view_func)
+    def wrapper(*args, **kwargs):
+        if not _auth_enabled():
+            return view_func(*args, **kwargs)
+
+        if _AUTH_CONFIG.get("same_origin_enabled", True) and not _same_origin_request():
+            return _json_error("Cross-origin request rejected", 403)
+
+        if _AUTH_CONFIG.get("csrf_enabled", True):
+            expected_token = session.get(_CSRF_SESSION_KEY)
+            provided_token = request.headers.get("X-CSRF-Token")
+            if not expected_token or not hmac.compare_digest(str(expected_token), str(provided_token or "")):
+                return _json_error("Invalid CSRF token", 403)
+
+        return view_func(*args, **kwargs)
+
+    return wrapper
+
+
+def _serialize_for_json(value):
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, Enum):
+        return value.name
+    if isinstance(value, list):
+        new_list = []
+        for item in value:
+            if isinstance(item, dict):
+                new_list.append({k: _serialize_for_json(v) for k, v in item.items()})
+            else:
+                new_list.append(_serialize_for_json(item))
+        return new_list
+    if isinstance(value, deque):
+        return list(value)
+    if isinstance(value, dict):
+        return {k: _serialize_for_json(v) for k, v in value.items()}
+    return value
+
+
+def _coerce_bool(raw_value):
+    if isinstance(raw_value, bool):
+        return raw_value
+    if isinstance(raw_value, str):
+        normalized = raw_value.strip().lower()
+        if normalized in ("true", "1", "yes", "on"):
+            return True
+        if normalized in ("false", "0", "no", "off"):
+            return False
+    raise ValueError("Expected a boolean value")
+
+
+def _coerce_update_value(key, raw_value):
+    target_type = _ALLOWED_UPDATE_TYPE_MAP[key]
+
+    if target_type is bool:
+        return _coerce_bool(raw_value)
+
+    if target_type is int:
+        if isinstance(raw_value, bool):
+            raise ValueError("Expected an integer value")
+        final_value = int(raw_value)
+        if key in _RANGE_LIMITS:
+            low, high, message = _RANGE_LIMITS[key]
+            if not (low <= final_value <= high):
+                raise ValueError(message)
+        return final_value
+
+    if isinstance(target_type, type) and issubclass(target_type, Enum):
+        if isinstance(raw_value, target_type):
+            return raw_value
+        if not isinstance(raw_value, str):
+            raise ValueError("Expected enum name")
+        return target_type[raw_value]
+
+    return raw_value
+
+
+def _audit_update(key, value):
+    remote_addr = request.remote_addr or "unknown"
+    if key in _COMMAND_TYPE_MAP:
+        logger.info("AUDIT command_request %s remote=%s", key, remote_addr)
+    else:
+        safe_value = value.name if isinstance(value, Enum) else value
+        logger.info("AUDIT setting_change %s=%s remote=%s", key, safe_value, remote_addr)
+
+
+@api_app.route('/api/v1/auth/status', methods=['GET'])
+def get_auth_status():
+    authenticated = _is_authenticated()
+    response = {
+        "auth_enabled": _auth_enabled(),
+        "authenticated": authenticated,
+    }
+    if authenticated:
+        response["csrf_token"] = _ensure_csrf_token()
+    return jsonify(response)
+
+
+@api_app.route('/api/v1/auth/login', methods=['POST'])
+def login_api():
+    if not _auth_enabled():
+        session.permanent = True
+        session["authenticated"] = True
+        return jsonify({"success": True, "csrf_token": _ensure_csrf_token()})
+
+    data = request.get_json(silent=True) or {}
+    if not _verify_password(data.get("password", "")):
+        logger.info("AUDIT auth_login failed remote=%s", request.remote_addr or "unknown")
+        return _json_error("Invalid password", 401)
+
+    session.clear()
+    session.permanent = True
+    session["authenticated"] = True
+    logger.info("AUDIT auth_login success remote=%s", request.remote_addr or "unknown")
+    return jsonify({"success": True, "csrf_token": _ensure_csrf_token()})
+
+
+@api_app.route('/api/v1/auth/logout', methods=['POST'])
+@require_auth
+@require_csrf
+def logout_api():
+    logger.info("AUDIT auth_logout remote=%s", request.remote_addr or "unknown")
+    session.clear()
+    return jsonify({"success": True})
 
 
 @api_app.route('/api/v1/state', methods=['GET'])
+@require_auth
 def get_app_state_api():
     """API endpoint to get the current application state."""
-    # GLOBAL_APP_STATE.get_all() returns a JSON-serializable dict
-    # datetime objects need to be converted to ISO strings, Enums to their names
     current_raw_state = GLOBAL_APP_STATE.get_all()
-
-    # Make a copy to modify for serialization
-    clean_state, serializable_state = {}, {}
-    for key, value in current_raw_state.items():
-        if isinstance(value, datetime):
-            serializable_state[key] = value.isoformat()
-        elif isinstance(value, c.AppStatus) or \
-                isinstance(value, c.MediatorGoal) or \
-                isinstance(value, c.OperatingMode) or \
-                isinstance(value, c.InverterStatus) or \
-                isinstance(value, c.InverterManualState) or \
-                isinstance(value, c.EVCCManualState) or \
-                isinstance(value, c.BatteryState):
-            serializable_state[key] = value.name
-        elif isinstance(value, list):
-            new_list = []
-            for item in value:
-                if isinstance(item, dict):
-                    new_dict_item = {}
-                    for k_item, v_item in item.items():
-                        if isinstance(v_item, datetime):
-                            new_dict_item[k_item] = v_item.isoformat()
-                        elif isinstance(v_item, Enum):
-                            new_dict_item[k_item] = v_item.name
-                        else:
-                            new_dict_item[k_item] = v_item
-                    new_list.append(new_dict_item)
-                else:
-                    new_list.append(str(item))
-            serializable_state[key] = new_list
-        elif isinstance(value, deque):
-            serializable_state[key] = list(value)
-        elif isinstance(value, dict):
-            new_dict = {}
-            for k_nested, v_nested in value.items():
-                if isinstance(v_nested, Enum):
-                    new_dict[k_nested] = v_nested.name
-                else:
-                    new_dict[k_nested] = v_nested
-            serializable_state[key] = new_dict
-        else:
-            serializable_state[key] = value
-
-        clean_state = clean_nas(serializable_state)
-
-    return jsonify(clean_state)
+    serializable_state = {key: _serialize_for_json(value) for key, value in current_raw_state.items()}
+    return jsonify(clean_nas(serializable_state))
 
 
 @api_app.route("/api/v1/logs", methods=['GET'])
+@require_auth
 def get_logs():
     if _DB_INSTANCE is None:
         return jsonify({"error": "Database not initialized in API"}), 500
@@ -89,13 +311,15 @@ def get_logs():
 
 
 @api_app.route('/api/v1/settings/update', methods=['POST'])
+@require_auth
+@require_csrf
 def update_app_setting_api():
     """
-    Generic API endpoint to update a specific setting in AppState.
+    API endpoint to update a specifically allowed setting or command in AppState.
     Expects JSON body: {"key": "app_state_key_name", "value": "new_value"}
     """
     try:
-        data = request.json
+        data = request.get_json(silent=True)
         if not data or 'key' not in data or 'value' not in data:  # 'value' can be None
             logger.warning("API /settings/update: Missing 'key' or 'value' in request JSON.")
             return jsonify({"error": "Missing 'key' or 'value' in request body"}), 400
@@ -105,58 +329,26 @@ def update_app_setting_api():
 
         logger.info(f"API /settings/update: Received request to update '{key}' to '{raw_val}'")
 
-        # Check if the key is even valid in AppState
+        if key not in _ALLOWED_UPDATE_TYPE_MAP:
+            logger.warning(f"API /settings/update: Attempt to update non-allowlisted key '{key}'.")
+            return jsonify({"error": f"Setting key '{key}' is not allowed for API updates"}), 400
+
         if key not in GLOBAL_APP_STATE.current_values:
-            logger.warning(f"API /settings/update: Attempt to update unknown AppState key '{key}'.")
+            logger.warning(f"API /settings/update: Allowlisted key '{key}' is not present in AppState.")
             return jsonify({"error": f"Unknown setting key: {key}"}), 400
 
-        # Key map to Enum
-        TYPE_MAP = {
-            "app_operating_mode": c.OperatingMode,
-            "app_mediator_goal": c.MediatorGoal,
-            "inverter_manual_state": c.InverterManualState,
-            "evcc_manual_state": c.EVCCManualState,
-            "battery_manual_mode": c.BatteryState,
-            "inverter_manual_limit": int,
-            "evcc_manual_limit_amps": int,
-        }
+        try:
+            final_value = _coerce_update_value(key, raw_val)
+        except (KeyError, ValueError, TypeError) as e:
+            logger.warning(f"Conversion failed for {key} with value {raw_val}: {e}")
+            return jsonify({"error": f"Invalid value '{raw_val}' for {key}: {e}"}), 400
 
-        final_value = raw_val
-
-        if raw_val is not None:
-            target_type = TYPE_MAP.get(key)
-
-            try:
-                if target_type is None:
-                    default_val = GLOBAL_APP_STATE.current_values[key]
-                    if isinstance(default_val, bool) and not isinstance(raw_val, bool):
-                        final_value = str(raw_val).lower() in ['true', '1', 'yes']
-                    else:
-                        final_value = raw_val
-
-                elif issubclass(target_type, Enum):
-                    # Enum via Name (eg. 'BATTERY_ON')
-                    final_value = target_type[raw_val]
-
-                elif target_type == int:
-                    final_value = int(raw_val)
-                    # Range validation
-                    if key == "inverter_manual_limit" and not (0 <= final_value <= 7000):
-                        return jsonify({"error": "Inverter limit 0-7000"}), 400
-                    if key == "evcc_manual_limit_amps" and not (6 <= final_value <= 32):
-                        return jsonify({"error": "EVCC amps 6-32"}), 400
-
-            except (KeyError, ValueError, TypeError) as e:
-                logger.warning(f"Conversion failed for {key} with value {raw_val}: {e}")
-                return jsonify({"error": f"Invalid value '{raw_val}' for {key}"}), 400
-
-        # Update and confirm
         GLOBAL_APP_STATE.set(key, final_value)
         confirmed = GLOBAL_APP_STATE.get(key)
 
         json_val = confirmed.name if isinstance(confirmed, Enum) else confirmed
 
-        logger.info(f"API Update: {key} -> {json_val}")
+        _audit_update(key, confirmed)
         return jsonify({"success": True, "key": key, "new_value_stored": json_val})
 
     except Exception as e:
@@ -194,6 +386,7 @@ def run_api_server(app_config: dict, db_handler):
     port = api_config.get('port', 8123)
     debug_mode = api_config.get('debug', False)
     _DB_INSTANCE = db_handler
+    configure_api_security(app_config)
 
     logger.info(f"Starting API server on http://{host}:{port}")
     try:

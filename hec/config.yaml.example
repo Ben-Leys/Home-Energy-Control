@@ -1,0 +1,16 @@
+# Merge this api_server section into hec/config.yaml to enable the Phase 1
+# lightweight dashboard/API authentication.
+api_server:
+  enabled: true
+  host: 0.0.0.0
+  port: 8123
+  debug: false
+  auth:
+    enabled: true
+    password_env: HEC_AUTH_PASSWORD
+    password_hash_env: HEC_AUTH_PASSWORD_HASH
+    cookie_secret_env: HEC_AUTH_COOKIE_SECRET
+    cookie_max_age_days: 365
+    csrf_enabled: true
+    same_origin_enabled: true
+    secure_cookie: false
