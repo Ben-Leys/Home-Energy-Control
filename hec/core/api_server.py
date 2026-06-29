@@ -11,7 +11,7 @@ from urllib.parse import urlparse
 
 import numpy as np
 import pandas as pd
-from flask import Flask, jsonify, request, send_from_directory, session
+from flask import Flask, jsonify, make_response, request, send_from_directory, session
 from werkzeug.security import check_password_hash
 
 from hec.core import constants as c
@@ -134,6 +134,29 @@ def _ensure_csrf_token() -> str:
 
 def _json_error(message: str, status_code: int):
     return jsonify({"error": message}), status_code
+
+
+def _parse_state_version(raw_value) -> Optional[int]:
+    if raw_value is None:
+        return None
+    candidate = str(raw_value).strip()
+    if candidate.startswith("W/"):
+        candidate = candidate[2:].strip()
+    candidate = candidate.strip('"')
+    try:
+        return int(candidate)
+    except (TypeError, ValueError):
+        return None
+
+
+def _serialize_app_state():
+    current_raw_state = GLOBAL_APP_STATE.get_all()
+    serializable_state = _serialize_for_json(current_raw_state)
+    return clean_nas(serializable_state)
+
+
+def _state_etag(state_version: int) -> str:
+    return f'"{int(state_version)}"'
 
 
 def require_auth(view_func):
@@ -289,9 +312,20 @@ def logout_api():
 @require_auth
 def get_app_state_api():
     """API endpoint to get the current application state."""
-    current_raw_state = GLOBAL_APP_STATE.get_all()
-    serializable_state = {key: _serialize_for_json(value) for key, value in current_raw_state.items()}
-    return jsonify(clean_nas(serializable_state))
+    state_version = GLOBAL_APP_STATE.get_state_version()
+    requested_version = _parse_state_version(request.args.get("since_version"))
+    if requested_version is None:
+        requested_version = _parse_state_version(request.headers.get("If-None-Match"))
+
+    if requested_version is not None and requested_version >= state_version:
+        response = make_response("", 304)
+        response.headers["ETag"] = _state_etag(state_version)
+        return response
+
+    state_payload = _serialize_app_state()
+    response = jsonify(state_payload)
+    response.headers["ETag"] = _state_etag(state_payload.get("state_version", state_version))
+    return response
 
 
 @api_app.route("/api/v1/logs", methods=['GET'])
@@ -333,7 +367,7 @@ def update_app_setting_api():
             logger.warning(f"API /settings/update: Attempt to update non-allowlisted key '{key}'.")
             return jsonify({"error": f"Setting key '{key}' is not allowed for API updates"}), 400
 
-        if key not in GLOBAL_APP_STATE.current_values:
+        if not GLOBAL_APP_STATE.has_key(key):
             logger.warning(f"API /settings/update: Allowlisted key '{key}' is not present in AppState.")
             return jsonify({"error": f"Unknown setting key: {key}"}), 400
 
@@ -349,7 +383,14 @@ def update_app_setting_api():
         json_val = confirmed.name if isinstance(confirmed, Enum) else confirmed
 
         _audit_update(key, confirmed)
-        return jsonify({"success": True, "key": key, "new_value_stored": json_val})
+        state_payload = _serialize_app_state()
+        return jsonify({
+            "success": True,
+            "key": key,
+            "new_value_stored": json_val,
+            "state_version": state_payload.get("state_version"),
+            "state": state_payload,
+        })
 
     except Exception as e:
         logger.error(f"API /settings/update: Error processing request: {e}", exc_info=True)

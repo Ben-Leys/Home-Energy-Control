@@ -181,10 +181,12 @@
 <body>
 
 <div id="app">
-    <h3>🏠 Home Energy Control</h3>
+    <div class="header-row">
+        <h3>🏠 Home Energy Control</h3>
 
-    <div class="header-actions" v-if="auth.authEnabled && auth.authenticated">
-        <button class="btn" @click="logout" style="padding: 5px 12px;">Logout</button>
+        <div class="header-actions" v-if="auth.authEnabled && auth.authenticated">
+            <button class="btn" @click="logout" style="padding: 5px 12px;">Logout</button>
+        </div>
     </div>
 
     <div v-if="!authChecked" class="card">
@@ -307,21 +309,24 @@
                     <div>
                         <div class="control-group">
                             <label>Application mode:</label>
-                            <select v-model="state.app_operating_mode" @change="updateSetting('app_operating_mode', state.app_operating_mode)">
+                            <select v-model="state.app_operating_mode" :disabled="isPending('app_operating_mode')"
+                                    @change="updateSetting('app_operating_mode', state.app_operating_mode)">
                                 <option v-for="opt in enums.OperatingMode" :value="opt.name">{{ opt.value }}</option>
                             </select>
                         </div>
 
                         <div class="control-group">
                             <label>Mediator goal:</label>
-                            <select v-model="state.app_mediator_goal" @change="updateSetting('app_mediator_goal', state.app_mediator_goal)">
+                            <select v-model="state.app_mediator_goal" :disabled="isPending('app_mediator_goal')"
+                                    @change="updateSetting('app_mediator_goal', state.app_mediator_goal)">
                                 <option v-for="opt in enums.MediatorGoal" :value="opt.name">{{ opt.value }}</option>
                             </select>
                         </div>
 
                         <div class="control-group">
                             <label>Inverter mode:</label>
-                            <select v-model="state.inverter_manual_state" @change="updateSetting('inverter_manual_state', state.inverter_manual_state)">
+                            <select v-model="state.inverter_manual_state" :disabled="isPending('inverter_manual_state')"
+                                    @change="updateSetting('inverter_manual_state', state.inverter_manual_state)">
                                 <option v-for="opt in enums.InverterManualState" :value="opt.name">{{ opt.value }}</option>
                             </select>
                         </div>
@@ -333,14 +338,16 @@
                     <div>
                         <div class="control-group">
                             <label>Battery mode:</label>
-                            <select v-model="state.battery_manual_mode" @change="updateSetting('battery_manual_mode', state.battery_manual_mode)">
+                            <select v-model="state.battery_manual_mode" :disabled="isPending('battery_manual_mode')"
+                                    @change="updateSetting('battery_manual_mode', state.battery_manual_mode)">
                                 <option v-for="opt in enums.BatteryState" :value="opt.name">{{ opt.value }}</option>
                             </select>
                         </div>
 
                         <div class="control-group">
                             <label>EVCC mode:</label>
-                            <select v-model="state.evcc_manual_state" @change="updateSetting('evcc_manual_state', state.evcc_manual_state)">
+                            <select v-model="state.evcc_manual_state" :disabled="isPending('evcc_manual_state')"
+                                    @change="updateSetting('evcc_manual_state', state.evcc_manual_state)">
                                 <option v-for="opt in enums.EVCCManualState" :key="opt.name" :value="opt.name">{{ opt.value }}</option>
                             </select>
                         </div>
@@ -349,12 +356,14 @@
                             <div class="control-group">
                             <label>Inverter limit:</label>
                             <input type="number" class="input-compact" min="0" max="7000" step="100" v-model.number="state.inverter_manual_limit"
+                                   :disabled="isPending('inverter_manual_limit')"
                                    @change="updateSetting('inverter_manual_limit', state.inverter_manual_limit)">
                             </div>
 
                             <div class="control-group">
                                 <label>EVCC limit:</label>
                                 <input type="number" class="input-compact" min="6" max="32" step="1" v-model.number="state.evcc_manual_limit"
+                                       :disabled="isPending('evcc_manual_limit')"
                                        @change="updateSetting('evcc_manual_limit', state.evcc_manual_limit)">
                             </div>
                         </div>
@@ -363,8 +372,12 @@
             </div>
 
             <div class="grid-2">
-                <button class="btn btn-primary" @click="requestShutdown">Shutdown system</button>
-                <button class="btn" @click="requestSummary">Daily summary</button>
+                <button class="btn btn-primary" @click="requestShutdown" :disabled="isPending('reboot_request')">
+                    Shutdown system
+                </button>
+                <button class="btn" @click="requestSummary" :disabled="isPending('summary_request')">
+                    Daily summary
+                </button>
             </div>
 
             <p style="color: #666; font-size: 0.8rem; margin-top: 10px;">Last sync: {{ lastSync }}</p>
@@ -507,6 +520,9 @@
             const isFetchingLogs = ref(false);
             const logFilter = ref('ALL');
             const logLimit = ref(100);
+            const stateVersion = ref(null);
+            const lastConfirmedState = ref({});
+            const pendingEdits = ref({});
             let refreshTimer = null;
 
             // API URLs. Assumes this page is served from the same server.
@@ -516,6 +532,7 @@
             const API_AUTH_STATUS = '/api/v1/auth/status';
             const API_AUTH_LOGIN = '/api/v1/auth/login';
             const API_AUTH_LOGOUT = '/api/v1/auth/logout';
+            const POLL_INTERVAL_MS = 5000;
 
             // Watches
             watch(currentTab, (newTab) => {
@@ -676,13 +693,67 @@
                 return headers;
             };
 
+            const statePollHeaders = () => {
+                if (stateVersion.value === null || stateVersion.value === undefined) return {};
+                return { 'If-None-Match': `"${stateVersion.value}"` };
+            };
+
+            const normalizeStateVersion = (value) => {
+                if (value === null || value === undefined || value === '') return null;
+                const numericValue = Number(value);
+                return Number.isFinite(numericValue) ? numericValue : null;
+            };
+
+            const setPending = (key, value) => {
+                const next = { ...pendingEdits.value };
+                if (value) {
+                    next[key] = true;
+                } else {
+                    delete next[key];
+                }
+                pendingEdits.value = next;
+            };
+
+            const isPending = (key) => Boolean(pendingEdits.value[key]);
+
+            const applyStatePayload = (payload) => {
+                if (!payload) return;
+                const payloadVersion = normalizeStateVersion(payload.state_version);
+                const currentVersion = normalizeStateVersion(stateVersion.value);
+                if (payloadVersion !== null && currentVersion !== null && payloadVersion < currentVersion) {
+                    return;
+                }
+                if (payloadVersion !== null) {
+                    stateVersion.value = payloadVersion;
+                }
+                lastConfirmedState.value = { ...payload };
+
+                if (!state.value) {
+                    state.value = { ...payload };
+                    return;
+                }
+
+                const nextState = { ...payload };
+                for (const key of Object.keys(pendingEdits.value)) {
+                    if (Object.prototype.hasOwnProperty.call(state.value, key)) {
+                        nextState[key] = state.value[key];
+                    }
+                }
+                state.value = nextState;
+            };
+
+            const restoreLastConfirmedValue = (key) => {
+                if (!state.value || !Object.prototype.hasOwnProperty.call(lastConfirmedState.value, key)) return;
+                state.value[key] = lastConfirmedState.value[key];
+            };
+
             const startRefreshTimer = () => {
                 clearInterval(refreshTimer);
                 refreshTimer = setInterval(() => {
                     if (auth.value.authenticated) {
                         fetchState();
                     }
-                }, 10000);
+                }, POLL_INTERVAL_MS);
             };
 
             const markLoggedOut = () => {
@@ -692,6 +763,9 @@
                     csrfToken: null
                 };
                 state.value = null;
+                stateVersion.value = null;
+                lastConfirmedState.value = {};
+                pendingEdits.value = {};
                 logs.value = [];
                 clearInterval(refreshTimer);
             };
@@ -762,10 +836,17 @@
 
             const fetchState = async () => {
                 try {
-                    const res = await fetch(API_STATE);
+                    const url = stateVersion.value === null || stateVersion.value === undefined
+                        ? API_STATE
+                        : `${API_STATE}?since_version=${encodeURIComponent(stateVersion.value)}`;
+                    const res = await fetch(url, { headers: statePollHeaders() });
                     if (handleAuthFailure(res)) return;
+                    if (res.status === 304) {
+                        lastSync.value = new Date().toLocaleTimeString();
+                        return;
+                    }
                     if (res.ok) {
-                        state.value = await res.json();
+                        applyStatePayload(await res.json());
                         lastSync.value = new Date().toLocaleTimeString();
                     }
                 } catch (error) {
@@ -774,6 +855,7 @@
             };
 
             const updateSetting = async (key, value) => {
+                setPending(key, true);
                 try {
                     const res = await fetch(API_UPDATE, {
                         method: 'POST',
@@ -784,19 +866,31 @@
                     const result = await res.json();
 
                     if (result.success) {
-                        if (state.value && Object.prototype.hasOwnProperty.call(state.value, result.key)) {
-                            state.value[result.key] = result.new_value_stored;
+                        setPending(key, false);
+                        if (result.state) {
+                            applyStatePayload(result.state);
+                        } else {
+                            if (state.value && Object.prototype.hasOwnProperty.call(state.value, result.key)) {
+                                state.value[result.key] = result.new_value_stored;
+                            }
+                            if (result.state_version !== undefined && result.state_version !== null) {
+                                stateVersion.value = result.state_version;
+                            }
+                            lastConfirmedState.value = { ...state.value };
                         }
                         showToast(`Setting '${key}' updated.`);
-                        fetchState();
                     } else {
                         if (res.status === 403) {
                             await fetchAuthStatus();
                         }
+                        restoreLastConfirmedValue(key);
                         alert(`Error when updating: ${result.error}`);
                     }
                 } catch (error) {
+                    restoreLastConfirmedValue(key);
                     alert(`API error: ${error.message}`);
+                } finally {
+                    setPending(key, false);
                 }
             };
 
@@ -840,10 +934,23 @@
                 clearInterval(refreshTimer);
             })
 
+            if (typeof window !== 'undefined' && window.__HEC_DASHBOARD_ENABLE_TEST_HOOKS__) {
+                window.__HEC_DASHBOARD_TEST_HOOKS__ = {
+                    state,
+                    stateVersion,
+                    lastConfirmedState,
+                    pendingEdits,
+                    setPending,
+                    isPending,
+                    applyStatePayload,
+                    restoreLastConfirmedValue
+                };
+            }
+
             return { currentTab, state, lastSync, enums, statusColor, currentPrice, formatTime, updateSetting, toast,
                 formatPeakTimestamp, logs, fetchLogs, isFetchingLogs, logFilter, filteredLogs, formattedState,
                 isCurrentInterval, fetchState, batteryModeDisplay, logLimit, formatTimeHm, authChecked, auth,
-                loginPassword, loginError, isLoggingIn, login, logout, requestShutdown, requestSummary}
+                loginPassword, loginError, isLoggingIn, login, logout, requestShutdown, requestSummary, isPending}
         }
     }).mount('#app')
 </script>

@@ -1,6 +1,9 @@
 # core/app_state.py
+import copy
 import logging
-from typing import List, Optional
+import threading
+from contextlib import contextmanager
+from typing import Any, Callable, Dict, Iterator, List, Optional
 
 from hec.core import constants as c
 from hec.database_ops import db_handler
@@ -15,8 +18,11 @@ class AppState:
     """
 
     def __init__(self):
+        self._lock = threading.RLock()
+        self._thread_context = threading.local()
         self.current_values = {
             # General app values
+            "state_version": 0,
             "app_state": c.AppStatus.STARTING,
             "app_operating_mode": c.OperatingMode.MODE_MANUAL,
             "app_mediator_goal": c.MediatorGoal.NO_CHARGING,
@@ -64,23 +70,38 @@ class AppState:
                                           "battery_manual_mode", "empty_since"]
 
     def get(self, key, default=None):
-        if key == "prediction_plan_df":
-            return self.prediction_plan_df
-        return self.current_values.get(key, default)
+        snapshot = self._active_snapshot()
+        if snapshot is not None:
+            if key == "prediction_plan_df":
+                return self._copy_value(snapshot.get("prediction_plan_df", default))
+            return self._copy_value(snapshot["current_values"].get(key, default))
+
+        with self._lock:
+            self._ensure_state_version_locked()
+            if key == "prediction_plan_df":
+                return self._copy_value(self.prediction_plan_df)
+            return self._copy_value(self.current_values.get(key, default))
 
     def set(self, key, value):
-        if key in self.current_values:
-            self.current_values[key] = value
-            truncated_value = str(value)[:500]
-            logger.debug(f"App state updated: {key} = {truncated_value}")
-        elif key == "prediction_plan_df":
-            self.prediction_plan_df = value
-        else:
-            logger.warning(f"Attempted to update non-existent state key: {key}")
+        if key == "state_version":
+            logger.warning("Attempted to directly update read-only state key: state_version")
+            return
 
-        should_persist = False
-        if key in self.persisted_keys:
-            should_persist = True
+        with self._lock:
+            self._ensure_state_version_locked()
+            if key in self.current_values:
+                self.current_values[key] = self._copy_value(value)
+                self._bump_state_version_locked()
+                truncated_value = str(value)[:500]
+                logger.debug(f"App state updated: {key} = {truncated_value}")
+            elif key == "prediction_plan_df":
+                self.prediction_plan_df = self._copy_value(value)
+                self._bump_state_version_locked()
+            else:
+                logger.warning(f"Attempted to update non-existent state key: {key}")
+                return
+
+            should_persist = key in self.persisted_keys
 
         if should_persist:
             if self.db_handler:
@@ -88,9 +109,90 @@ class AppState:
             else:
                 logger.warning(f"AppState: db_handler not set. Cannot persist setting '{key}'.")
 
+    def mutate(self, key: str, mutator: Callable[[Any], Any]):
+        """
+        Updates a mutable state value under the AppState lock and bumps state_version.
+        The mutator may update its argument in place and return None, or return a
+        replacement value.
+        """
+        if key == "state_version":
+            logger.warning("Attempted to directly mutate read-only state key: state_version")
+            return None
+
+        with self._lock:
+            self._ensure_state_version_locked()
+            if key in self.current_values:
+                current_value = self._copy_value(self.current_values[key])
+                mutated_value = mutator(current_value)
+                new_value = current_value if mutated_value is None else mutated_value
+                self.current_values[key] = self._copy_value(new_value)
+                self._bump_state_version_locked()
+                returned_value = self._copy_value(self.current_values[key])
+            elif key == "prediction_plan_df":
+                current_value = self._copy_value(self.prediction_plan_df)
+                mutated_value = mutator(current_value)
+                new_value = current_value if mutated_value is None else mutated_value
+                self.prediction_plan_df = self._copy_value(new_value)
+                self._bump_state_version_locked()
+                returned_value = self._copy_value(self.prediction_plan_df)
+            else:
+                logger.warning(f"Attempted to mutate non-existent state key: {key}")
+                return None
+
+            should_persist = key in self.persisted_keys
+
+        if should_persist:
+            if self.db_handler:
+                self.db_handler.save_setting(key, returned_value)
+            else:
+                logger.warning(f"AppState: db_handler not set. Cannot persist setting '{key}'.")
+
+        return returned_value
+
+    def has_key(self, key: str) -> bool:
+        with self._lock:
+            return key in self.current_values or key == "prediction_plan_df"
+
+    def get_state_version(self) -> int:
+        with self._lock:
+            self._ensure_state_version_locked()
+            return int(self.current_values["state_version"])
+
     def get_all(self):
-        """Returns a copy of the entire current state."""
-        return self.current_values.copy()
+        """Returns a copied snapshot of the current JSON-facing state."""
+        with self._lock:
+            self._ensure_state_version_locked()
+            return {key: self._copy_value(value) for key, value in self.current_values.items()}
+
+    def snapshot(self) -> Dict[str, Any]:
+        """Returns a copied read snapshot for one logical decision tick."""
+        with self._lock:
+            self._ensure_state_version_locked()
+            return {
+                "current_values": {key: self._copy_value(value) for key, value in self.current_values.items()},
+                "prediction_plan_df": self._copy_value(self.prediction_plan_df),
+                "state_version": self.current_values["state_version"],
+            }
+
+    @contextmanager
+    def snapshot_context(self) -> Iterator[Dict[str, Any]]:
+        """
+        Makes AppState.get() read from one immutable snapshot in the current thread.
+        Writes still update the live state and increment state_version.
+        """
+        prior_snapshot = self._active_snapshot()
+        snapshot = self.snapshot()
+        self._thread_context.snapshot = snapshot
+        try:
+            yield snapshot
+        finally:
+            if prior_snapshot is None:
+                try:
+                    del self._thread_context.snapshot
+                except AttributeError:
+                    pass
+            else:
+                self._thread_context.snapshot = prior_snapshot
 
     def set_db_handler(self, db_handler_instance):
         self.db_handler = db_handler_instance
@@ -106,17 +208,37 @@ class AppState:
 
         loaded_count = 0
         for key, value in settings_from_db.items():
-            if key in self.current_values:  # Only update if key is known to AppState
-                # The value from DB is already deserialized to its Python type by load_all_settings
-                self.current_values[key] = value
-                logger.debug(f"AppState: Loaded setting '{key}' = {value} (type: {type(value)}) from DB.")
-                loaded_count += 1
-            else:
-                logger.warning(f"AppState: Setting '{key}' from DB is not a recognized AppState key. Ignoring.")
+            with self._lock:
+                self._ensure_state_version_locked()
+                if key in self.current_values:  # Only update if key is known to AppState
+                    # The value from DB is already deserialized to its Python type by load_all_settings
+                    self.current_values[key] = self._copy_value(value)
+                    self._bump_state_version_locked()
+                    logger.debug(f"AppState: Loaded setting '{key}' = {value} (type: {type(value)}) from DB.")
+                    loaded_count += 1
+                else:
+                    logger.warning(f"AppState: Setting '{key}' from DB is not a recognized AppState key. Ignoring.")
         if loaded_count > 0:
             logger.info(f"AppState: Successfully loaded {loaded_count} settings from database.")
         else:
             logger.info("AppState: No persisted settings found or loaded from database.")
+
+    def _active_snapshot(self):
+        return getattr(self._thread_context, "snapshot", None)
+
+    def _ensure_state_version_locked(self):
+        self.current_values.setdefault("state_version", 0)
+
+    def _bump_state_version_locked(self):
+        self.current_values["state_version"] = int(self.current_values.get("state_version", 0)) + 1
+
+    @staticmethod
+    def _copy_value(value):
+        try:
+            return copy.deepcopy(value)
+        except Exception:
+            logger.debug("AppState: deep copy failed for %s; using shallow snapshot value.", type(value), exc_info=True)
+            return value
 
 
 GLOBAL_APP_STATE = AppState()

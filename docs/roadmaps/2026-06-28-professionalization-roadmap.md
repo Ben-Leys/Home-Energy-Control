@@ -246,7 +246,7 @@ lock contention remains after this phase.
 
 **Dependencies:** Phase 1 for auth; Phase 2 preferred for persistence reliability.
 
-**Recommendation:** Start with state versioning plus short polling, not WebSockets. For one home, a 2-5 second poll with
+**Recommendation:** Start with state versioning plus short polling, not WebSockets. For one home, a 5 second poll with
 version/ETag and small payloads is simpler and lighter. Add Server-Sent Events only if measurement shows polling is not
 responsive enough.
 

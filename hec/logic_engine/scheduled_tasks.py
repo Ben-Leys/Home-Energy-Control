@@ -447,16 +447,22 @@ def task_run_battery_predictor(app_config, db_handler: DatabaseHandler):
     now_utc = datetime.now(pytz.UTC)
     now_local = now_utc.astimezone(local_tz)
 
-    # 1. Get Actual SOC from App State (fallback to 0 if not found)
+    # 1. Get Actual SOC from App State.
     battery_records = GLOBAL_APP_STATE.get("battery_records") or []
-    actual_soc = -0.001
-    if battery_records and len(battery_records) > 0:
-        for battery in battery_records:
-            actual_soc += battery.get("state_of_charge_pct", 0.0)
-        actual_soc /= len(battery_records)
-    if actual_soc == -0.001:
+    soc_values = []
+    for battery in battery_records:
+        raw_soc = battery.get("state_of_charge_pct")
+        if raw_soc is None:
+            continue
+        try:
+            soc_values.append(float(raw_soc))
+        except (TypeError, ValueError):
+            logger.warning("Predictor: Ignoring invalid battery SOC value: %r", raw_soc)
+
+    if not soc_values:
         logger.warning("Predictor: No battery SOC found in state, skipping predictor.")
         return
+    actual_soc = sum(soc_values) / len(soc_values)
 
     # 2. Get Max Peak (Convert W to kW)
     p1_data = GLOBAL_APP_STATE.get("p1_meter_data") or {}
@@ -523,7 +529,7 @@ def task_run_battery_predictor(app_config, db_handler: DatabaseHandler):
             avg_1m_export_w = GLOBAL_APP_STATE.get('average_grid_export_watts', {}).get('60s') or 0
             avg_1m_grid_w = avg_1m_import_w - avg_1m_export_w
 
-            avg_1m_prod_w = GLOBAL_APP_STATE.get('average_production_watts', {}).get('60s') or 0
+            avg_1m_prod_w = GLOBAL_APP_STATE.get('average_solar_production_watts', {}).get('60s') or 0
 
             # bat_w = GLOBAL_APP_STATE.get('battery_data', {}).get('power_w', 0)
             evcc_w = (GLOBAL_APP_STATE.get('evcc_loadpoint_state', {}).get('charge_current') or 0) * 230
@@ -575,7 +581,8 @@ def task_system_mediator(system_mediator: SystemMediator, app_config,
     if GLOBAL_APP_STATE.get('prediction_plan', None) is None:
         task_run_battery_predictor(app_config, db_handler)
 
-    system_mediator.run_system_mediation_logic()
+    with GLOBAL_APP_STATE.snapshot_context():
+        system_mediator.run_system_mediation_logic()
 
 
 def register_all_jobs(scheduler: BaseScheduler, db_handler: DatabaseHandler, app_config: dict,

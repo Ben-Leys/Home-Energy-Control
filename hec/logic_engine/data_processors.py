@@ -184,6 +184,9 @@ def update_rolling_averages():
     """
     _initialize_rolling_average_structures_if_needed()
     now_utc = datetime.now(timezone.utc)
+    p1_import_samples = GLOBAL_APP_STATE.get("recent_p1_import_kwh_samples")
+    p1_export_samples = GLOBAL_APP_STATE.get("recent_p1_export_kwh_samples")
+    solar_samples = GLOBAL_APP_STATE.get("recent_solar_production_wh_samples")
 
     # --- 1. P1 Meter Data ---
     p1_data = GLOBAL_APP_STATE.get("p1_meter_data")
@@ -196,16 +199,22 @@ def update_rolling_averages():
             current_total_export_kwh = p1_data.get("total_power_export_kwh")
 
             if current_total_import_kwh is not None:
-                _update_samples_deque(
-                    GLOBAL_APP_STATE.get("recent_p1_import_kwh_samples"),
-                    p1_timestamp_utc,
-                    float(current_total_import_kwh)
+                p1_import_samples = GLOBAL_APP_STATE.mutate(
+                    "recent_p1_import_kwh_samples",
+                    lambda samples: _update_samples_deque(
+                        samples,
+                        p1_timestamp_utc,
+                        float(current_total_import_kwh)
+                    ),
                 )
             if current_total_export_kwh is not None:
-                _update_samples_deque(
-                    GLOBAL_APP_STATE.get("recent_p1_export_kwh_samples"),
-                    p1_timestamp_utc,
-                    float(current_total_export_kwh)
+                p1_export_samples = GLOBAL_APP_STATE.mutate(
+                    "recent_p1_export_kwh_samples",
+                    lambda samples: _update_samples_deque(
+                        samples,
+                        p1_timestamp_utc,
+                        float(current_total_export_kwh)
+                    ),
                 )
         except Exception as e:
             logger.error(f"Error processing P1 live data for rolling averages: {e}", exc_info=True)
@@ -215,10 +224,10 @@ def update_rolling_averages():
     avg_export_watts = {}
     for name, seconds in AVERAGE_WINDOWS_SECONDS.items():
         avg_import_watts[name] = _calculate_average_power_from_samples(
-            GLOBAL_APP_STATE.get("recent_p1_import_kwh_samples"), seconds, unit_conversion_factor=1000  # kWh to Wh
+            p1_import_samples, seconds, unit_conversion_factor=1000  # kWh to Wh
         )
         avg_export_watts[name] = _calculate_average_power_from_samples(
-            GLOBAL_APP_STATE.get("recent_p1_export_kwh_samples"), seconds, unit_conversion_factor=1000
+            p1_export_samples, seconds, unit_conversion_factor=1000
         )
     GLOBAL_APP_STATE.set("average_grid_import_watts", avg_import_watts)
     GLOBAL_APP_STATE.set("average_grid_export_watts", avg_export_watts)
@@ -241,10 +250,13 @@ def update_rolling_averages():
             current_daily_yield_wh = inverter_data.get("daily_yield_wh")
 
             if current_daily_yield_wh is not None:
-                _update_samples_deque(
-                    GLOBAL_APP_STATE.get("recent_solar_production_wh_samples"),
-                    inv_timestamp_utc,
-                    float(current_daily_yield_wh)
+                solar_samples = GLOBAL_APP_STATE.mutate(
+                    "recent_solar_production_wh_samples",
+                    lambda samples: _update_samples_deque(
+                        samples,
+                        inv_timestamp_utc,
+                        float(current_daily_yield_wh)
+                    ),
                 )
             # Will daily_yield_wh give exact enough results for short average times (15-30 seconds)?
             # If not: switch to modified logic below where averages are calculated with current
@@ -279,7 +291,7 @@ def update_rolling_averages():
 
     for name, seconds in AVERAGE_WINDOWS_SECONDS.items():
         avg_solar_watts[name] = _calculate_average_power_from_samples(
-            GLOBAL_APP_STATE.get("recent_solar_production_wh_samples"), seconds, unit_conversion_factor=1)  # In Wh
+            solar_samples, seconds, unit_conversion_factor=1)  # In Wh
 
     GLOBAL_APP_STATE.set("average_solar_production_watts", avg_solar_watts)
     if avg_solar_watts:  # Log only if updated

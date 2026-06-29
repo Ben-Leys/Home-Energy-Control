@@ -63,7 +63,7 @@ loads from `hec/config.yaml` and `hec/.env`. Keep API keys such as `ENTSOE_API_K
 
 For non-sensitive helper tasks, agents should call the local Ollama models through Aider so the helper can
 inspect, summarize, find code in repository files and write boilerplate code. This only works on this desktop PC, not on
-other devices.
+other devices. Current device: laptop.
 
 ```powershell
 aider --model ollama_chat/qwen3.6:35b --no-show-model-warnings --no-auto-commits --yes-always --read hec\path\to\file.py --message "<task prompt>"
