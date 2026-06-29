@@ -27,6 +27,8 @@ class AppState:
             "app_operating_mode": c.OperatingMode.MODE_MANUAL,
             "app_mediator_goal": c.MediatorGoal.NO_CHARGING,
             "reboot_request": False,
+            "restart_status": "idle",
+            "restart_message": None,
             "summary_request": False,
             "sunrise": None,
             "sunset": None,

@@ -1,8 +1,5 @@
 # hec/logic_engine/scheduled_tasks.py
 import logging
-import os
-import signal
-import sys
 from time import sleep
 from datetime import datetime, timedelta, timezone, time, date
 from typing import Optional, List, Dict, Any
@@ -568,11 +565,15 @@ def task_run_battery_predictor(app_config, db_handler: DatabaseHandler):
 
 def task_system_mediator(system_mediator: SystemMediator, app_config,
                          db_handler: DatabaseHandler, tariff_manager: TariffManager):
-    # System reboot asked
+    # System restart asked. The runtime owns graceful shutdown and supervisor handoff.
     if GLOBAL_APP_STATE.get('reboot_request', False):
-        logger.warning('Reboot requested')
-        pid = os.getpid()
-        os.kill(pid, signal.SIGINT)
+        logger.warning('Restart requested. Runtime will handle graceful shutdown.')
+        GLOBAL_APP_STATE.set("restart_status", "requested")
+        GLOBAL_APP_STATE.set(
+            "restart_message",
+            "Restart requested. Waiting for runtime shutdown.",
+        )
+        return
     # Daily summary e-mail requested
     if GLOBAL_APP_STATE.get('summary_request', False):
         logger.info('Summary e-mail requested')

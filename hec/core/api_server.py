@@ -268,6 +268,15 @@ def _audit_update(key, value):
         logger.info("AUDIT setting_change %s=%s remote=%s", key, safe_value, remote_addr)
 
 
+def _apply_command_side_effects(key, value):
+    if key == "reboot_request" and value:
+        GLOBAL_APP_STATE.set("restart_status", "requested")
+        GLOBAL_APP_STATE.set(
+            "restart_message",
+            "Restart requested. The runtime will stop safely so the supervisor can restart the app.",
+        )
+
+
 @api_app.route('/api/v1/auth/status', methods=['GET'])
 def get_auth_status():
     authenticated = _is_authenticated()
@@ -378,6 +387,7 @@ def update_app_setting_api():
             return jsonify({"error": f"Invalid value '{raw_val}' for {key}: {e}"}), 400
 
         GLOBAL_APP_STATE.set(key, final_value)
+        _apply_command_side_effects(key, final_value)
         confirmed = GLOBAL_APP_STATE.get(key)
 
         json_val = confirmed.name if isinstance(confirmed, Enum) else confirmed

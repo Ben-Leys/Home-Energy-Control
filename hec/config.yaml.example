@@ -14,3 +14,10 @@ api_server:
     csrf_enabled: true
     same_origin_enabled: true
     secure_cookie: false
+
+# Phase 5 restart lifecycle defaults. Configure the NAS/service manager to
+# restart the process when this exit code is returned.
+runtime:
+  restart_strategy: supervised_process
+  restart_exit_code: 75
+  main_loop_sleep_seconds: 1

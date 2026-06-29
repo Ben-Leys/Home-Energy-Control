@@ -372,13 +372,18 @@
             </div>
 
             <div class="grid-2">
-                <button class="btn btn-primary" @click="requestShutdown" :disabled="isPending('reboot_request')">
-                    Shutdown system
+                <button class="btn btn-primary" @click="requestRestart" :disabled="isPending('reboot_request')">
+                    Restart system
                 </button>
                 <button class="btn" @click="requestSummary" :disabled="isPending('summary_request')">
                     Daily summary
                 </button>
             </div>
+
+            <p v-if="state.restart_status && state.restart_status !== 'idle'"
+               style="color: #666; font-size: 0.8rem; margin-top: 10px;">
+                Restart: {{ state.restart_status }}<span v-if="state.restart_message"> - {{ state.restart_message }}</span>
+            </p>
 
             <p style="color: #666; font-size: 0.8rem; margin-top: 10px;">Last sync: {{ lastSync }}</p>
         </div>
@@ -894,12 +899,13 @@
                 }
             };
 
-            const requestShutdown = () => {
-                const confirmed = window.confirm("Shutdown the Home Energy Control process?");
+            const requestRestart = () => {
+                const confirmed = window.confirm("Restart Home Energy Control? The runtime will stop safely and the external supervisor must start it again.");
                 if (confirmed) {
                     updateSetting('reboot_request', true);
                 }
             };
+            const requestShutdown = requestRestart;
 
             const requestSummary = () => {
                 updateSetting('summary_request', true);
@@ -950,7 +956,8 @@
             return { currentTab, state, lastSync, enums, statusColor, currentPrice, formatTime, updateSetting, toast,
                 formatPeakTimestamp, logs, fetchLogs, isFetchingLogs, logFilter, filteredLogs, formattedState,
                 isCurrentInterval, fetchState, batteryModeDisplay, logLimit, formatTimeHm, authChecked, auth,
-                loginPassword, loginError, isLoggingIn, login, logout, requestShutdown, requestSummary, isPending}
+                loginPassword, loginError, isLoggingIn, login, logout, requestRestart, requestShutdown, requestSummary,
+                isPending}
         }
     }).mount('#app')
 </script>
