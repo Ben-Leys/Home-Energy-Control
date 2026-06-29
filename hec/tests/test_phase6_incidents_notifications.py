@@ -285,6 +285,36 @@ class TestApiPhase6IncidentsAndNotifications(Phase6DatabaseTestCase):
         self.assertEqual([], after_ack_response.get_json()["active"])
         self.assertEqual([incident["id"]], [row["id"] for row in after_ack_response.get_json()["acknowledged"]])
 
+    def test_incident_api_acknowledges_all_active_incidents(self):
+        first = self.handler.record_incident(
+            severity="error",
+            source="daily_summary",
+            message="Forecasting failed",
+        )
+        second = self.handler.record_incident(
+            severity="warning",
+            source="inverter",
+            message="Polling delayed",
+        )
+        GLOBAL_APP_STATE.set("app_state", c.AppStatus.ALARM)
+
+        response = self.client.post(
+            "/api/v1/incidents/acknowledge-all",
+            json={"acknowledged_by": "dashboard"},
+        )
+
+        self.assertEqual(200, response.status_code)
+        body = response.get_json()
+        self.assertTrue(body["success"])
+        self.assertEqual(
+            [first["id"], second["id"]],
+            [incident["id"] for incident in body["incidents"]],
+        )
+        self.assertEqual("NORMAL", body["state"]["app_state"])
+
+        after_ack_response = self.client.get("/api/v1/incidents")
+        self.assertEqual([], after_ack_response.get_json()["active"])
+
     def test_notification_device_api_registers_preferences_and_returns_pending_notifications(self):
         register_response = self.client.post(
             "/api/v1/notifications/devices",
@@ -332,6 +362,9 @@ class TestApiPhase6IncidentsAndNotifications(Phase6DatabaseTestCase):
             self.assertIn("currentTab === 'incidents'", html)
             self.assertIn("/api/v1/incidents", html)
             self.assertIn("acknowledgeIncident", html)
+            self.assertIn("acknowledgeAllIncidents", html)
+            self.assertIn("Acknowledge all", html)
+            self.assertNotIn("<h4>Acknowledged</h4>", html)
             self.assertIn("Activate this device", html)
             self.assertIn("Notification.requestPermission", html)
             self.assertIn("/api/v1/notifications/devices", html)

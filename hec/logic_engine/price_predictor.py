@@ -119,6 +119,17 @@ class EnergyPricePredictor:
             pickle.dump(payload, model_file)
         logger.info("Persisted price prediction model to %s", self.model_path)
 
+    @staticmethod
+    def _has_usable_future_features(future_df: pd.DataFrame) -> bool:
+        required_feature_columns = ("solar_factor", "grid_load_mwh")
+        for column in required_feature_columns:
+            if column not in future_df.columns:
+                return False
+            values = pd.to_numeric(future_df[column], errors="coerce")
+            if not (values.fillna(0) > 0).any():
+                return False
+        return True
+
     def get_historical_training_data(self, start_train_date: date, end_train_date: date) \
             -> Optional[pd.DataFrame]:
         """
@@ -264,6 +275,13 @@ class EnergyPricePredictor:
             recs = elia_forecasts_for_day.get(f_type, [])
             df_fc = self._prepare_elia_frame(recs, future_idx, f_type)
             future_df = future_df.set_index("timestamp_utc").join(df_fc).reset_index()
+
+        if not self._has_usable_future_features(future_df):
+            logger.warning(
+                "Skipping price prediction for %s because solar or grid-load forecast features are missing.",
+                target_predict_date,
+            )
+            return None
 
         X_future = (future_df[self.features].fillna(0))
 

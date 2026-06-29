@@ -405,6 +405,32 @@ def acknowledge_incident_api(incident_id: int):
     })
 
 
+@api_app.route("/api/v1/incidents/acknowledge-all", methods=["POST"])
+@require_auth
+@require_csrf
+def acknowledge_all_incidents_api():
+    if _DB_INSTANCE is None:
+        return jsonify({"error": "Database not initialized in API"}), 500
+
+    data = request.get_json(silent=True) or {}
+    acknowledged_by = data.get("acknowledged_by") or request.remote_addr or "dashboard"
+    incidents = _DB_INSTANCE.acknowledge_all_active_incidents(acknowledged_by=acknowledged_by)
+
+    logger.info(
+        "AUDIT incident_acknowledged_all count=%s remote=%s",
+        len(incidents),
+        request.remote_addr or "unknown",
+    )
+    sync_app_status_from_incidents(GLOBAL_APP_STATE, _DB_INSTANCE)
+    state_payload = _serialize_app_state()
+    return jsonify({
+        "success": True,
+        "incidents": incidents,
+        "state_version": state_payload.get("state_version"),
+        "state": state_payload,
+    })
+
+
 @api_app.route("/api/v1/incidents/<int:incident_id>/resolve", methods=["POST"])
 @require_auth
 @require_csrf

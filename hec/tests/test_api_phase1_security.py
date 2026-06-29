@@ -150,6 +150,8 @@ class TestApiPhase1Security(unittest.TestCase):
             self.assertIn("Dashboard Login", html)
             self.assertIn("window.confirm", html)
             self.assertIn("requestShutdown", html)
+            self.assertIn("Stop for supervised restart", html)
+            self.assertNotIn("Restart system", html)
         finally:
             response.close()
 

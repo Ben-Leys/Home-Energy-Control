@@ -323,6 +323,21 @@ class TestPhase4PredictionAndSummary(unittest.TestCase):
         self.assertEqual(17, predictor.model.n_estimators)
         self.assertEqual(1, predictor.model.n_jobs)
 
+    def test_price_predictor_does_not_cache_prediction_without_solar_or_grid_load_features(self):
+        db_handler = MagicMock()
+        predictor = EnergyPricePredictor(db_handler, {})
+        predictor.is_trained = True
+        predictor.features = ["day_of_week", "is_weekend", "solar_factor", "wind_factor", "grid_load_mwh"]
+        predictor.model = MagicMock()
+
+        result = predictor.predict_prices_for_day(
+            date(2026, 7, 3),
+            {"solar": [], "wind": [], "grid_load": []},
+        )
+
+        self.assertIsNone(result)
+        db_handler.store_predicted_prices.assert_not_called()
+
     @patch("hec.reporting.daily_summary.EnergyPricePredictor", UntrainedPricePredictor)
     @patch("hec.reporting.daily_summary.send_email_with_attachments", return_value=True)
     @patch("hec.reporting.daily_summary.calculate_battery_saving_for_period", return_value=make_savings())
@@ -373,6 +388,72 @@ class TestPhase4PredictionAndSummary(unittest.TestCase):
         self.assertEqual(4, db_handler.get_predicted_prices_for_date.call_count)
         self.assertEqual(4, len(captured_future_dfs))
 
+    @patch("hec.reporting.daily_summary.EnergyPricePredictor", UntrainedPricePredictor)
+    @patch("hec.reporting.daily_summary.send_email_with_attachments", return_value=True)
+    @patch("hec.reporting.daily_summary.calculate_battery_saving_for_period", return_value=make_savings())
+    @patch("hec.reporting.daily_summary.calculate_total_costs_for_period", return_value=make_costs())
+    @patch("hec.reporting.daily_summary.generate_price_solar_plot", return_value=io.BytesIO(b"plot"))
+    def test_daily_summary_skips_cached_prediction_days_without_usable_forecast_features(
+            self,
+            _price_plot,
+            _costs,
+            _savings,
+            _send_email,
+    ):
+        db_handler = MagicMock()
+        db_handler.get_elia_forecasts.return_value = []
+        start_date = datetime.now().astimezone().date() + timedelta(days=1)
+
+        def cached_predictions_for(target_date):
+            timestamp = datetime.combine(target_date, time.min, tzinfo=timezone.utc)
+            day_offset = (target_date - start_date).days
+            if day_offset == 2:
+                return [
+                    {
+                        "timestamp_utc": timestamp.isoformat(),
+                        "predicted_gross_price_kwh": 0.10,
+                        "solar_factor": 0.0,
+                        "wind_factor": 0.0,
+                        "grid_load_mwh": 0.0,
+                    }
+                ]
+            return [
+                {
+                    "timestamp_utc": timestamp.isoformat(),
+                    "predicted_gross_price_kwh": 0.10,
+                    "solar_factor": 0.25,
+                    "wind_factor": 0.50,
+                    "grid_load_mwh": 100.0,
+                }
+            ]
+
+        db_handler.get_predicted_prices_for_date.side_effect = cached_predictions_for
+        captured_future_dfs = []
+
+        def fake_future_plot(_db, _app_config, future_dfs, _future_date, _inverter_kw):
+            captured_future_dfs.extend(future_dfs)
+            return io.BytesIO(b"future")
+
+        app_config = {
+            "historic_data": {"start_date": "2025-01-01"},
+            "inverter": {"standard_power_limit": 7000, "panel_peak_w": 5000},
+            "smtp": {
+                "sender_email": "sender@example.invalid",
+                "default_recipients": ["recipient@example.invalid"],
+            },
+        }
+        generator = DailySummaryGenerator(app_config, db_handler, MagicMock(), {"solar": []})
+
+        with patch("hec.reporting.daily_summary.generate_future_price_plot", side_effect=fake_future_plot):
+            self.assertTrue(generator.generate_and_send_summary(app_config))
+
+        plotted_dates = [
+            df["timestamp_utc"].iloc[0].date()
+            for df in captured_future_dfs
+        ]
+        self.assertNotIn(start_date + timedelta(days=2), plotted_dates)
+        self.assertIn(start_date + timedelta(days=3), plotted_dates)
+
     def test_future_price_plot_title_and_day_markers_follow_four_cached_days(self):
         start_date = date(2026, 7, 1)
         future_dfs = []
@@ -413,6 +494,51 @@ class TestPhase4PredictionAndSummary(unittest.TestCase):
         title = title_mock.call_args.args[0]
         self.assertIn("04-07-2026", title)
         self.assertNotIn("05-07-2026", title)
+
+    def test_future_price_plot_uses_actual_prediction_dates_when_a_cached_day_is_skipped(self):
+        start_date = date(2026, 7, 1)
+        plotted_dates = [start_date, start_date + timedelta(days=2)]
+        future_dfs = []
+        for plotted_date in plotted_dates:
+            day_start = datetime.combine(plotted_date, time.min, tzinfo=timezone.utc)
+            future_dfs.append(pd.DataFrame({
+                "timestamp_utc": [day_start + timedelta(hours=i) for i in range(4)],
+                "predicted_gross_price_kwh": [0.10, 0.12, 0.11, 0.09],
+                "solar_factor": [0.1, 0.2, 0.4, 0.1],
+                "wind_factor": [0.4, 0.3, 0.2, 0.1],
+                "grid_load_mwh": [100.0, 110.0, 90.0, 95.0],
+            }))
+        requested_target_dates = []
+
+        def intervals_from_price_points(_db, _app_config, target_date, price_points, **_kwargs):
+            requested_target_dates.append(target_date.date())
+            return [
+                NetElectricityPriceInterval(
+                    interval_start_local=price_point.timestamp_utc,
+                    resolution_minutes=15,
+                    active_contract_type="dynamic",
+                    net_prices_eur_per_kwh={
+                        "dynamic": {"buy": 0.20, "sell": 0.05},
+                        "fixed": {"buy": 0.30, "sell": 0.04},
+                    },
+                )
+                for price_point in price_points
+            ]
+
+        with (
+            patch(
+                "hec.reporting.plot_generator.calculate_net_intervals_for_day",
+                side_effect=intervals_from_price_points,
+            ),
+            patch("hec.reporting.plot_generator.plt.title") as title_mock,
+        ):
+            plot_buffer = generate_future_price_plot(MagicMock(), {}, future_dfs, start_date, inverter_kw=7.0)
+
+        self.assertIsNotNone(plot_buffer)
+        self.assertEqual(plotted_dates, requested_target_dates)
+        title = title_mock.call_args.args[0]
+        self.assertIn("03-07-2026", title)
+        self.assertNotIn("02-07-2026", title)
 
     def test_prediction_cache_refresh_trains_when_needed_and_predicts_four_days_only(self):
         db_handler = MagicMock()
@@ -505,6 +631,41 @@ class TestPhase4PredictionAndSummary(unittest.TestCase):
             self.assertFalse(GLOBAL_APP_STATE.get("summary_request"))
             self.assertTrue(mediator.ran)
             self.assertEqual("queued", GLOBAL_APP_STATE.get("summary_job_status")["state"])
+        finally:
+            GLOBAL_APP_STATE.current_values = previous_values
+            GLOBAL_APP_STATE.prediction_plan_df = previous_prediction_plan_df
+            scheduled_tasks._summary_job_thread = previous_summary_thread
+
+    def test_manual_summary_request_does_not_force_price_refresh(self):
+        previous_values = GLOBAL_APP_STATE.current_values.copy()
+        previous_prediction_plan_df = GLOBAL_APP_STATE.prediction_plan_df
+        previous_summary_thread = scheduled_tasks._summary_job_thread
+        try:
+            scheduled_tasks._summary_job_thread = None
+            GLOBAL_APP_STATE.current_values["summary_request"] = True
+            GLOBAL_APP_STATE.current_values["prediction_plan"] = []
+
+            class RecordingMediator:
+                def run_system_mediation_logic(self):
+                    pass
+
+            class FakeThread:
+                captured_args = None
+
+                def __init__(self, target, args=(), kwargs=None, daemon=None, name=None):
+                    FakeThread.captured_args = args
+
+                def is_alive(self):
+                    return False
+
+                def start(self):
+                    pass
+
+            with patch("hec.logic_engine.scheduled_tasks.threading.Thread", FakeThread, create=True):
+                scheduled_tasks.task_system_mediator(RecordingMediator(), {}, MagicMock(), MagicMock())
+
+            self.assertIsNotNone(FakeThread.captured_args)
+            self.assertFalse(FakeThread.captured_args[3])
         finally:
             GLOBAL_APP_STATE.current_values = previous_values
             GLOBAL_APP_STATE.prediction_plan_df = previous_prediction_plan_df

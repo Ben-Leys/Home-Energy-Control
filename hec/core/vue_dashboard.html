@@ -451,7 +451,7 @@
 
             <div class="grid-2">
                 <button class="btn btn-primary" @click="requestRestart" :disabled="isPending('reboot_request')">
-                    Restart system
+                    Stop for supervised restart
                 </button>
                 <button class="btn" @click="requestSummary" :disabled="isPending('summary_request')">
                     Daily summary
@@ -521,42 +521,32 @@
 
     <div id="panel-incidents" role="tabpanel" aria-labelledby="tab-incidents" v-show="currentTab === 'incidents'">
         <h5>Incidents</h5>
-        <div class="grid-2">
-            <div class="card">
-                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
-                    <h4>Active</h4>
+        <div class="card">
+            <div style="display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-bottom: 12px;">
+                <h4>Active</h4>
+                <div style="display: flex; gap: 8px; align-items: center;">
+                    <button class="btn" @click="acknowledgeAllIncidents"
+                            :disabled="incidents.active.length === 0"
+                            style="padding: 5px 15px;">
+                        Acknowledge all
+                    </button>
                     <button class="btn" @click="fetchIncidents" :disabled="isFetchingIncidents"
                             style="padding: 5px 15px; background-color: grey">
                         {{ isFetchingIncidents ? '...' : 'Refresh' }}
                     </button>
                 </div>
-                <div v-if="incidents.active.length === 0" class="sub-value">No active incidents.</div>
-                <div v-for="incident in incidents.active" :key="incident.id" class="incident-row">
-                    <div>
-                        <span class="status-badge" :class="incident.severity">{{ incident.severity }}</span>
-                        <strong>{{ incident.source }}</strong>
-                        <div>{{ incident.message }}</div>
-                        <div class="incident-meta">
-                            Count {{ incident.occurrence_count }} - last {{ formatTime(incident.last_seen_utc) }}
-                        </div>
-                    </div>
-                    <button class="btn" @click="acknowledgeIncident(incident.id)">Acknowledge</button>
-                </div>
             </div>
-
-            <div class="card">
-                <h4>Acknowledged</h4>
-                <div v-if="incidents.acknowledged.length === 0" class="sub-value">No acknowledged incidents.</div>
-                <div v-for="incident in incidents.acknowledged" :key="incident.id" class="incident-row">
-                    <div>
-                        <span class="status-badge" :class="incident.severity">{{ incident.severity }}</span>
-                        <strong>{{ incident.source }}</strong>
-                        <div>{{ incident.message }}</div>
-                        <div class="incident-meta">
-                            By {{ incident.acknowledged_by || 'dashboard' }} - {{ formatTime(incident.acknowledged_at_utc) }}
-                        </div>
+            <div v-if="incidents.active.length === 0" class="sub-value">No active incidents.</div>
+            <div v-for="incident in incidents.active" :key="incident.id" class="incident-row">
+                <div>
+                    <span class="status-badge" :class="incident.severity">{{ incident.severity }}</span>
+                    <strong>{{ incident.source }}</strong>
+                    <div>{{ incident.message }}</div>
+                    <div class="incident-meta">
+                        Count {{ incident.occurrence_count }} - last {{ formatTime(incident.last_seen_utc) }}
                     </div>
                 </div>
+                <button class="btn" @click="acknowledgeIncident(incident.id)">Acknowledge</button>
             </div>
         </div>
 
@@ -1137,7 +1127,7 @@
             };
 
             const requestRestart = () => {
-                const confirmed = window.confirm("Restart Home Energy Control? The runtime will stop safely and the external supervisor must start it again.");
+                const confirmed = window.confirm("Stop Home Energy Control for supervised restart? The runtime will shut down safely, then the external supervisor must start it again.");
                 if (confirmed) {
                     updateSetting('reboot_request', true);
                 }
@@ -1201,6 +1191,29 @@
                         showToast('Incident acknowledged.');
                     } else {
                         alert(`Error when acknowledging incident: ${result.error}`);
+                    }
+                } catch (error) {
+                    alert(`API error: ${error.message}`);
+                }
+            };
+
+            const acknowledgeAllIncidents = async () => {
+                try {
+                    const res = await fetch(`${API_INCIDENTS}/acknowledge-all`, {
+                        method: 'POST',
+                        headers: csrfHeaders(),
+                        body: JSON.stringify({ acknowledged_by: 'dashboard' })
+                    });
+                    if (handleAuthFailure(res)) return;
+                    const result = await res.json();
+                    if (res.ok && result.success) {
+                        if (result.state) {
+                            applyStatePayload(result.state);
+                        }
+                        await fetchIncidents();
+                        showToast('Active incidents acknowledged.');
+                    } else {
+                        alert(`Error when acknowledging incidents: ${result.error}`);
                     }
                 } catch (error) {
                     alert(`API error: ${error.message}`);
@@ -1310,7 +1323,8 @@
                     isPending,
                     applyStatePayload,
                     restoreLastConfirmedValue,
-                    fetchPendingNotifications
+                    fetchPendingNotifications,
+                    acknowledgeAllIncidents
                 };
             }
 
@@ -1319,6 +1333,7 @@
                 isCurrentInterval, fetchState, batteryModeDisplay, logLimit, formatTimeHm, authChecked, auth,
                 loginPassword, loginError, isLoggingIn, login, logout, requestRestart, requestShutdown, requestSummary,
                 isPending, summaryJobStatusText, incidents, fetchIncidents, isFetchingIncidents, acknowledgeIncident,
+                acknowledgeAllIncidents,
                 notificationPreferences, notificationDevice, isActivatingNotificationDevice, activateNotificationDevice,
                 fetchPendingNotifications}
         }

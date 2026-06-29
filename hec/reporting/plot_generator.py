@@ -3,6 +3,7 @@ import io
 import logging
 from datetime import datetime, date, timedelta, time
 from typing import List, Optional, Tuple
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -14,6 +15,19 @@ from hec.logic_engine.cost_calculator import calculate_net_intervals_for_day
 
 
 logger = logging.getLogger(__name__)
+
+
+def _resolve_plot_timezone(app_config) -> ZoneInfo:
+    timezone_name = (
+        (app_config or {}).get("location", {}).get("timezone")
+        or (app_config or {}).get("scheduler", {}).get("timezone")
+        or "Europe/Brussels"
+    )
+    try:
+        return ZoneInfo(timezone_name)
+    except ZoneInfoNotFoundError:
+        logger.warning("Unknown plot timezone %r. Falling back to Europe/Brussels.", timezone_name)
+        return ZoneInfo("Europe/Brussels")
 
 
 def _prepare_price_data_for_plot(
@@ -254,10 +268,15 @@ def generate_future_price_plot(
         logger.warning("No future price data to plot.")
         return None
 
-    future_dates = [
-        datetime.combine(future_date, time(0, 0, 0)) + timedelta(days=i)
-        for i in range(len(future_dfs))
-    ]
+    local_tz = _resolve_plot_timezone(app_config)
+    future_dates = []
+    for index, df in enumerate(future_dfs):
+        if df.empty or "timestamp_utc" not in df.columns:
+            prediction_date = future_date + timedelta(days=index)
+        else:
+            first_timestamp = pd.to_datetime(df["timestamp_utc"].iloc[0], utc=True)
+            prediction_date = first_timestamp.to_pydatetime().astimezone(local_tz).date()
+        future_dates.append(datetime.combine(prediction_date, time.min, tzinfo=local_tz))
     logger.info(f"Generating future price plot for "
                 f"{future_dates[0]}–{future_dates[-1]}")
 

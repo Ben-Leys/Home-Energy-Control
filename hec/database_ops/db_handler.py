@@ -1579,6 +1579,57 @@ class DatabaseHandler:
             ).fetchone()
         return self._row_to_dict(row) if row else None
 
+    def acknowledge_all_active_incidents(
+        self,
+        acknowledged_by: str = "dashboard",
+        acknowledged_at_utc: Optional[datetime] = None,
+        limit: int = 1000,
+    ) -> List[Dict[str, Any]]:
+        limit = max(1, min(int(limit), 1000))
+        now_iso = self._utc_iso(acknowledged_at_utc)
+        actor = str(acknowledged_by or "dashboard").strip() or "dashboard"
+
+        with self.transaction() as conn:
+            active_rows = conn.execute(
+                """
+                SELECT id
+                FROM app_incidents
+                WHERE status = ?
+                ORDER BY
+                    CASE severity WHEN 'error' THEN 0 WHEN 'warning' THEN 1 ELSE 2 END,
+                    last_seen_utc DESC,
+                    id DESC
+                LIMIT ?
+                """,
+                (INCIDENT_ACTIVE, limit),
+            ).fetchall()
+            incident_ids = [row["id"] for row in active_rows]
+            if not incident_ids:
+                return []
+
+            conn.executemany(
+                """
+                UPDATE app_incidents
+                SET status = ?,
+                    acknowledged_at_utc = ?,
+                    acknowledged_by = ?
+                WHERE id = ? AND status = ?
+                """,
+                [
+                    (INCIDENT_ACKNOWLEDGED, now_iso, actor, incident_id, INCIDENT_ACTIVE)
+                    for incident_id in incident_ids
+                ],
+            )
+
+            placeholders = ",".join("?" for _ in incident_ids)
+            rows = conn.execute(
+                f"SELECT * FROM app_incidents WHERE id IN ({placeholders})",
+                tuple(incident_ids),
+            ).fetchall()
+
+        rows_by_id = {row["id"]: self._row_to_dict(row) for row in rows}
+        return [rows_by_id[incident_id] for incident_id in incident_ids if incident_id in rows_by_id]
+
     def resolve_incident(
         self,
         incident_id: int,

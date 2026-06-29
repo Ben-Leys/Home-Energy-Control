@@ -28,6 +28,22 @@ class DailySummaryGenerator:
         self.price_predictor = EnergyPricePredictor(db_handler, app_config)
         self.forecasts = forecasts
 
+    @staticmethod
+    def _has_usable_forecast_features(prediction_df: pd.DataFrame) -> bool:
+        """Return True when cached predictions include non-empty Elia driver data."""
+        if prediction_df.empty:
+            return False
+
+        required_feature_columns = ("solar_factor", "grid_load_mwh")
+        for column in required_feature_columns:
+            if column not in prediction_df.columns:
+                return False
+            values = pd.to_numeric(prediction_df[column], errors="coerce")
+            if not (values.fillna(0) > 0).any():
+                return False
+
+        return True
+
     def _get_historic_training_start(self) -> Optional[date]:
         start_date = self.app_config.get('historic_data', {}).get('start_date')
         if not start_date:
@@ -63,6 +79,13 @@ class DailySummaryGenerator:
 
             day_df = day_df[required_columns].copy()
             day_df['timestamp_utc'] = pd.to_datetime(day_df['timestamp_utc'], utc=True)
+            if not self._has_usable_forecast_features(day_df):
+                logger.warning(
+                    "Cached price predictions for %s do not contain usable solar/grid-load features. "
+                    "Skipping future plot day.",
+                    predict_date,
+                )
+                continue
             prediction_dfs.append(day_df)
 
         return prediction_dfs
