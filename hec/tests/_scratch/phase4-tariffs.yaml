@@ -1,0 +1,74 @@
+contract_types:
+  - fixed
+  - dynamic
+active_contract:
+  - start_date: "2024-01-01"
+    value: dynamic
+energy_supplier:
+  fixed:
+    buy_price_per_kwh:
+      - start_date: "2024-01-01"
+        value: 0.22
+    sell_price_per_kwh:
+      - start_date: "2024-01-01"
+        value: 0.04
+    green_certificate_fee_per_kwh:
+      - start_date: "2024-01-01"
+        value: 0.0
+    chp_certificate_fee_per_kwh:
+      - start_date: "2024-01-01"
+        value: 0.0
+  dynamic:
+    spot_buy_multiplier:
+      - start_date: "2024-01-01"
+        value: 1.0
+    spot_buy_fixed_fee_per_kwh:
+      - start_date: "2024-01-01"
+        value: 0.0
+    spot_sell_multiplier:
+      - start_date: "2024-01-01"
+        value: 1.0
+    spot_sell_fixed_fee_per_kwh:
+      - start_date: "2024-01-01"
+        value: 0.0
+    green_certificate_fee_per_kwh:
+      - start_date: "2024-01-01"
+        value: 0.0
+    chp_certificate_fee_per_kwh:
+      - start_date: "2024-01-01"
+        value: 0.0
+    subscription_cost:
+      - start_date: "2024-01-01"
+        value: 0.0
+grid_operator:
+  grid_usage_fee_per_kwh:
+    - start_date: "2024-01-01"
+      value: 0.0
+  data_management:
+    - start_date: "2024-01-01"
+      value: 0.0
+  capacity_tariff_minimum_kw:
+    - start_date: "2024-01-01"
+      value: 2.5
+  capacity_tariff_per_kw_per_year:
+    - start_date: "2024-01-01"
+      value: 0.0
+government:
+  energy_contribution_per_kwh:
+    - start_date: "2024-01-01"
+      value: 0.0
+  rate_per_kwh_below:
+    - start_date: "2024-01-01"
+      value: 0.0
+  rate_per_kwh_above:
+    - start_date: "2024-01-01"
+      value: 0.0
+  excise_duty_tiers:
+    - start_date: "2024-01-01"
+      value: 1000000
+  federal_contribution_fund_per_kwh:
+    - start_date: "2024-01-01"
+      value: 0.0
+  vat:
+    - start_date: "2024-01-01"
+      value: 1.0
