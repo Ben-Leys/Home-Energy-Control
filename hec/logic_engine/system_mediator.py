@@ -9,6 +9,7 @@ from datetime import datetime, timedelta, time as dt_time
 from typing import Optional
 
 from hec.controllers.api_evcc import EvccApiClient
+from hec.controllers.homewizard_battery_gateway import HomeWizardBatteryGateway
 from hec.controllers.modbus_sma_inverter import InverterSmaModbusClient
 from hec.core import constants as c, market_prices
 from hec.core.app_state import GLOBAL_APP_STATE
@@ -30,14 +31,21 @@ _SHORTAGE_CONFIG = {
 
 class SystemMediator:
 
-    def __init__(self, app_config, evcc_client: Optional[EvccApiClient],
-                 inverter_client: Optional[InverterSmaModbusClient], p1_client: Optional[P1MeterHomewizardClient]):
+    def __init__(
+            self,
+            app_config,
+            evcc_client: Optional[EvccApiClient],
+            inverter_client: Optional[InverterSmaModbusClient],
+            p1_client: Optional[P1MeterHomewizardClient],
+            battery_gateway: Optional[HomeWizardBatteryGateway] = None,
+    ):
         # Controllers
         self.evcc_client: Optional[EvccApiClient] = None
         self.inverter_client: Optional[InverterSmaModbusClient] = None
         self.db_handler: Optional[DatabaseHandler] = None
         self.tariff_manager: Optional[TariffManager] = None
         self.p1_client: Optional[P1MeterHomewizardClient] = None
+        self.battery_gateway: Optional[HomeWizardBatteryGateway] = None
         # General
         self.app_config = app_config
         self.app_mediator_goal: Optional[c.MediatorGoal] = None
@@ -77,7 +85,7 @@ class SystemMediator:
         self.battery_force_start_time = None
         self.last_processed_interval = None
 
-        self._prepare_mediator_prerequisites(evcc_client, inverter_client, p1_client)
+        self._prepare_mediator_prerequisites(evcc_client, inverter_client, p1_client, battery_gateway)
 
     @property
     def is_ignore_window_active(self) -> bool:
@@ -92,7 +100,7 @@ class SystemMediator:
 
         return False
 
-    def _prepare_mediator_prerequisites(self, evcc_client, inverter_client, p1_client):
+    def _prepare_mediator_prerequisites(self, evcc_client, inverter_client, p1_client, battery_gateway=None):
         """
             Initializes hardware clients and validates configuration.
             Sets system state to DEGRADED if critical components are missing.
@@ -126,6 +134,13 @@ class SystemMediator:
             self.p1_client = p1_client
         else:
             logger.warning("P1 client not initialized. Peak shaving will be disabled.")
+
+        if battery_gateway and getattr(battery_gateway, 'is_initialized', False):
+            self.battery_gateway = battery_gateway
+        elif p1_client and hasattr(p1_client, "set_battery_mode"):
+            self.battery_gateway = p1_client
+        else:
+            logger.warning("HomeWizard battery gateway not initialized. Battery commands will be disabled.")
 
         # Final Evaluation
         is_starting = GLOBAL_APP_STATE.get('app_state') == c.AppStatus.STARTING
@@ -814,9 +829,12 @@ class SystemMediator:
 
     def _apply_battery_state(self):
         """
-        Executes the planned battery state against the P1 Client API.
+        Executes the planned battery state against the HomeWizard battery gateway API.
         """
         if not self.new_bat_mode:
+            return
+        if not self.battery_gateway:
+            logger.warning("No battery gateway available. Skipping battery state update.")
             return
         # Get current mode
         bat_data = GLOBAL_APP_STATE.get("battery_data", {})
@@ -847,7 +865,7 @@ class SystemMediator:
 
         try:
             logger.info(f"Transitioning battery: {current_state.name} -> {self.new_bat_mode.name}")
-            success = self.p1_client.set_battery_mode(self.new_bat_mode)
+            success = self.battery_gateway.set_battery_mode(self.new_bat_mode)
             GLOBAL_APP_STATE.set('battery_manual_mode', self.new_bat_mode)
             if success:
                 logger.debug(f"Battery successfully set to {self.new_bat_mode.name}")

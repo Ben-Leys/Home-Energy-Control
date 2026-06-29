@@ -53,6 +53,24 @@ _RANGE_LIMITS = {
     "inverter_manual_limit": (0, 7000, "Inverter limit must be between 0 and 7000 W"),
     "evcc_manual_limit": (6, 32, "EVCC amps must be between 6 and 32"),
 }
+_CONTENT_SECURITY_POLICY = (
+    "default-src 'self'; "
+    "script-src 'self' https://unpkg.com 'unsafe-inline'; "
+    "style-src 'self' 'unsafe-inline'; "
+    "connect-src 'self'; "
+    "img-src 'self' data:; "
+    "object-src 'none'; "
+    "base-uri 'self'; "
+    "frame-ancestors 'none'"
+)
+
+
+@api_app.after_request
+def add_security_headers(response):
+    response.headers.setdefault("Content-Security-Policy", _CONTENT_SECURITY_POLICY)
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("Referrer-Policy", "same-origin")
+    return response
 
 
 def configure_api_security(app_config: dict):

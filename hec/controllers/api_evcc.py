@@ -7,13 +7,15 @@ import requests
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 from hec.core import constants as c
+from hec.utils.http_client import HttpClient, build_http_client
 
 logger = logging.getLogger(__name__)
 
 
 class EvccApiClient:
     def __init__(self, base_api_url: str, default_loadpoint_id: int = 1,
-                 max_current: int = 32, request_timeout: int = 10):
+                 max_current: int = 32, request_timeout: int = 10,
+                 http_client: Optional[HttpClient] = None, app_config: Optional[dict] = None):
         """
         Client for interacting with the EVCC API (currently only 1 loadpoint).
 
@@ -32,6 +34,7 @@ class EvccApiClient:
         self.min_current = 6  # Usually the same for any loadpoint
         self.max_current = max_current
         self.request_timeout = max(request_timeout, 2)
+        self.http = http_client or build_http_client(app_config, default_timeout_seconds=self.request_timeout)
         self.is_available: bool = self._check_availability()  # Check on init
 
         logger.info(f"EVCC client initialized. URL: {self.base_url}, Default Loadpoint: {self.default_loadpoint_id}")
@@ -41,7 +44,7 @@ class EvccApiClient:
     def _check_availability(self) -> bool:
         """Performs a quick check to see if the API is responsive."""
         try:
-            response = requests.get(self.state_url, timeout=self.request_timeout / 2)
+            response = self.http.get(self.state_url, timeout=self.request_timeout / 2)
             response.raise_for_status()
             logger.debug("EVCC API availability check: OK")
             return True
@@ -68,7 +71,7 @@ class EvccApiClient:
 
         response = ''
         try:
-            response = requests.get(self.state_url, timeout=self.request_timeout)
+            response = self.http.get(self.state_url, timeout=self.request_timeout)
             response.raise_for_status()
             data = response.json()
 
@@ -110,7 +113,7 @@ class EvccApiClient:
         `endpoint_suffix` is like "/mode/pv" or "/maxcurrent/16".
         """
         try:
-            response = requests.request(
+            response = self.http.request(
                 method=method.upper(),
                 url=f"{self._construct_loadpoint_url(loadpoint_id)}{endpoint_suffix}",
                 json=data,

@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Home Energy Controller</title>
-    <script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
+    <script src="https://unpkg.com/vue@3.5.16/dist/vue.global.prod.js"></script>
     <style>
         #app {
             display: flex;
@@ -210,7 +210,7 @@
         <h3>🏠 Home Energy Control</h3>
 
         <div class="header-actions" v-if="auth.authEnabled && auth.authenticated">
-            <button class="btn" @click="logout" style="padding: 5px 12px;">Logout</button>
+            <button class="btn" type="button" @click="logout" style="padding: 5px 12px;">Logout</button>
         </div>
     </div>
 
@@ -233,15 +233,40 @@
     </div>
 
     <template v-else>
-    <div class="tabs">
-        <button class="tab" :class="{active: currentTab === 'dashboard'}" @click="currentTab = 'dashboard'">📊 Dashboard</button>
-        <button class="tab" :class="{active: currentTab === 'plan'}" @click="currentTab = 'plan'">📅 Prediction</button>
-        <button class="tab" :class="{active: currentTab === 'incidents'}" @click="currentTab = 'incidents'">Incidents</button>
-        <button class="tab" :class="{active: currentTab === 'logs'}" @click="currentTab = 'logs'">📜 Logs</button>
-        <button class="tab" :class="{active: currentTab === 'state'}" @click="currentTab = 'state'">🔍 App State</button>
+    <div class="tabs" role="tablist" aria-label="Dashboard sections" @keydown="handleTabKeydown">
+        <button id="tab-dashboard" type="button" class="tab" role="tab"
+                :class="{active: currentTab === 'dashboard'}"
+                :aria-selected="currentTab === 'dashboard'"
+                aria-controls="panel-dashboard"
+                :tabindex="currentTab === 'dashboard' ? 0 : -1"
+                @click="setCurrentTab('dashboard')">📊 Dashboard</button>
+        <button id="tab-plan" type="button" class="tab" role="tab"
+                :class="{active: currentTab === 'plan'}"
+                :aria-selected="currentTab === 'plan'"
+                aria-controls="panel-plan"
+                :tabindex="currentTab === 'plan' ? 0 : -1"
+                @click="setCurrentTab('plan')">📅 Prediction</button>
+        <button id="tab-incidents" type="button" class="tab" role="tab"
+                :class="{active: currentTab === 'incidents'}"
+                :aria-selected="currentTab === 'incidents'"
+                aria-controls="panel-incidents"
+                :tabindex="currentTab === 'incidents' ? 0 : -1"
+                @click="setCurrentTab('incidents')">Incidents</button>
+        <button id="tab-logs" type="button" class="tab" role="tab"
+                :class="{active: currentTab === 'logs'}"
+                :aria-selected="currentTab === 'logs'"
+                aria-controls="panel-logs"
+                :tabindex="currentTab === 'logs' ? 0 : -1"
+                @click="setCurrentTab('logs')">📜 Logs</button>
+        <button id="tab-state" type="button" class="tab" role="tab"
+                :class="{active: currentTab === 'state'}"
+                :aria-selected="currentTab === 'state'"
+                aria-controls="panel-state"
+                :tabindex="currentTab === 'state' ? 0 : -1"
+                @click="setCurrentTab('state')">🔍 App State</button>
     </div>
 
-    <div v-show="currentTab === 'dashboard'">
+    <div id="panel-dashboard" role="tabpanel" aria-labelledby="tab-dashboard" v-show="currentTab === 'dashboard'">
 
         <div v-if="!state" style="color: #ff4b4b;">
             🚨 Main application state not available. Loading...
@@ -334,24 +359,24 @@
                 <div class="grid-2">
                     <div>
                         <div class="control-group">
-                            <label>Application mode:</label>
-                            <select v-model="state.app_operating_mode" :disabled="isPending('app_operating_mode')"
+                            <label for="app-operating-mode">Application mode:</label>
+                            <select id="app-operating-mode" v-model="state.app_operating_mode" :disabled="isPending('app_operating_mode')"
                                     @change="updateSetting('app_operating_mode', state.app_operating_mode)">
                                 <option v-for="opt in enums.OperatingMode" :value="opt.name">{{ opt.value }}</option>
                             </select>
                         </div>
 
                         <div class="control-group">
-                            <label>Mediator goal:</label>
-                            <select v-model="state.app_mediator_goal" :disabled="isPending('app_mediator_goal')"
+                            <label for="app-mediator-goal">Mediator goal:</label>
+                            <select id="app-mediator-goal" v-model="state.app_mediator_goal" :disabled="isPending('app_mediator_goal')"
                                     @change="updateSetting('app_mediator_goal', state.app_mediator_goal)">
                                 <option v-for="opt in enums.MediatorGoal" :value="opt.name">{{ opt.value }}</option>
                             </select>
                         </div>
 
                         <div class="control-group">
-                            <label>Inverter mode:</label>
-                            <select v-model="state.inverter_manual_state" :disabled="isPending('inverter_manual_state')"
+                            <label for="inverter-manual-state">Inverter mode:</label>
+                            <select id="inverter-manual-state" v-model="state.inverter_manual_state" :disabled="isPending('inverter_manual_state')"
                                     @change="updateSetting('inverter_manual_state', state.inverter_manual_state)">
                                 <option v-for="opt in enums.InverterManualState" :value="opt.name">{{ opt.value }}</option>
                             </select>
@@ -363,16 +388,16 @@
 
                     <div>
                         <div class="control-group">
-                            <label>Battery mode:</label>
-                            <select v-model="state.battery_manual_mode" :disabled="isPending('battery_manual_mode')"
+                            <label for="battery-manual-mode">Battery mode:</label>
+                            <select id="battery-manual-mode" v-model="state.battery_manual_mode" :disabled="isPending('battery_manual_mode')"
                                     @change="updateSetting('battery_manual_mode', state.battery_manual_mode)">
                                 <option v-for="opt in enums.BatteryState" :value="opt.name">{{ opt.value }}</option>
                             </select>
                         </div>
 
                         <div class="control-group">
-                            <label>EVCC mode:</label>
-                            <select v-model="state.evcc_manual_state" :disabled="isPending('evcc_manual_state')"
+                            <label for="evcc-manual-state">EVCC mode:</label>
+                            <select id="evcc-manual-state" v-model="state.evcc_manual_state" :disabled="isPending('evcc_manual_state')"
                                     @change="updateSetting('evcc_manual_state', state.evcc_manual_state)">
                                 <option v-for="opt in enums.EVCCManualState" :key="opt.name" :value="opt.name">{{ opt.value }}</option>
                             </select>
@@ -380,15 +405,15 @@
 
                         <div class="grid-2">
                             <div class="control-group">
-                            <label>Inverter limit:</label>
-                            <input type="number" class="input-compact" min="0" max="7000" step="100" v-model.number="state.inverter_manual_limit"
+                            <label for="inverter-manual-limit">Inverter limit:</label>
+                            <input id="inverter-manual-limit" type="number" class="input-compact" min="0" max="7000" step="100" v-model.number="state.inverter_manual_limit"
                                    :disabled="isPending('inverter_manual_limit')"
                                    @change="updateSetting('inverter_manual_limit', state.inverter_manual_limit)">
                             </div>
 
                             <div class="control-group">
-                                <label>EVCC limit:</label>
-                                <input type="number" class="input-compact" min="6" max="32" step="1" v-model.number="state.evcc_manual_limit"
+                                <label for="evcc-manual-limit">EVCC limit:</label>
+                                <input id="evcc-manual-limit" type="number" class="input-compact" min="6" max="32" step="1" v-model.number="state.evcc_manual_limit"
                                        :disabled="isPending('evcc_manual_limit')"
                                        @change="updateSetting('evcc_manual_limit', state.evcc_manual_limit)">
                             </div>
@@ -445,7 +470,7 @@
         </div>
     </div>
 
-    <div v-show="currentTab === 'plan'" class="tab-content-flex">
+    <div id="panel-plan" role="tabpanel" aria-labelledby="tab-plan" v-show="currentTab === 'plan'" class="tab-content-flex">
         <div class="card plan-card" v-if="state?.prediction_plan">
             <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 5px;">
                 <h5 style="margin: 0;">📅 Prediction Plan</h5>
@@ -494,7 +519,7 @@
         <div v-else class="card">No prediction plan available.</div>
     </div>
 
-    <div v-show="currentTab === 'incidents'">
+    <div id="panel-incidents" role="tabpanel" aria-labelledby="tab-incidents" v-show="currentTab === 'incidents'">
         <h5>Incidents</h5>
         <div class="grid-2">
             <div class="card">
@@ -549,7 +574,7 @@
         </div>
     </div>
 
-    <div v-show="currentTab === 'logs'">
+    <div id="panel-logs" role="tabpanel" aria-labelledby="tab-logs" v-show="currentTab === 'logs'">
         <h5>Application Logs</h5>
         <div class="card">
             <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px;">
@@ -596,7 +621,7 @@
         </div>
     </div>
 
-    <div v-show="currentTab === 'state'">
+    <div id="panel-state" role="tabpanel" aria-labelledby="tab-state" v-show="currentTab === 'state'">
         <div class="card">
             <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px;">
                 <h5>Raw Application State</h5>
@@ -624,6 +649,7 @@
         setup() {
             // -- State variables --
             const currentTab = ref('dashboard');
+            const tabOrder = ['dashboard', 'plan', 'incidents', 'logs', 'state'];
             const state = ref(null);
             const lastSync = ref('');
             const toast = ref({ show: false, message: '' });
@@ -672,6 +698,36 @@
                     fetchState();
                 }
             });
+
+            const setCurrentTab = (tabName) => {
+                if (tabOrder.includes(tabName)) {
+                    currentTab.value = tabName;
+                }
+            };
+
+            const handleTabKeydown = async (event) => {
+                const currentIndex = tabOrder.indexOf(currentTab.value);
+                if (currentIndex === -1) return;
+
+                let nextIndex = currentIndex;
+                if (event.key === 'ArrowRight') {
+                    nextIndex = (currentIndex + 1) % tabOrder.length;
+                } else if (event.key === 'ArrowLeft') {
+                    nextIndex = (currentIndex - 1 + tabOrder.length) % tabOrder.length;
+                } else if (event.key === 'Home') {
+                    nextIndex = 0;
+                } else if (event.key === 'End') {
+                    nextIndex = tabOrder.length - 1;
+                } else {
+                    return;
+                }
+
+                event.preventDefault();
+                setCurrentTab(tabOrder[nextIndex]);
+                await nextTick();
+                const tabButton = document.getElementById(`tab-${tabOrder[nextIndex]}`);
+                if (tabButton) tabButton.focus();
+            };
 
             // --- ENUMS CONFIGURATION ---
             const enums = {
@@ -1258,7 +1314,7 @@
                 };
             }
 
-            return { currentTab, state, lastSync, enums, statusColor, currentPrice, formatTime, updateSetting, toast,
+            return { currentTab, setCurrentTab, handleTabKeydown, state, lastSync, enums, statusColor, currentPrice, formatTime, updateSetting, toast,
                 formatPeakTimestamp, logs, fetchLogs, isFetchingLogs, logFilter, filteredLogs, formattedState,
                 isCurrentInterval, fetchState, batteryModeDisplay, logLimit, formatTimeHm, authChecked, auth,
                 loginPassword, loginError, isLoggingIn, login, logout, requestRestart, requestShutdown, requestSummary,

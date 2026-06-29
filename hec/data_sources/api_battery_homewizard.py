@@ -4,15 +4,25 @@ import logging
 import os
 
 import requests
-import time
-from datetime import datetime, timezone
 from typing import Optional, Dict, Any
+
+from hec.utils.http_client import HttpClient, build_http_client
+from hec.utils.time_utils import utc_now
 
 logger = logging.getLogger(__name__)
 
 
 class BatteryHomeWizard:
-    def __init__(self, name: str, host: str, token: str = "", request_timeout: int = 10):
+    def __init__(
+            self,
+            name: str,
+            host: str,
+            token: str = "",
+            request_timeout: int = 10,
+            http_client: Optional[HttpClient] = None,
+            app_config: Optional[dict] = None,
+            verify_tls: bool = False,
+    ):
         """
         Initializes the HomeWizard Battery.
 
@@ -26,8 +36,14 @@ class BatteryHomeWizard:
         self.host: str = host
         self.token: str = token
         self.request_timeout: int = request_timeout
+        self.verify_tls = verify_tls
         self.api_url: str = f"https://{self.host}/api"
         self.api_measurement_url: str = f"{self.api_url}/measurement"
+        self.http = http_client or build_http_client(
+            app_config,
+            default_timeout_seconds=request_timeout,
+            verify_tls=verify_tls,
+        )
         self.is_initialized: bool = False
 
         self._initialize_connection()
@@ -37,13 +53,13 @@ class BatteryHomeWizard:
         logger.info(f"Battery [{self.name}]: Initializing connection at {self.api_url}")
         self.token = os.getenv(f"BATTERY_{self.name.upper()}")
         try:
-            response = requests.get(
+            response = self.http.get(
                 self.api_url,
                 headers={
                     "Authorization": f"Bearer {self.token}",
                     "X-Api-Version": "2",
                 },
-                verify=False,  # local HTTPS with self-signed cert
+                verify=self.verify_tls,
                 timeout=self.request_timeout,
             )
             if response.status_code == 200:
@@ -75,13 +91,13 @@ class BatteryHomeWizard:
             return None
 
         try:
-            response = requests.get(
+            response = self.http.get(
                 self.api_measurement_url,
                 headers={
                     "Authorization": f"Bearer {self.token}",
                     "X-Api-Version": "2",
                 },
-                verify=False,
+                verify=self.verify_tls,
                 timeout=self.request_timeout,
             )
             response.raise_for_status()
@@ -93,7 +109,7 @@ class BatteryHomeWizard:
                 "energy_export_kwh": data.get("energy_export_kwh"),
                 "state_of_charge_pct": data.get("state_of_charge_pct"),
                 "cycles": data.get("cycles"),
-                "timestamp_utc_iso": datetime.now(timezone.utc).isoformat(),
+                "timestamp_utc_iso": utc_now().isoformat(),
             }
 
             logger.debug(

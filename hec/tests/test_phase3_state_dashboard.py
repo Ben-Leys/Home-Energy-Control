@@ -216,13 +216,20 @@ assert(component, 'dashboard component was not mounted');
   process.exit(1);
 }});
 """
-        result = subprocess.run(
-            ["node", "-e", node_script],
-            cwd=Path(__file__).resolve().parents[2],
-            text=True,
-            capture_output=True,
-            check=False,
-        )
+        scratch_root = Path.cwd() / "_scratch"
+        scratch_root.mkdir(exist_ok=True)
+        script_path = scratch_root / "phase3-dashboard-test.js"
+        script_path.write_text(node_script, encoding="utf-8")
+        try:
+            result = subprocess.run(
+                ["node", str(script_path)],
+                cwd=Path(__file__).resolve().parents[2],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+        finally:
+            script_path.unlink(missing_ok=True)
         if result.returncode != 0:
             self.fail(
                 "Dashboard JavaScript scenario failed\n"

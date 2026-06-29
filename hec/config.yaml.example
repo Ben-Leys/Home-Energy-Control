@@ -1,5 +1,39 @@
-# Merge this api_server section into hec/config.yaml to enable the Phase 1
-# lightweight dashboard/API authentication.
+# Redacted Home Energy Control configuration sample.
+# Copy to hec/config.yaml and keep local secrets in hec/.env.
+
+application:
+  log_level: INFO
+  log_to_file: true
+  log_file_path: logfile.log
+  log_rotation_max_bytes: 5242880
+  log_rotation_backup_count: 5
+  tariffs_file_name: tariffs.yaml
+
+database:
+  path: home_energy.db
+  busy_timeout_ms: 10000
+  history_retention_days: 1095
+  log_retention_hours: 72
+  info_debug_log_retention_hours: 12
+
+scheduler:
+  timezone: Europe/Brussels
+  run_in_background: true
+  thread_pool_max_workers: 10
+  coalesce_jobs: true
+  max_instances_per_job: 3
+  misfire_grace_time_seconds: 60
+
+historic_data:
+  start_date: "2026-01-01"
+
+location:
+  city: Putte
+  region_name_for_astral_optional: Belgium
+  timezone: Europe/Brussels
+  latitude: 51.05483
+  longitude: 4.62877
+
 api_server:
   enabled: true
   host: 0.0.0.0
@@ -15,9 +49,112 @@ api_server:
     same_origin_enabled: true
     secure_cookie: false
 
-# Phase 5 restart lifecycle defaults. Configure the NAS/service manager to
-# restart the process when this exit code is returned.
 runtime:
   restart_strategy: supervised_process
   restart_exit_code: 75
   main_loop_sleep_seconds: 1
+
+http:
+  default_timeout_seconds: 10
+  retries: 2
+  backoff_factor: 0.2
+  verify_tls: true
+
+mediator:
+  standard_max_peak_consumption_kw: 2.5
+  buffer_before_pv_limit_change: 3
+
+p1_meter:
+  host: 192.0.2.10
+  request_timeout_seconds: 10
+  battery_verify_tls: false
+
+batteries:
+  - name: GARAGE
+    host: 192.0.2.11
+    request_timeout_seconds: 10
+    verify_tls: false
+  - name: ATTIC
+    host: 192.0.2.12
+    request_timeout_seconds: 10
+    verify_tls: false
+
+inverter:
+  host: 192.0.2.20
+  port: 502
+  modbus_unit_id: 3
+  grid_guard_code: null
+  standard_power_limit: 7000
+  timeout_sec: 5
+  location:
+    city: Putte
+    region_name_for_astral_optional: Belgium
+    timezone: Europe/Brussels
+    latitude: 51.05483
+    longitude: 4.62877
+
+evcc:
+  api_url: http://192.0.2.30:7070/api
+  default_loadpoint_id: 1
+  min_current: 6
+  max_current: 32
+  request_timeout_seconds: 10
+
+entsoe:
+  api_base_url: https://web-api.tp.entsoe.eu/api
+  document_type: A44
+  domain: 10YBE----------2
+  auction_opening_hour: 13
+
+elia:
+  api_base_url: https://opendata.elia.be/api/explore/v2.1/catalog/datasets
+  timezone: Europe/Brussels
+  dataset_solar: ods087
+  dataset_solar_hist: ods032
+  dataset_wind: ods086
+  dataset_wind_hist: ods031
+  dataset_grid_load: ods002
+  dataset_grid_load_hist: ods001
+
+tasks_schedule:
+  fetch_day_ahead_prices:
+    trigger_args:
+      hour: 13
+      minute: 5
+    max_retries: 36
+    retry_after: 15
+    summary_email: true
+  midnight_rollover:
+    trigger_args:
+      hour: 0
+      minute: 1
+  fetch_elia_forecast:
+    trigger_args:
+      hour: 3
+      minute: 10
+  mediator_logic:
+    trigger_args:
+      second: "*/15"
+  battery_prediction:
+    trigger_args:
+      minute: "*/15"
+  p1_meter_update:
+    second: "*/15"
+  evcc_update:
+    second: "*/15"
+  inverter_update_for_db:
+    minute: "*/15"
+  inverter_update_for_mediator:
+    second: "*/15"
+  battery_update_for_db:
+    minute: "*/15"
+  battery_update:
+    second: "*/15"
+
+smtp:
+  host: smtp.example.com
+  port: 465
+  user: hec@example.com
+  sender_email: hec@example.com
+  default_recipients:
+    - owner@example.com

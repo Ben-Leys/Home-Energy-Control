@@ -4,8 +4,8 @@
 
 This Python app lives under `hec/`. `hec/core/` holds state, models, logging, API server, tariffs, and initialization.
 Integrations are in `hec/controllers/` and `hec/data_sources/`. Scheduling and optimization are in
-`hec/logic_engine/`; persistence in `hec/database_ops/`; reporting in `hec/reporting/`; dashboard code in
-`hec/ui/hec_dashboard.py`. Tests are in `hec/tests/`; assets include `hec/core/vue_dashboard.html` and
+`hec/logic_engine/`; persistence in `hec/database_ops/`; reporting in `hec/reporting/`; dashboard code is served from
+`hec/core/vue_dashboard.html`. Tests are in `hec/tests/`; assets include `hec/core/vue_dashboard.html` and
 `hec/tariffs.yaml`.
 
 ## Build, Test, and Development Commands
@@ -30,17 +30,13 @@ Run the controller app from the repository root so package imports resolve:
 python -m hec.main
 ```
 
-Run the Streamlit dashboard separately with:
-
-```powershell
-streamlit run hec/ui/hec_dashboard.py
-```
+The dashboard is served by the Flask API at `/`; the deprecated Streamlit dashboard has been removed.
 
 ## Coding Style & Naming Conventions
 
 Use standard Python style: 4-space indentation, `snake_case` for modules, functions, variables, and tests, and
-`PascalCase` for classes and enums. Group imports as standard library, third-party, then local `hec` imports. No project
-formatter is configured, so keep edits PEP 8 compatible and consistent with nearby code.
+`PascalCase` for classes and enums. Group imports as standard library, third-party, then local `hec` imports. Ruff
+configuration lives in `pyproject.toml`; keep edits PEP 8 compatible and consistent with nearby code.
 
 ## Testing Guidelines
 

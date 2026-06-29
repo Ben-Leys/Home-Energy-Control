@@ -55,13 +55,21 @@ class RuntimeInitializer:
         inject_db_to_logging(db_handler)
         fetch_entsoe, fetch_elia = check_historic_data(db_handler, app_config)
 
-        p1_meter_client, inverter_client, evcc_client, battery_clients = initialize_external_clients(app_config)
+        p1_meter_client, inverter_client, evcc_client, battery_clients, battery_gateway = initialize_external_clients(
+            app_config
+        )
 
         app_state.set_db_handler(db_handler)
         app_state.load_persisted_settings()
         populate_app_state(db_handler, app_config, evcc_client)
 
-        system_mediator = SystemMediator(app_config, evcc_client, inverter_client, p1_meter_client)
+        system_mediator = SystemMediator(
+            app_config,
+            evcc_client,
+            inverter_client,
+            p1_meter_client,
+            battery_gateway=battery_gateway,
+        )
 
         api_thread = None
         if app_config.get("api_server", {}).get("enabled", True):
@@ -87,6 +95,7 @@ class RuntimeInitializer:
             tariff_manager,
             system_mediator,
             battery_clients,
+            battery_gateway,
             fetch_entsoe,
             fetch_elia,
         )

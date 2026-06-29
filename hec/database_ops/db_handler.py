@@ -2102,7 +2102,7 @@ class DatabaseHandler:
                 return [dict(row) for row in cursor.fetchall()]
 
         except Exception as e:
-            logger.error(f"Error retrieving predicted prices for {target_date}: {e}", exc_info=True)
+            logger.error(f"Error retrieving predicted prices for {target_date_local}: {e}", exc_info=True)
             return []
 
     def store_evcc_session(self, timestamp_utc: datetime, current_session_kwh: float):

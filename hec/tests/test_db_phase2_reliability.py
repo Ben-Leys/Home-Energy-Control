@@ -2,7 +2,7 @@ import sqlite3
 import threading
 import time
 import unittest
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -162,6 +162,18 @@ class TestDatabasePhase2Reliability(unittest.TestCase):
 
         self.assertEqual(first_rows, second_rows)
         self.assertEqual([{"version": 1, "description": "001_noop_initial_schema"}], second_rows)
+
+    def test_predicted_price_lookup_exception_logs_target_date_without_crashing(self):
+        handler = DatabaseHandler({"path": str(self.db_path)})
+
+        with (
+            patch.object(handler, "_get_connection", side_effect=RuntimeError("connection failed")),
+            self.assertLogs("hec.database_ops.db_handler", level="ERROR") as captured,
+        ):
+            result = handler.get_predicted_prices_for_date(date(2026, 6, 29))
+
+        self.assertEqual([], result)
+        self.assertIn("2026-06-29", "\n".join(captured.output))
 
     def test_energy_history_retention_preserves_boundary_rows_and_leaves_logs_alone(self):
         handler = self.make_handler()

@@ -13,7 +13,9 @@ from dotenv import load_dotenv
 
 from hec.controllers import modbus_sma_inverter
 from hec.controllers.api_evcc import EvccApiClient
+from hec.controllers.homewizard_battery_gateway import HomeWizardBatteryGateway
 from hec.core import constants as c
+from hec.core.config_schema import ConfigValidationError, validate_app_config
 from hec.data_sources import api_p1_meter_homewizard, api_battery_homewizard
 from hec.database_ops.db_handler import DatabaseHandler
 from hec.logic_engine.data_processors import populate_appstate_with_price_data
@@ -88,6 +90,7 @@ def initialize_external_clients(app_config: dict):
     p1_client = None
     inverter_client = None
     evcc_client = None
+    battery_gateway = None
 
     # --- P1 Meter ---
     try:
@@ -97,12 +100,33 @@ def initialize_external_clients(app_config: dict):
         if not host:
             logger.warning("P1 meter host not configured. P1 data source will be disabled.")
         else:
-            client = api_p1_meter_homewizard.P1MeterHomewizardClient(host=host, token=token)
+            request_timeout = p1_conf.get("request_timeout_seconds", p1_conf.get("request_timeout", 10))
+            client = api_p1_meter_homewizard.P1MeterHomewizardClient(
+                host=host,
+                request_timeout=request_timeout,
+                app_config=app_config,
+            )
             if client.is_initialized:
                 p1_client = client
                 logger.info("P1 meter client initialized successfully.")
             else:
                 logger.warning("P1 meter client failed to initialize.")
+
+            if token:
+                gateway = HomeWizardBatteryGateway(
+                    host=host,
+                    token=token,
+                    request_timeout=request_timeout,
+                    app_config=app_config,
+                    verify_tls=p1_conf.get("battery_verify_tls", False),
+                )
+                if gateway.is_initialized:
+                    battery_gateway = gateway
+                    logger.info("HomeWizard battery gateway initialized successfully.")
+                else:
+                    logger.warning("HomeWizard battery gateway failed to initialize.")
+            else:
+                logger.warning("P1_METER token not configured. HomeWizard battery gateway disabled.")
     except Exception as e:
         logger.error(f"Error initializing P1 meter client. {e}", exc_info=True)
 
@@ -141,7 +165,8 @@ def initialize_external_clients(app_config: dict):
                 base_api_url=api_url,
                 default_loadpoint_id=evcc_config.get('default_loadpoint_id'),
                 max_current=evcc_config.get('max_current'),
-                request_timeout=evcc_config.get('request_timeout_seconds')
+                request_timeout=evcc_config.get('request_timeout_seconds'),
+                app_config=app_config,
             )
             if not evcc_client.is_available:
                 logger.warning("EVCC client initialized, but EVCC API seems unavailable at startup.")
@@ -166,7 +191,13 @@ def initialize_external_clients(app_config: dict):
                     logger.warning(f"Skipping incomplete battery config: {b}")
                     continue
 
-                client = api_battery_homewizard.BatteryHomeWizard(name=name, host=host)
+                client = api_battery_homewizard.BatteryHomeWizard(
+                    name=name,
+                    host=host,
+                    request_timeout=b.get("request_timeout_seconds", b.get("request_timeout", 10)),
+                    app_config=app_config,
+                    verify_tls=b.get("verify_tls", False),
+                )
                 if client.is_initialized:
                     battery_clients[name] = client
                     logger.info(f"Battery '{name}' initialized successfully.")
@@ -175,7 +206,7 @@ def initialize_external_clients(app_config: dict):
     except Exception as e:
         logger.error(f"Error initializing battery clients: {e}", exc_info=True)
 
-    return p1_client, inverter_client, evcc_client, battery_clients
+    return p1_client, inverter_client, evcc_client, battery_clients, battery_gateway
 
 
 def setup_scheduler(config: dict, run_in_background: bool = False):
@@ -241,6 +272,10 @@ def load_app_config():
         raise ValueError(f"Configuration file '{config_path}' is empty.")
     if not isinstance(config, dict):
         raise ValueError(f"Configuration file '{config_path}' must contain a YAML mapping.")
+    try:
+        validate_app_config(config)
+    except ConfigValidationError as e:
+        raise ValueError(f"Invalid configuration file '{config_path}': {e}") from e
 
     logging.info(f"Loaded files .env and {CONFIG_FILE_NAME}")
     return config

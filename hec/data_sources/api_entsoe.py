@@ -8,6 +8,8 @@ from xml.etree import ElementTree as ElTree
 import requests
 
 from hec.core.models import PricePoint
+from hec.utils.http_client import build_http_client
+from hec.utils.time_utils import DEFAULT_TIMEZONE, local_day_bounds
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +27,7 @@ def fetch_entsoe_prices(t_day_local: datetime, app_config: dict) -> Optional[Lis
 
     entsoe_config = app_config['entsoe']
     auction_opening_hour = entsoe_config.get('auction_opening_hour')
+    http_client = app_config.get("_http_client") or build_http_client(app_config, default_timeout_seconds=30)
 
     # Target day checks
     now_local = datetime.now().astimezone()
@@ -41,19 +44,14 @@ def fetch_entsoe_prices(t_day_local: datetime, app_config: dict) -> Optional[Lis
         logger.warning("ENTSO-E API key not found in environment variable ENTSOE_API_KEY.")
         return None
 
-    # ENTSO-E API expects periodStart and periodEnd in UTC
-    # If t_day_local is for tomorrow, the period starts at 00:00 tomorrow local time
-    # and ends at 00:00 the day after tomorrow local time. These can be two different time zones (DST)
-    # and need to be converted to UTC. To correctly handle we need the local timezone.
-
-    period_start_tz = datetime.combine(t_day_local, time.min).astimezone().tzinfo
-    period_end_tz = datetime.combine(t_day_local, time.max).astimezone().tzinfo
-
-    period_start_local = datetime.combine(t_day_local, time.min, tzinfo=period_start_tz)
-    period_end_local = datetime.combine(t_day_local + timedelta(days=1), time.min, tzinfo=period_end_tz)
-
-    period_start_utc_str = period_start_local.astimezone(timezone.utc).strftime('%Y%m%d%H%M')
-    period_end_utc_str = period_end_local.astimezone(timezone.utc).strftime('%Y%m%d%H%M')
+    timezone_name = (
+            app_config.get("scheduler", {}).get("timezone")
+            or entsoe_config.get("timezone")
+            or DEFAULT_TIMEZONE
+    )
+    period_start_utc, period_end_utc = local_day_bounds(t_day_local, timezone_name)
+    period_start_utc_str = period_start_utc.strftime('%Y%m%d%H%M')
+    period_end_utc_str = period_end_utc.strftime('%Y%m%d%H%M')
 
     params = {
         "documentType": entsoe_config.get('document_type'),
@@ -68,7 +66,7 @@ def fetch_entsoe_prices(t_day_local: datetime, app_config: dict) -> Optional[Lis
 
     response = ''
     try:
-        response = requests.get(entsoe_config.get('api_base_url'), params=params, timeout=30)
+        response = http_client.get(entsoe_config.get('api_base_url'), params=params, timeout=30)
         response.raise_for_status()
         logger.debug(f"ENTSO-E API response status: {response.status_code}")
     except requests.exceptions.Timeout:

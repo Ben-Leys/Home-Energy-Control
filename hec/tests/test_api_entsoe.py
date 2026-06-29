@@ -243,14 +243,14 @@ class TestApiEntsoe(unittest.TestCase):
         self.assertIsNotNone(result)  # Returns [] if no TimeSeries but no error Reason
         self.assertEqual(len(result), 0)
 
-    @patch('hec.data_sources.api_entsoe.requests.get')  # Patch requests.get within the module being tested
-    def test_fetch_entsoe_prices_success(self, mock_get):
+    def test_fetch_entsoe_prices_success(self):
         # Configure the mock response
         mock_response = MagicMock()
         mock_response.status_code = 200
         mock_response.content = XML_SUCCESS_PT60M_4POINTS
         mock_response.url = "mock://url"  # For logging in case of error
-        mock_get.return_value = mock_response
+        mock_get = MagicMock(return_value=mock_response)
+        self.mock_app_config["_http_client"] = MagicMock(get=mock_get)
 
         # Target day well after auction time
         target_day = (datetime.now(self.local_tz) - timedelta(days=5)).replace(hour=0, minute=0, second=0,
@@ -263,22 +263,23 @@ class TestApiEntsoe(unittest.TestCase):
         self.assertEqual(len(result), 24)
         self.assertEqual(result[0].price_eur_per_mwh, 110)
 
-    @patch('hec.data_sources.api_entsoe.requests.get')
-    def test_fetch_entsoe_prices_http_error(self, mock_get):
+    def test_fetch_entsoe_prices_http_error(self):
         mock_response = MagicMock()
         mock_response.status_code = 500
         mock_response.raise_for_status.side_effect = requests.exceptions.HTTPError("Server Error")
         mock_response.url = "mock://url"
-        mock_get.return_value = mock_response
+        mock_get = MagicMock(return_value=mock_response)
+        self.mock_app_config["_http_client"] = MagicMock(get=mock_get)
 
         target_day = (datetime.now(self.local_tz) - timedelta(days=5))
         result = api_entsoe.fetch_entsoe_prices(target_day, self.mock_app_config)
 
         self.assertIsNone(result)
 
-    @patch('hec.data_sources.api_entsoe.requests.get')
-    def test_fetch_entsoe_prices_timeout(self, mock_get):
+    def test_fetch_entsoe_prices_timeout(self):
+        mock_get = MagicMock()
         mock_get.side_effect = requests.exceptions.Timeout("Request timed out")
+        self.mock_app_config["_http_client"] = MagicMock(get=mock_get)
 
         target_day = (datetime.now(self.local_tz) - timedelta(days=5))
         result = api_entsoe.fetch_entsoe_prices(target_day, self.mock_app_config)

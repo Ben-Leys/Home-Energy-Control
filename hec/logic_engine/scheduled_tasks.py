@@ -13,6 +13,7 @@ import pytz
 from apscheduler.schedulers.base import BaseScheduler
 
 from hec.controllers.api_evcc import EvccApiClient
+from hec.controllers.homewizard_battery_gateway import HomeWizardBatteryGateway
 from hec.controllers.modbus_sma_inverter import InverterSmaModbusClient
 from hec.core import constants as c
 from hec.core.app_state import GLOBAL_APP_STATE
@@ -31,6 +32,7 @@ from hec.logic_engine.data_processors import populate_appstate_with_price_data, 
 from hec.logic_engine.price_predictor import EnergyPricePredictor
 from hec.logic_engine.system_mediator import SystemMediator
 from hec.reporting.daily_summary import DailySummaryGenerator
+from hec.utils.time_utils import DEFAULT_TIMEZONE, get_zone, utc_now
 from hec.utils.utils import process_price_points_to_app_state, is_daylight
 
 logger = logging.getLogger(__name__)
@@ -120,7 +122,12 @@ def task_midnight_rollover(db_handler: DatabaseHandler, app_config: dict):
     GLOBAL_APP_STATE.set("sunrise", sunrise)
     GLOBAL_APP_STATE.set("sunset", sunset)
 
-def task_poll_p1_meter(db_handler: DatabaseHandler, p1_client: Optional[P1MeterHomewizardClient], boundary: int = 5):
+def task_poll_p1_meter(
+        db_handler: DatabaseHandler,
+        p1_client: Optional[P1MeterHomewizardClient],
+        battery_gateway: Optional[HomeWizardBatteryGateway] = None,
+        boundary: int = 5,
+):
     """
     Polls the P1 meter, updates AppState, and conditionally stores into the DB
     once per 'boundary'-minute slot.
@@ -132,7 +139,7 @@ def task_poll_p1_meter(db_handler: DatabaseHandler, p1_client: Optional[P1MeterH
 
     logger.debug("P1 Meter polling task: Fetching data...")
     p1_data = p1_client.refresh_meter_data()
-    battery_data = p1_client.refresh_batteries_data()
+    battery_data = battery_gateway.refresh_group_data() if battery_gateway else None
 
     if not p1_data or "timestamp_utc_iso" not in p1_data:
         logger.warning("P1 Meter task: no valid data fetched.")
@@ -551,8 +558,8 @@ def task_run_battery_predictor(app_config, db_handler: DatabaseHandler):
     bp = BatteryPredictor(app_config)
     cd = ConsumptionPredictor(db_handler)
 
-    local_tz = pytz.timezone('Europe/Brussels')
-    now_utc = datetime.now(pytz.UTC)
+    local_tz = get_zone(app_config.get("scheduler", {}).get("timezone", DEFAULT_TIMEZONE))
+    now_utc = utc_now()
     now_local = now_utc.astimezone(local_tz)
 
     # 1. Get Actual SOC from App State.
@@ -586,18 +593,18 @@ def task_run_battery_predictor(app_config, db_handler: DatabaseHandler):
         logger.info(f"Generating new 48h base prediction plan for {today_date_str}...")
 
         # Determine strict local midnight boundaries (DST safe!)
-        today_local_midnight = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
+        today_local_midnight = datetime.combine(now_local.date(), time.min, tzinfo=local_tz)
         tomorrow_date = today_local_midnight.date() + timedelta(days=1)
-        tomorrow_local_midnight = local_tz.localize(datetime.combine(tomorrow_date, datetime.min.time()))
+        tomorrow_local_midnight = datetime.combine(tomorrow_date, datetime.min.time(), tzinfo=local_tz)
         day_after_date = today_local_midnight.date() + timedelta(days=2)
-        day_after_local_midnight = local_tz.localize(datetime.combine(day_after_date, datetime.min.time()))
+        day_after_local_midnight = datetime.combine(day_after_date, datetime.min.time(), tzinfo=local_tz)
 
         # Convert back to UTC for the predictor limits
-        first_day_start = today_local_midnight.astimezone(pytz.UTC)
-        first_day_end = (tomorrow_local_midnight - timedelta(minutes=15)).astimezone(pytz.UTC)
+        first_day_start = today_local_midnight.astimezone(timezone.utc)
+        first_day_end = (tomorrow_local_midnight - timedelta(minutes=15)).astimezone(timezone.utc)
 
-        second_day_start = tomorrow_local_midnight.astimezone(pytz.UTC)
-        second_day_end = (day_after_local_midnight - timedelta(minutes=15)).astimezone(pytz.UTC)
+        second_day_start = tomorrow_local_midnight.astimezone(timezone.utc)
+        second_day_end = (day_after_local_midnight - timedelta(minutes=15)).astimezone(timezone.utc)
 
         try:
             # --- DAY 1 ---
@@ -660,8 +667,8 @@ def task_run_battery_predictor(app_config, db_handler: DatabaseHandler):
             if sunrise:
                 search_end = sunrise + timedelta(hours=3)
                 if now_local < search_end:
-                    start_utc = sunrise.astimezone(pytz.UTC)
-                    end_utc = search_end.astimezone(pytz.UTC)
+                    start_utc = sunrise.astimezone(timezone.utc)
+                    end_utc = search_end.astimezone(timezone.utc)
                     sunrise_window_df = opt_plan_df.loc[start_utc: end_utc]
                     if not sunrise_window_df.empty:
                         blocks = sunrise_window_df[sunrise_window_df['block_c']]
@@ -704,6 +711,7 @@ def register_all_jobs(scheduler: BaseScheduler, db_handler: DatabaseHandler, app
                       tariff_manager: Optional[TariffManager],
                       system_mediator: SystemMediator,
                       battery_clients: Optional[Dict[str, BatteryHomeWizard]],
+                      battery_gateway: Optional[HomeWizardBatteryGateway] = None,
                       fetch_entsoe=False, fetch_elia=False):
     """Registers all defined scheduled jobs with the provided scheduler instance."""
 
@@ -805,7 +813,7 @@ def register_all_jobs(scheduler: BaseScheduler, db_handler: DatabaseHandler, app
                 func=task_poll_p1_meter,
                 trigger="cron",
                 trigger_args={"second": second},
-                job_args=[db_handler, p1_client],
+                job_args=[db_handler, p1_client, battery_gateway],
                 name="Poll P1 Smart Meter",
                 grace_time=10,
             )
@@ -887,7 +895,7 @@ def register_all_jobs(scheduler: BaseScheduler, db_handler: DatabaseHandler, app
             )
 
         # Register battery job if available
-        if battery_clients and p1_client:
+        if battery_clients:
             inverter_schedule = tasks_config.get(BATTERY_UPDATE_FOR_DB_JOB_ID, {})
             minute = inverter_schedule.get('minute', '*/15')
             register_job(
