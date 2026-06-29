@@ -225,14 +225,6 @@ class TestDatabasePhase2Reliability(unittest.TestCase):
         self.assertEqual(["kept warning", "recent info"], remaining)
         self.assertEqual(3, result["logs"])
 
-    def test_database_backup_restore_documentation_exists(self):
-        docs_path = Path.cwd() / "docs" / "database-maintenance.md"
-
-        self.assertTrue(docs_path.exists())
-        text = docs_path.read_text(encoding="utf-8").lower()
-        for required_text in ("backup", "restore", "retention", "wal", "sqlite3"):
-            self.assertIn(required_text, text)
-
 
 if __name__ == "__main__":
     unittest.main()

@@ -32,3 +32,5 @@ data/
 /hec/logfile.log*
 /bfg-1.15.0.jar
 .aider*
+/hec/home_energy.db-shm
+/hec/home_energy.db-wal

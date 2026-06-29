@@ -237,5 +237,10 @@ def load_app_config():
         except yaml.YAMLError as e:
             raise ValueError(f"Error parsing YAML configuration file: {e}")
 
+    if config is None:
+        raise ValueError(f"Configuration file '{config_path}' is empty.")
+    if not isinstance(config, dict):
+        raise ValueError(f"Configuration file '{config_path}' must contain a YAML mapping.")
+
     logging.info(f"Loaded files .env and {CONFIG_FILE_NAME}")
     return config

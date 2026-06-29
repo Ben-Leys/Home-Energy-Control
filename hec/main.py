@@ -1,7 +1,12 @@
 import logging
 import sys
 import time
+from pathlib import Path
 from threading import Thread
+
+if __package__ in (None, ""):
+    project_root = Path(__file__).resolve().parent.parent
+    sys.path.insert(0, str(project_root))
 
 from hec.core import constants as c, api_server
 from hec.core.api_server import run_api_server
