@@ -34,3 +34,4 @@ data/
 .aider*
 /hec/home_energy.db-shm
 /hec/home_energy.db-wal
+/local-ai-helpers.md
