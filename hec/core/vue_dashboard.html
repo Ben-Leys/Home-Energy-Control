@@ -90,6 +90,31 @@
             background: white;
             text-transform: uppercase;
         }
+        .incident-row {
+            padding: 8px;
+            border-bottom: 1px solid #d0d0d0;
+            display: grid;
+            grid-template-columns: 1fr auto;
+            gap: 8px;
+            align-items: center;
+        }
+        .incident-meta {
+            color: var(--info-label);
+            font-size: 0.75rem;
+            margin-top: 4px;
+        }
+        .notification-options {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 12px;
+            align-items: center;
+        }
+        .notification-options label {
+            display: inline-flex;
+            gap: 5px;
+            align-items: center;
+            margin: 0;
+        }
         .compact-grid {
             display: grid;
             grid-template-columns: 1fr 1fr;
@@ -211,6 +236,7 @@
     <div class="tabs">
         <button class="tab" :class="{active: currentTab === 'dashboard'}" @click="currentTab = 'dashboard'">📊 Dashboard</button>
         <button class="tab" :class="{active: currentTab === 'plan'}" @click="currentTab = 'plan'">📅 Prediction</button>
+        <button class="tab" :class="{active: currentTab === 'incidents'}" @click="currentTab = 'incidents'">Incidents</button>
         <button class="tab" :class="{active: currentTab === 'logs'}" @click="currentTab = 'logs'">📜 Logs</button>
         <button class="tab" :class="{active: currentTab === 'state'}" @click="currentTab = 'state'">🔍 App State</button>
     </div>
@@ -371,6 +397,33 @@
                 </div>
             </div>
 
+            <div class="card">
+                <h4>Notifications</h4>
+                <div class="notification-options">
+                    <label>
+                        <input type="checkbox" v-model="notificationPreferences.warning">
+                        Warning
+                    </label>
+                    <label>
+                        <input type="checkbox" v-model="notificationPreferences.error">
+                        Error
+                    </label>
+                    <label>
+                        <input type="checkbox" v-model="notificationPreferences.peak_consumption">
+                        Peak consumption
+                    </label>
+                    <button class="btn" @click="activateNotificationDevice" :disabled="isActivatingNotificationDevice">
+                        {{ notificationDevice.active ? 'Update this device' : 'Activate this device' }}
+                    </button>
+                </div>
+                <div class="sub-value" v-if="notificationDevice.active">
+                    Device active: {{ notificationDevice.label }}
+                </div>
+                <div class="sub-value" v-if="notificationDevice.error" style="color: #d32f2f;">
+                    {{ notificationDevice.error }}
+                </div>
+            </div>
+
             <div class="grid-2">
                 <button class="btn btn-primary" @click="requestRestart" :disabled="isPending('reboot_request')">
                     Restart system
@@ -439,6 +492,61 @@
             </div>
         </div>
         <div v-else class="card">No prediction plan available.</div>
+    </div>
+
+    <div v-show="currentTab === 'incidents'">
+        <h5>Incidents</h5>
+        <div class="grid-2">
+            <div class="card">
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
+                    <h4>Active</h4>
+                    <button class="btn" @click="fetchIncidents" :disabled="isFetchingIncidents"
+                            style="padding: 5px 15px; background-color: grey">
+                        {{ isFetchingIncidents ? '...' : 'Refresh' }}
+                    </button>
+                </div>
+                <div v-if="incidents.active.length === 0" class="sub-value">No active incidents.</div>
+                <div v-for="incident in incidents.active" :key="incident.id" class="incident-row">
+                    <div>
+                        <span class="status-badge" :class="incident.severity">{{ incident.severity }}</span>
+                        <strong>{{ incident.source }}</strong>
+                        <div>{{ incident.message }}</div>
+                        <div class="incident-meta">
+                            Count {{ incident.occurrence_count }} - last {{ formatTime(incident.last_seen_utc) }}
+                        </div>
+                    </div>
+                    <button class="btn" @click="acknowledgeIncident(incident.id)">Acknowledge</button>
+                </div>
+            </div>
+
+            <div class="card">
+                <h4>Acknowledged</h4>
+                <div v-if="incidents.acknowledged.length === 0" class="sub-value">No acknowledged incidents.</div>
+                <div v-for="incident in incidents.acknowledged" :key="incident.id" class="incident-row">
+                    <div>
+                        <span class="status-badge" :class="incident.severity">{{ incident.severity }}</span>
+                        <strong>{{ incident.source }}</strong>
+                        <div>{{ incident.message }}</div>
+                        <div class="incident-meta">
+                            By {{ incident.acknowledged_by || 'dashboard' }} - {{ formatTime(incident.acknowledged_at_utc) }}
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="card">
+            <h4>Recently resolved</h4>
+            <div v-if="incidents.resolved.length === 0" class="sub-value">No resolved incidents.</div>
+            <div v-for="incident in incidents.resolved" :key="incident.id" class="incident-row">
+                <div>
+                    <span class="status-badge" :class="incident.severity">{{ incident.severity }}</span>
+                    <strong>{{ incident.source }}</strong>
+                    <span>{{ incident.message }}</span>
+                    <div class="incident-meta">Resolved {{ formatTime(incident.resolved_at_utc) }}</div>
+                </div>
+            </div>
+        </div>
     </div>
 
     <div v-show="currentTab === 'logs'">
@@ -528,6 +636,11 @@
             const isFetchingLogs = ref(false);
             const logFilter = ref('ALL');
             const logLimit = ref(100);
+            const incidents = ref({ active: [], acknowledged: [], resolved: [] });
+            const isFetchingIncidents = ref(false);
+            const isActivatingNotificationDevice = ref(false);
+            const notificationPreferences = ref({ warning: true, error: true, peak_consumption: true });
+            const notificationDevice = ref({ token: null, label: 'Dashboard device', active: false, error: '' });
             const stateVersion = ref(null);
             const lastConfirmedState = ref({});
             const pendingEdits = ref({});
@@ -537,16 +650,23 @@
             const API_STATE = '/api/v1/state';
             const API_UPDATE = '/api/v1/settings/update';
             const API_LOGS = '/api/v1/logs';
+            const API_INCIDENTS = '/api/v1/incidents';
+            const API_NOTIFICATION_DEVICES = '/api/v1/notifications/devices';
+            const API_PENDING_NOTIFICATIONS = '/api/v1/notifications/pending';
             const API_AUTH_STATUS = '/api/v1/auth/status';
             const API_AUTH_LOGIN = '/api/v1/auth/login';
             const API_AUTH_LOGOUT = '/api/v1/auth/logout';
             const POLL_INTERVAL_MS = 5000;
+            const NOTIFICATION_TYPE_ORDER = ['warning', 'error', 'peak_consumption'];
 
             // Watches
             watch(currentTab, (newTab) => {
                 if (!auth.value.authenticated) return;
                 if (newTab === 'logs') {
                     fetchLogs();
+                }
+                if (newTab === 'incidents') {
+                    fetchIncidents();
                 }
                 if (newTab === 'state') {
                     fetchState();
@@ -632,6 +752,53 @@
             const showToast = (msg) => {
                 toast.value = { show: true, message: msg };
                 setTimeout(() => { toast.value.show = false; }, 3000);
+            };
+
+            const selectedNotificationTypes = () => {
+                return NOTIFICATION_TYPE_ORDER.filter((key) => notificationPreferences.value[key]);
+            };
+
+            const getStoredNotificationToken = () => {
+                if (typeof window === 'undefined' || !window.localStorage) return null;
+                return window.localStorage.getItem('hec_notification_device_token');
+            };
+
+            const storeNotificationToken = (token) => {
+                if (typeof window !== 'undefined' && window.localStorage) {
+                    window.localStorage.setItem('hec_notification_device_token', token);
+                }
+            };
+
+            const createNotificationToken = () => {
+                const cryptoApi = typeof window !== 'undefined' && window.crypto
+                    ? window.crypto
+                    : (typeof crypto !== 'undefined' ? crypto : null);
+                if (cryptoApi && cryptoApi.randomUUID) {
+                    return cryptoApi.randomUUID();
+                }
+                return `dashboard-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+            };
+
+            const loadStoredNotificationDevice = () => {
+                const token = getStoredNotificationToken();
+                if (token) {
+                    notificationDevice.value = {
+                        ...notificationDevice.value,
+                        token: token,
+                        active: true,
+                        error: ''
+                    };
+                }
+            };
+
+            const showBrowserNotification = (notification) => {
+                const notificationApi = typeof Notification !== 'undefined'
+                    ? Notification
+                    : (typeof window !== 'undefined' ? window.Notification : null);
+                if (!notificationApi || notificationApi.permission !== 'granted') return;
+                new notificationApi(notification.title || 'Home Energy Control', {
+                    body: notification.message || ''
+                });
             };
 
             const formatPeakTimestamp = (ts) => {
@@ -767,6 +934,7 @@
                 refreshTimer = setInterval(() => {
                     if (auth.value.authenticated) {
                         fetchState();
+                        fetchPendingNotifications();
                     }
                 }, POLL_INTERVAL_MS);
             };
@@ -782,6 +950,7 @@
                 lastConfirmedState.value = {};
                 pendingEdits.value = {};
                 logs.value = [];
+                incidents.value = { active: [], acknowledged: [], resolved: [] };
                 clearInterval(refreshTimer);
             };
 
@@ -824,7 +993,9 @@
                             csrf_token: result.csrf_token
                         });
                         loginPassword.value = '';
+                        loadStoredNotificationDevice();
                         await fetchState();
+                        await fetchPendingNotifications();
                         startRefreshTimer();
                     } else {
                         loginError.value = result.error || 'Login failed';
@@ -937,11 +1108,130 @@
                 }
             };
 
+            const fetchIncidents = async () => {
+                isFetchingIncidents.value = true;
+                try {
+                    const res = await fetch(API_INCIDENTS);
+                    if (handleAuthFailure(res)) return;
+                    if (res.ok) {
+                        const data = await res.json();
+                        incidents.value = {
+                            active: data.active || [],
+                            acknowledged: data.acknowledged || [],
+                            resolved: data.resolved || []
+                        };
+                    }
+                } catch (error) {
+                    console.error("Error fetching incidents:", error);
+                } finally {
+                    isFetchingIncidents.value = false;
+                }
+            };
+
+            const acknowledgeIncident = async (incidentId) => {
+                try {
+                    const res = await fetch(`${API_INCIDENTS}/${incidentId}/acknowledge`, {
+                        method: 'POST',
+                        headers: csrfHeaders(),
+                        body: JSON.stringify({ acknowledged_by: 'dashboard' })
+                    });
+                    if (handleAuthFailure(res)) return;
+                    const result = await res.json();
+                    if (res.ok && result.success) {
+                        if (result.state) {
+                            applyStatePayload(result.state);
+                        }
+                        await fetchIncidents();
+                        showToast('Incident acknowledged.');
+                    } else {
+                        alert(`Error when acknowledging incident: ${result.error}`);
+                    }
+                } catch (error) {
+                    alert(`API error: ${error.message}`);
+                }
+            };
+
+            const activateNotificationDevice = async () => {
+                isActivatingNotificationDevice.value = true;
+                notificationDevice.value = { ...notificationDevice.value, error: '' };
+                try {
+                    const notificationApi = typeof Notification !== 'undefined'
+                        ? Notification
+                        : (typeof window !== 'undefined' ? window.Notification : null);
+                    if (!notificationApi) {
+                        notificationDevice.value.error = 'Browser notifications are not available.';
+                        return;
+                    }
+                    let permission = notificationApi.permission;
+                    if (permission !== 'granted') {
+                        permission = await (
+                            typeof Notification !== 'undefined'
+                                ? Notification.requestPermission()
+                                : notificationApi.requestPermission()
+                        );
+                    }
+                    if (permission !== 'granted') {
+                        notificationDevice.value.error = 'Browser notification permission was not granted.';
+                        return;
+                    }
+
+                    const token = getStoredNotificationToken() || createNotificationToken();
+                    storeNotificationToken(token);
+                    const response = await fetch(API_NOTIFICATION_DEVICES, {
+                        method: 'POST',
+                        headers: csrfHeaders(),
+                        body: JSON.stringify({
+                            device_token: token,
+                            label: notificationDevice.value.label || 'Dashboard device',
+                            notification_types: selectedNotificationTypes(),
+                            enabled: true
+                        })
+                    });
+                    if (handleAuthFailure(response)) return;
+                    const result = await response.json();
+                    if (response.ok && (result.success || result.device)) {
+                        notificationDevice.value = {
+                            token: token,
+                            label: result.device.label || 'Dashboard device',
+                            active: true,
+                            error: ''
+                        };
+                        showToast('Notification device updated.');
+                        await fetchPendingNotifications();
+                    } else {
+                        notificationDevice.value.error = result.error || 'Notification device update failed.';
+                    }
+                } catch (error) {
+                    notificationDevice.value.error = error.message;
+                } finally {
+                    isActivatingNotificationDevice.value = false;
+                }
+            };
+
+            const fetchPendingNotifications = async () => {
+                if (!notificationDevice.value.active || !notificationDevice.value.token) return;
+                try {
+                    const url = `${API_PENDING_NOTIFICATIONS}?device_token=${encodeURIComponent(notificationDevice.value.token)}`;
+                    const res = await fetch(url);
+                    if (handleAuthFailure(res)) return;
+                    if (res.ok) {
+                        const data = await res.json();
+                        for (const notification of (data.notifications || [])) {
+                            showBrowserNotification(notification);
+                        }
+                    }
+                } catch (error) {
+                    console.error("Error fetching pending notifications:", error);
+                }
+            };
+
             // --- Lifecycle Hooks ---
             onMounted(async () => {
                 await fetchAuthStatus();
                 if (auth.value.authenticated) {
+                    loadStoredNotificationDevice();
                     await fetchState();
+                    await fetchPendingNotifications();
                     startRefreshTimer();
                 }
             });
@@ -956,10 +1246,15 @@
                     stateVersion,
                     lastConfirmedState,
                     pendingEdits,
+                    incidents,
+                    notificationPreferences,
+                    notificationDevice,
+                    auth,
                     setPending,
                     isPending,
                     applyStatePayload,
-                    restoreLastConfirmedValue
+                    restoreLastConfirmedValue,
+                    fetchPendingNotifications
                 };
             }
 
@@ -967,7 +1262,9 @@
                 formatPeakTimestamp, logs, fetchLogs, isFetchingLogs, logFilter, filteredLogs, formattedState,
                 isCurrentInterval, fetchState, batteryModeDisplay, logLimit, formatTimeHm, authChecked, auth,
                 loginPassword, loginError, isLoggingIn, login, logout, requestRestart, requestShutdown, requestSummary,
-                isPending, summaryJobStatusText}
+                isPending, summaryJobStatusText, incidents, fetchIncidents, isFetchingIncidents, acknowledgeIncident,
+                notificationPreferences, notificationDevice, isActivatingNotificationDevice, activateNotificationDevice,
+                fetchPendingNotifications}
         }
     }).mount('#app')
 </script>

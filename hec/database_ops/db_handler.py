@@ -1,5 +1,6 @@
 # database_ops/db_handler.py
 from contextlib import contextmanager
+import hashlib
 import json
 import logging
 import sqlite3
@@ -22,6 +23,13 @@ logger = logging.getLogger(__name__)
 
 CURRENT_SCHEMA_VERSION = 1
 INITIAL_SCHEMA_MIGRATION_DESCRIPTION = "001_noop_initial_schema"
+
+INCIDENT_ACTIVE = "active"
+INCIDENT_ACKNOWLEDGED = "acknowledged"
+INCIDENT_RESOLVED = "resolved"
+INCIDENT_STATUSES = {INCIDENT_ACTIVE, INCIDENT_ACKNOWLEDGED, INCIDENT_RESOLVED}
+INCIDENT_SEVERITIES = {"warning", "error"}
+NOTIFICATION_TYPES = {"warning", "error", "peak_consumption"}
 
 ENERGY_HISTORY_RETENTION_TABLES = {
     "belpex_da_prices": ("timestamp_utc", False, None),
@@ -264,6 +272,70 @@ class DatabaseHandler:
                 cursor.execute("CREATE INDEX IF NOT EXISTS idx_logs_timestamp ON logs (timestamp);")
                 cursor.execute("CREATE INDEX IF NOT EXISTS idx_logs_level ON logs (level);")
                 logger.info("Table 'logs' and indexes checked/created.")
+
+                # --- Persistent Incident Table ---
+                cursor.execute("""
+                                CREATE TABLE IF NOT EXISTS app_incidents (
+                                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                                    severity TEXT NOT NULL,
+                                    source TEXT NOT NULL,
+                                    message TEXT NOT NULL,
+                                    fingerprint TEXT NOT NULL UNIQUE,
+                                    notification_type TEXT NOT NULL,
+                                    first_seen_utc TEXT NOT NULL,
+                                    last_seen_utc TEXT NOT NULL,
+                                    occurrence_count INTEGER NOT NULL DEFAULT 1,
+                                    status TEXT NOT NULL DEFAULT 'active',
+                                    acknowledged_at_utc TEXT,
+                                    acknowledged_by TEXT,
+                                    resolved_at_utc TEXT,
+                                    last_notified_utc TEXT
+                               );
+                               """)
+                cursor.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_app_incidents_status_severity "
+                    "ON app_incidents (status, severity, last_seen_utc);"
+                )
+                cursor.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_app_incidents_fingerprint "
+                    "ON app_incidents (fingerprint);"
+                )
+                logger.info("Table 'app_incidents' and indexes checked/created.")
+
+                # --- Dashboard Notification Device Tables ---
+                cursor.execute("""
+                                CREATE TABLE IF NOT EXISTS notification_devices (
+                                    device_token TEXT PRIMARY KEY,
+                                    label TEXT NOT NULL,
+                                    enabled INTEGER NOT NULL DEFAULT 1,
+                                    notify_warning INTEGER NOT NULL DEFAULT 0,
+                                    notify_error INTEGER NOT NULL DEFAULT 0,
+                                    notify_peak_consumption INTEGER NOT NULL DEFAULT 0,
+                                    activated_at_utc TEXT NOT NULL,
+                                    last_seen_utc TEXT NOT NULL
+                                );
+                                """)
+                cursor.execute("""
+                                CREATE TABLE IF NOT EXISTS notification_queue (
+                                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                                    device_token TEXT NOT NULL,
+                                    notification_type TEXT NOT NULL,
+                                    incident_id INTEGER,
+                                    title TEXT NOT NULL,
+                                    message TEXT NOT NULL,
+                                    created_at_utc TEXT NOT NULL,
+                                    delivered_at_utc TEXT,
+                                    dedupe_key TEXT NOT NULL,
+                                    UNIQUE (device_token, dedupe_key),
+                                    FOREIGN KEY (device_token) REFERENCES notification_devices(device_token)
+                                        ON DELETE CASCADE
+                                );
+                                """)
+                cursor.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_notification_queue_device_pending "
+                    "ON notification_queue (device_token, delivered_at_utc, id);"
+                )
+                logger.info("Notification device and queue tables checked/created.")
 
                 # --- Predicted Prices Table ---
                 cursor.execute("""
@@ -1377,6 +1449,441 @@ class DatabaseHandler:
         except sqlite3.Error as e:
             logger.error(f"Error loading all settings from database: {e}", exc_info=True)
         return all_settings_from_db
+
+    def record_incident(
+        self,
+        severity: str,
+        source: str,
+        message: str,
+        occurred_at_utc: Optional[datetime] = None,
+        notification_type: Optional[str] = None,
+        fingerprint_key: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Create or update a persistent incident.
+
+        Identical active incidents update their occurrence count and do not request
+        a new notification. A recurrence after acknowledgement/resolution reopens
+        the incident and requests notification again.
+        """
+        normalized_severity = self._normalize_incident_severity(severity)
+        normalized_source = str(source or "application").strip() or "application"
+        normalized_message = str(message or "").strip() or "(no message)"
+        normalized_notification_type = self._normalize_notification_type(
+            notification_type or normalized_severity
+        )
+        now_iso = self._utc_iso(occurred_at_utc)
+        fingerprint = self._incident_fingerprint(
+            normalized_severity,
+            normalized_source,
+            fingerprint_key or normalized_message,
+        )
+
+        with self.transaction() as conn:
+            existing = conn.execute(
+                "SELECT * FROM app_incidents WHERE fingerprint = ?",
+                (fingerprint,),
+            ).fetchone()
+
+            if existing is None:
+                conn.execute(
+                    """
+                    INSERT INTO app_incidents (
+                        severity, source, message, fingerprint, notification_type,
+                        first_seen_utc, last_seen_utc, occurrence_count, status,
+                        last_notified_utc
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+                    """,
+                    (
+                        normalized_severity,
+                        normalized_source,
+                        normalized_message,
+                        fingerprint,
+                        normalized_notification_type,
+                        now_iso,
+                        now_iso,
+                        INCIDENT_ACTIVE,
+                        now_iso,
+                    ),
+                )
+                incident_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+                should_notify = True
+            else:
+                was_active = existing["status"] == INCIDENT_ACTIVE
+                should_notify = not was_active
+                conn.execute(
+                    """
+                    UPDATE app_incidents
+                    SET severity = ?,
+                        source = ?,
+                        message = ?,
+                        notification_type = ?,
+                        last_seen_utc = ?,
+                        occurrence_count = occurrence_count + 1,
+                        status = ?,
+                        acknowledged_at_utc = CASE WHEN ? THEN NULL ELSE acknowledged_at_utc END,
+                        acknowledged_by = CASE WHEN ? THEN NULL ELSE acknowledged_by END,
+                        resolved_at_utc = CASE WHEN ? THEN NULL ELSE resolved_at_utc END,
+                        last_notified_utc = CASE WHEN ? THEN ? ELSE last_notified_utc END
+                    WHERE id = ?
+                    """,
+                    (
+                        normalized_severity,
+                        normalized_source,
+                        normalized_message,
+                        normalized_notification_type,
+                        now_iso,
+                        INCIDENT_ACTIVE,
+                        int(should_notify),
+                        int(should_notify),
+                        int(should_notify),
+                        int(should_notify),
+                        now_iso,
+                        existing["id"],
+                    ),
+                )
+                incident_id = existing["id"]
+
+            row = conn.execute(
+                "SELECT * FROM app_incidents WHERE id = ?",
+                (incident_id,),
+            ).fetchone()
+
+        result = self._row_to_dict(row)
+        result["should_notify"] = should_notify
+        return result
+
+    def acknowledge_incident(
+        self,
+        incident_id: int,
+        acknowledged_by: str = "dashboard",
+        acknowledged_at_utc: Optional[datetime] = None,
+    ) -> Optional[Dict[str, Any]]:
+        now_iso = self._utc_iso(acknowledged_at_utc)
+        actor = str(acknowledged_by or "dashboard").strip() or "dashboard"
+        with self.transaction() as conn:
+            conn.execute(
+                """
+                UPDATE app_incidents
+                SET status = ?,
+                    acknowledged_at_utc = ?,
+                    acknowledged_by = ?
+                WHERE id = ? AND status != ?
+                """,
+                (INCIDENT_ACKNOWLEDGED, now_iso, actor, incident_id, INCIDENT_RESOLVED),
+            )
+            row = conn.execute(
+                "SELECT * FROM app_incidents WHERE id = ?",
+                (incident_id,),
+            ).fetchone()
+        return self._row_to_dict(row) if row else None
+
+    def resolve_incident(
+        self,
+        incident_id: int,
+        resolved_at_utc: Optional[datetime] = None,
+    ) -> Optional[Dict[str, Any]]:
+        now_iso = self._utc_iso(resolved_at_utc)
+        with self.transaction() as conn:
+            conn.execute(
+                """
+                UPDATE app_incidents
+                SET status = ?,
+                    resolved_at_utc = ?
+                WHERE id = ?
+                """,
+                (INCIDENT_RESOLVED, now_iso, incident_id),
+            )
+            row = conn.execute(
+                "SELECT * FROM app_incidents WHERE id = ?",
+                (incident_id,),
+            ).fetchone()
+        return self._row_to_dict(row) if row else None
+
+    def get_incidents(self, status: Optional[str] = None, limit: int = 100) -> List[Dict[str, Any]]:
+        limit = max(1, min(int(limit), 1000))
+        params: List[Any] = []
+        where_clause = ""
+        if status:
+            normalized_status = self._normalize_incident_status(status)
+            where_clause = "WHERE status = ?"
+            params.append(normalized_status)
+
+        sql = f"""
+            SELECT *
+            FROM app_incidents
+            {where_clause}
+            ORDER BY
+                CASE severity WHEN 'error' THEN 0 WHEN 'warning' THEN 1 ELSE 2 END,
+                last_seen_utc DESC,
+                id DESC
+            LIMIT ?
+        """
+        params.append(limit)
+
+        with self.connection() as conn:
+            rows = conn.execute(sql, tuple(params)).fetchall()
+        return [self._row_to_dict(row) for row in rows]
+
+    def get_dashboard_incidents(
+        self,
+        active_limit: int = 50,
+        acknowledged_limit: int = 50,
+        resolved_limit: int = 50,
+    ) -> Dict[str, List[Dict[str, Any]]]:
+        return {
+            "active": self.get_incidents(INCIDENT_ACTIVE, active_limit),
+            "acknowledged": self.get_incidents(INCIDENT_ACKNOWLEDGED, acknowledged_limit),
+            "resolved": self.get_incidents(INCIDENT_RESOLVED, resolved_limit),
+        }
+
+    def get_active_incident_summary(self) -> Dict[str, Any]:
+        with self.connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT severity, COUNT(*) AS count
+                FROM app_incidents
+                WHERE status = ?
+                GROUP BY severity
+                """,
+                (INCIDENT_ACTIVE,),
+            ).fetchall()
+
+        counts = {"warning": 0, "error": 0}
+        for row in rows:
+            counts[row["severity"]] = row["count"]
+
+        if counts["error"] > 0:
+            highest_severity = "error"
+        elif counts["warning"] > 0:
+            highest_severity = "warning"
+        else:
+            highest_severity = None
+
+        return {
+            "active_warning_count": counts["warning"],
+            "active_error_count": counts["error"],
+            "highest_severity": highest_severity,
+        }
+
+    def register_notification_device(
+        self,
+        device_token: str,
+        label: str,
+        notification_types: List[str],
+        activated_at_utc: Optional[datetime] = None,
+        enabled: bool = True,
+    ) -> Dict[str, Any]:
+        token = str(device_token or "").strip()
+        if not token:
+            raise ValueError("device_token is required")
+
+        selected_types = self._normalize_notification_types(notification_types)
+        now_iso = self._utc_iso(activated_at_utc)
+        device_label = str(label or "Dashboard device").strip() or "Dashboard device"
+        values = {
+            "warning": int("warning" in selected_types),
+            "error": int("error" in selected_types),
+            "peak_consumption": int("peak_consumption" in selected_types),
+        }
+
+        with self.transaction() as conn:
+            conn.execute(
+                """
+                INSERT INTO notification_devices (
+                    device_token, label, enabled, notify_warning, notify_error,
+                    notify_peak_consumption, activated_at_utc, last_seen_utc
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(device_token) DO UPDATE SET
+                    label = excluded.label,
+                    enabled = excluded.enabled,
+                    notify_warning = excluded.notify_warning,
+                    notify_error = excluded.notify_error,
+                    notify_peak_consumption = excluded.notify_peak_consumption,
+                    last_seen_utc = excluded.last_seen_utc
+                """,
+                (
+                    token,
+                    device_label,
+                    int(bool(enabled)),
+                    values["warning"],
+                    values["error"],
+                    values["peak_consumption"],
+                    now_iso,
+                    now_iso,
+                ),
+            )
+            row = conn.execute(
+                "SELECT * FROM notification_devices WHERE device_token = ?",
+                (token,),
+            ).fetchone()
+
+        return self._notification_device_row_to_dict(row)
+
+    def queue_notification(
+        self,
+        notification_type: str,
+        title: str,
+        message: str,
+        incident_id: Optional[int] = None,
+        dedupe_key: Optional[str] = None,
+        created_at_utc: Optional[datetime] = None,
+    ) -> int:
+        normalized_type = self._normalize_notification_type(notification_type)
+        title_text = str(title or "Home Energy Control").strip() or "Home Energy Control"
+        message_text = str(message or "").strip() or "(no message)"
+        created_iso = self._utc_iso(created_at_utc)
+        key = dedupe_key or self._notification_dedupe_key(normalized_type, title_text, message_text, incident_id)
+        enabled_column = {
+            "warning": "notify_warning",
+            "error": "notify_error",
+            "peak_consumption": "notify_peak_consumption",
+        }[normalized_type]
+
+        with self.transaction() as conn:
+            devices = conn.execute(
+                f"""
+                SELECT device_token
+                FROM notification_devices
+                WHERE enabled = 1 AND {enabled_column} = 1
+                """
+            ).fetchall()
+
+            inserted = 0
+            for device in devices:
+                cursor = conn.execute(
+                    """
+                    INSERT OR IGNORE INTO notification_queue (
+                        device_token, notification_type, incident_id, title, message,
+                        created_at_utc, dedupe_key
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        device["device_token"],
+                        normalized_type,
+                        incident_id,
+                        title_text,
+                        message_text,
+                        created_iso,
+                        key,
+                    ),
+                )
+                inserted += cursor.rowcount
+
+        return inserted
+
+    def take_pending_notifications(self, device_token: str, limit: int = 20) -> List[Dict[str, Any]]:
+        token = str(device_token or "").strip()
+        if not token:
+            return []
+        limit = max(1, min(int(limit), 100))
+        delivered_iso = self._utc_iso()
+
+        with self.transaction() as conn:
+            rows = conn.execute(
+                """
+                SELECT *
+                FROM notification_queue
+                WHERE device_token = ? AND delivered_at_utc IS NULL
+                ORDER BY id ASC
+                LIMIT ?
+                """,
+                (token, limit),
+            ).fetchall()
+            ids = [row["id"] for row in rows]
+            if ids:
+                placeholders = ",".join("?" for _ in ids)
+                conn.execute(
+                    f"UPDATE notification_queue SET delivered_at_utc = ? WHERE id IN ({placeholders})",
+                    (delivered_iso, *ids),
+                )
+            conn.execute(
+                "UPDATE notification_devices SET last_seen_utc = ? WHERE device_token = ?",
+                (delivered_iso, token),
+            )
+
+        return [self._row_to_dict(row) for row in rows]
+
+    @staticmethod
+    def _row_to_dict(row: Optional[sqlite3.Row]) -> Dict[str, Any]:
+        return dict(row) if row is not None else {}
+
+    @staticmethod
+    def _utc_iso(value: Optional[datetime] = None) -> str:
+        dt_value = value or datetime.now(timezone.utc)
+        if dt_value.tzinfo is None:
+            dt_value = dt_value.replace(tzinfo=timezone.utc)
+        return dt_value.astimezone(timezone.utc).isoformat()
+
+    @staticmethod
+    def _normalize_incident_severity(severity: str) -> str:
+        normalized = str(severity or "").strip().lower()
+        if normalized in ("critical", "fatal", "alarm"):
+            normalized = "error"
+        if normalized not in INCIDENT_SEVERITIES:
+            raise ValueError(f"Unsupported incident severity: {severity}")
+        return normalized
+
+    @staticmethod
+    def _normalize_incident_status(status: str) -> str:
+        normalized = str(status or "").strip().lower()
+        if normalized not in INCIDENT_STATUSES:
+            raise ValueError(f"Unsupported incident status: {status}")
+        return normalized
+
+    @staticmethod
+    def _normalize_notification_type(notification_type: str) -> str:
+        normalized = str(notification_type or "").strip().lower()
+        if normalized in ("peak", "peak-consumption", "peak consumption"):
+            normalized = "peak_consumption"
+        if normalized not in NOTIFICATION_TYPES:
+            raise ValueError(f"Unsupported notification type: {notification_type}")
+        return normalized
+
+    @classmethod
+    def _normalize_notification_types(cls, notification_types: List[str]) -> List[str]:
+        selected = []
+        for raw_type in notification_types or []:
+            normalized = cls._normalize_notification_type(raw_type)
+            if normalized not in selected:
+                selected.append(normalized)
+        return selected
+
+    @staticmethod
+    def _incident_fingerprint(severity: str, source: str, message: str) -> str:
+        raw = f"{severity}\n{source}\n{message}".encode("utf-8")
+        return hashlib.sha256(raw).hexdigest()
+
+    @staticmethod
+    def _notification_dedupe_key(
+        notification_type: str,
+        title: str,
+        message: str,
+        incident_id: Optional[int],
+    ) -> str:
+        raw = f"{notification_type}\n{incident_id or ''}\n{title}\n{message}".encode("utf-8")
+        return hashlib.sha256(raw).hexdigest()
+
+    @staticmethod
+    def _notification_device_row_to_dict(row: sqlite3.Row) -> Dict[str, Any]:
+        selected_types = []
+        if row["notify_warning"]:
+            selected_types.append("warning")
+        if row["notify_error"]:
+            selected_types.append("error")
+        if row["notify_peak_consumption"]:
+            selected_types.append("peak_consumption")
+        return {
+            "device_token": row["device_token"],
+            "label": row["label"],
+            "enabled": bool(row["enabled"]),
+            "notification_types": selected_types,
+            "activated_at_utc": row["activated_at_utc"],
+            "last_seen_utc": row["last_seen_utc"],
+        }
 
     def get_p1_meter_data_for_period(self, start_utc: datetime, end_utc: datetime) -> List[Dict[str, Any]]:
         query = """

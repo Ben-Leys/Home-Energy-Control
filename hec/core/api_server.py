@@ -15,6 +15,7 @@ from flask import Flask, jsonify, make_response, request, send_from_directory, s
 from werkzeug.security import check_password_hash
 
 from hec.core import constants as c
+from hec.core.app_logging import sync_app_status_from_incidents
 from hec.core.app_state import GLOBAL_APP_STATE
 from hec.database_ops import db_handler
 
@@ -351,6 +352,94 @@ def get_logs():
 
     logs = _DB_INSTANCE.get_latest_logs(limit)
     return jsonify({"logs": logs})
+
+
+@api_app.route("/api/v1/incidents", methods=["GET"])
+@require_auth
+def get_incidents_api():
+    if _DB_INSTANCE is None:
+        return jsonify({"error": "Database not initialized in API"}), 500
+
+    return jsonify(_DB_INSTANCE.get_dashboard_incidents())
+
+
+@api_app.route("/api/v1/incidents/<int:incident_id>/acknowledge", methods=["POST"])
+@require_auth
+@require_csrf
+def acknowledge_incident_api(incident_id: int):
+    if _DB_INSTANCE is None:
+        return jsonify({"error": "Database not initialized in API"}), 500
+
+    data = request.get_json(silent=True) or {}
+    acknowledged_by = data.get("acknowledged_by") or request.remote_addr or "dashboard"
+    incident = _DB_INSTANCE.acknowledge_incident(incident_id, acknowledged_by=acknowledged_by)
+    if not incident:
+        return _json_error("Incident not found", 404)
+
+    logger.info("AUDIT incident_acknowledged id=%s remote=%s", incident_id, request.remote_addr or "unknown")
+    sync_app_status_from_incidents(GLOBAL_APP_STATE, _DB_INSTANCE)
+    state_payload = _serialize_app_state()
+    return jsonify({
+        "success": True,
+        "incident": incident,
+        "state_version": state_payload.get("state_version"),
+        "state": state_payload,
+    })
+
+
+@api_app.route("/api/v1/incidents/<int:incident_id>/resolve", methods=["POST"])
+@require_auth
+@require_csrf
+def resolve_incident_api(incident_id: int):
+    if _DB_INSTANCE is None:
+        return jsonify({"error": "Database not initialized in API"}), 500
+
+    incident = _DB_INSTANCE.resolve_incident(incident_id)
+    if not incident:
+        return _json_error("Incident not found", 404)
+
+    logger.info("AUDIT incident_resolved id=%s remote=%s", incident_id, request.remote_addr or "unknown")
+    sync_app_status_from_incidents(GLOBAL_APP_STATE, _DB_INSTANCE)
+    state_payload = _serialize_app_state()
+    return jsonify({
+        "success": True,
+        "incident": incident,
+        "state_version": state_payload.get("state_version"),
+        "state": state_payload,
+    })
+
+
+@api_app.route("/api/v1/notifications/devices", methods=["POST"])
+@require_auth
+@require_csrf
+def register_notification_device_api():
+    if _DB_INSTANCE is None:
+        return jsonify({"error": "Database not initialized in API"}), 500
+
+    data = request.get_json(silent=True) or {}
+    try:
+        device = _DB_INSTANCE.register_notification_device(
+            device_token=data.get("device_token"),
+            label=data.get("label") or "Dashboard device",
+            notification_types=data.get("notification_types") or [],
+            enabled=bool(data.get("enabled", True)),
+        )
+    except ValueError as e:
+        return _json_error(str(e), 400)
+
+    logger.info("AUDIT notification_device_registered remote=%s", request.remote_addr or "unknown")
+    return jsonify({"success": True, "device": device})
+
+
+@api_app.route("/api/v1/notifications/pending", methods=["GET"])
+@require_auth
+def get_pending_notifications_api():
+    if _DB_INSTANCE is None:
+        return jsonify({"error": "Database not initialized in API"}), 500
+
+    device_token = request.args.get("device_token", "")
+    notifications = _DB_INSTANCE.take_pending_notifications(device_token)
+    return jsonify({"notifications": notifications})
 
 
 @api_app.route('/api/v1/settings/update', methods=['POST'])

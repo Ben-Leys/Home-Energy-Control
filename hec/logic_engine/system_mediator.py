@@ -12,6 +12,7 @@ from hec.controllers.api_evcc import EvccApiClient
 from hec.controllers.modbus_sma_inverter import InverterSmaModbusClient
 from hec.core import constants as c, market_prices
 from hec.core.app_state import GLOBAL_APP_STATE
+from hec.core.incidents import record_peak_consumption_incident
 from hec.core.models import EVCCLoadpointState
 from hec.core.tariff_manager import TariffManager
 from hec.data_sources.api_p1_meter_homewizard import P1MeterHomewizardClient
@@ -911,8 +912,13 @@ class SystemMediator:
                         logger.error(f"Failed to send peak alert email: {e}")
 
                 _send_peak_email(avg_data)
+                record_peak_consumption_incident(
+                    db_handler=GLOBAL_APP_STATE.db_handler,
+                    avg_kw=avg_data,
+                    limit_kw=self.current_max_peak_kw,
+                    notification_type="peak_consumption",
+                )
                 self.last_email_sent_time = now
-                GLOBAL_APP_STATE.set('app_state', c.AppStatus.ALARM)
 
             _handle_peak_notifications(avg)
 

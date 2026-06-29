@@ -1,10 +1,28 @@
 # core/app_logging.py
 import logging
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from hec.core import constants as c
+from hec.core.notifications import NotificationDispatcher
+
+
+def sync_app_status_from_incidents(global_app_state, db_handler):
+    """Derive top-level warning/alarm state from unacknowledged active incidents."""
+    if not global_app_state or not db_handler:
+        return
+
+    summary = db_handler.get_active_incident_summary()
+    highest_severity = summary.get("highest_severity")
+    current_status = global_app_state.get("app_state")
+
+    if highest_severity == "error":
+        global_app_state.set("app_state", c.AppStatus.ALARM)
+    elif highest_severity == "warning":
+        global_app_state.set("app_state", c.AppStatus.WARNING)
+    elif current_status in (c.AppStatus.WARNING, c.AppStatus.ALARM):
+        global_app_state.set("app_state", c.AppStatus.NORMAL)
 
 
 class GlobalStateHandler(logging.Handler):
@@ -15,24 +33,35 @@ class GlobalStateHandler(logging.Handler):
         self.db = None
 
     def emit(self, record):
-        if record.levelno == logging.WARNING:
-            self.global_app_state.set("app_state", c.AppStatus.WARNING)
-        elif record.levelno >= logging.ERROR:
-            self.global_app_state.set("app_state", c.AppStatus.ALARM)
-
         # Persist to Database unless exception, don't log to avoid infinite loop
         if self.db:
             try:
+                message = self.format(record)
+                occurred_at_utc = datetime.fromtimestamp(record.created, timezone.utc)
                 log_entry = {
-                    'timestamp': datetime.fromtimestamp(record.created).isoformat(),
+                    'timestamp': occurred_at_utc.isoformat(),
                     'level': record.levelname,
-                    'message': self.format(record),
+                    'message': message,
                     'module': record.module
                 }
                 self.db.store_log(log_entry)
+                if record.levelno >= logging.WARNING:
+                    severity = "error" if record.levelno >= logging.ERROR else "warning"
+                    incident = self.db.record_incident(
+                        severity=severity,
+                        source=record.name,
+                        message=message,
+                        occurred_at_utc=occurred_at_utc,
+                    )
+                    NotificationDispatcher(self.db).dispatch_incident(incident)
+                    sync_app_status_from_incidents(self.global_app_state, self.db)
             except Exception:
                 import sys
                 print(f"CRITICAL: Logging to DB failed!", file=sys.stderr)
+        elif record.levelno == logging.WARNING:
+            self.global_app_state.set("app_state", c.AppStatus.WARNING)
+        elif record.levelno >= logging.ERROR:
+            self.global_app_state.set("app_state", c.AppStatus.ALARM)
 
     def set_db_handler(self, db):
         self.db = db
