@@ -22,6 +22,8 @@
         }
         body { font-family: 'Segoe UI', sans-serif; background-color: var(--bg-color); color: var(--text-color); margin: 0; padding: 10px; }
         h2, h3, h4, h5 { margin: 1px 0; line-height: 1.5; }
+        .header-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 8px; }
+        .header-actions { display: flex; gap: 8px; align-items: center; }
 
         /* Tabs */
         .tabs { border-bottom: 2px solid var(--border-color); margin-bottom: 20px; }
@@ -56,14 +58,18 @@
         /* Forms & Controls */
         .control-group { margin-bottom: 8px; }
         label { display: block; margin-bottom: 5px; font-size: 0.9rem; color: var(--text-color); }
-        select, input[type="number"] { box-sizing: border-box; padding: 4px; border-radius: 4px; border: 1px solid var(--border-color); background: var(--bg-color); color: var(--text-color); }
+        select, input[type="number"], input[type="password"] { box-sizing: border-box; padding: 4px; border-radius: 4px; border: 1px solid var(--border-color); background: var(--bg-color); color: var(--text-color); }
+        input[type="password"] { width: 100%; padding: 8px; }
         select { width: 100%; }
         .input-compact { width: 80px; display: inline-block; }
         select:focus, input:focus { outline: 2px solid var(--accent); }
+        .login-card { max-width: 420px; margin: 80px auto; padding: 20px; }
+        .error-text { color: #d32f2f; font-size: 0.85rem; margin: 8px 0; }
 
         /* Buttons */
         button.btn { background: #333; color: white; border: 1px solid #555; padding: 10px 15px; border-radius: 4px; cursor: pointer; transition: 0.2s; }
         button.btn:hover { background: #444; }
+        button.btn:disabled { opacity: 0.6; cursor: not-allowed; }
         button.btn-primary { background: var(--accent); border: none; }
         button.btn-primary:hover { background: #ff3333; }
 
@@ -177,6 +183,29 @@
 <div id="app">
     <h3>🏠 Home Energy Control</h3>
 
+    <div class="header-actions" v-if="auth.authEnabled && auth.authenticated">
+        <button class="btn" @click="logout" style="padding: 5px 12px;">Logout</button>
+    </div>
+
+    <div v-if="!authChecked" class="card">
+        Loading dashboard...
+    </div>
+
+    <div v-else-if="auth.authEnabled && !auth.authenticated" class="card login-card">
+        <h4>Dashboard Login</h4>
+        <form @submit.prevent="login">
+            <div class="control-group">
+                <label for="login-password">Password:</label>
+                <input id="login-password" type="password" v-model="loginPassword" autocomplete="current-password">
+            </div>
+            <div v-if="loginError" class="error-text">{{ loginError }}</div>
+            <button class="btn btn-primary" type="submit" :disabled="isLoggingIn">
+                {{ isLoggingIn ? 'Signing in...' : 'Sign in' }}
+            </button>
+        </form>
+    </div>
+
+    <template v-else>
     <div class="tabs">
         <button class="tab" :class="{active: currentTab === 'dashboard'}" @click="currentTab = 'dashboard'">📊 Dashboard</button>
         <button class="tab" :class="{active: currentTab === 'plan'}" @click="currentTab = 'plan'">📅 Prediction</button>
@@ -334,8 +363,8 @@
             </div>
 
             <div class="grid-2">
-                <button class="btn btn-primary" @click="updateSetting('reboot_request', true)">Shutdown system</button>
-                <button class="btn" @click="updateSetting('summary_request', true)">Daily summary</button>
+                <button class="btn btn-primary" @click="requestShutdown">Shutdown system</button>
+                <button class="btn" @click="requestSummary">Daily summary</button>
             </div>
 
             <p style="color: #666; font-size: 0.8rem; margin-top: 10px;">Last sync: {{ lastSync }}</p>
@@ -451,6 +480,8 @@
         </div>
     </div>
 
+    </template>
+
     <div class="toast" :class="{'toast-hide': !toast.show}">
         ✅ {{ toast.message }}
     </div>
@@ -467,6 +498,11 @@
             const state = ref(null);
             const lastSync = ref('');
             const toast = ref({ show: false, message: '' });
+            const authChecked = ref(false);
+            const auth = ref({ authEnabled: false, authenticated: false, csrfToken: null });
+            const loginPassword = ref('');
+            const loginError = ref('');
+            const isLoggingIn = ref(false);
             const logs = ref([]);
             const isFetchingLogs = ref(false);
             const logFilter = ref('ALL');
@@ -477,9 +513,13 @@
             const API_STATE = '/api/v1/state';
             const API_UPDATE = '/api/v1/settings/update';
             const API_LOGS = '/api/v1/logs';
+            const API_AUTH_STATUS = '/api/v1/auth/status';
+            const API_AUTH_LOGIN = '/api/v1/auth/login';
+            const API_AUTH_LOGOUT = '/api/v1/auth/logout';
 
             // Watches
             watch(currentTab, (newTab) => {
+                if (!auth.value.authenticated) return;
                 if (newTab === 'logs') {
                     fetchLogs();
                 }
@@ -620,10 +660,110 @@
                 return now >= rowTime && now < (rowTime + 15 * 60000);
             };
 
+            const applyAuthStatus = (data) => {
+                auth.value = {
+                    authEnabled: Boolean(data.auth_enabled),
+                    authenticated: Boolean(data.authenticated),
+                    csrfToken: data.csrf_token || null
+                };
+            };
+
+            const csrfHeaders = () => {
+                const headers = { 'Content-Type': 'application/json' };
+                if (auth.value.csrfToken) {
+                    headers['X-CSRF-Token'] = auth.value.csrfToken;
+                }
+                return headers;
+            };
+
+            const startRefreshTimer = () => {
+                clearInterval(refreshTimer);
+                refreshTimer = setInterval(() => {
+                    if (auth.value.authenticated) {
+                        fetchState();
+                    }
+                }, 10000);
+            };
+
+            const markLoggedOut = () => {
+                auth.value = {
+                    authEnabled: auth.value.authEnabled,
+                    authenticated: false,
+                    csrfToken: null
+                };
+                state.value = null;
+                logs.value = [];
+                clearInterval(refreshTimer);
+            };
+
+            const handleAuthFailure = (res) => {
+                if (res.status === 401) {
+                    markLoggedOut();
+                    return true;
+                }
+                return false;
+            };
+
             // --- API Calls ---
+            const fetchAuthStatus = async () => {
+                try {
+                    const res = await fetch(API_AUTH_STATUS);
+                    if (res.ok) {
+                        applyAuthStatus(await res.json());
+                    }
+                } catch (error) {
+                    console.error("Error fetching auth status:", error);
+                } finally {
+                    authChecked.value = true;
+                }
+            };
+
+            const login = async () => {
+                isLoggingIn.value = true;
+                loginError.value = '';
+                try {
+                    const res = await fetch(API_AUTH_LOGIN, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ password: loginPassword.value })
+                    });
+                    const result = await res.json();
+                    if (res.ok && result.success) {
+                        applyAuthStatus({
+                            auth_enabled: true,
+                            authenticated: true,
+                            csrf_token: result.csrf_token
+                        });
+                        loginPassword.value = '';
+                        await fetchState();
+                        startRefreshTimer();
+                    } else {
+                        loginError.value = result.error || 'Login failed';
+                    }
+                } catch (error) {
+                    loginError.value = `Login failed: ${error.message}`;
+                } finally {
+                    isLoggingIn.value = false;
+                }
+            };
+
+            const logout = async () => {
+                try {
+                    await fetch(API_AUTH_LOGOUT, {
+                        method: 'POST',
+                        headers: csrfHeaders()
+                    });
+                } catch (error) {
+                    console.error("Error during logout:", error);
+                } finally {
+                    markLoggedOut();
+                }
+            };
+
             const fetchState = async () => {
                 try {
                     const res = await fetch(API_STATE);
+                    if (handleAuthFailure(res)) return;
                     if (res.ok) {
                         state.value = await res.json();
                         lastSync.value = new Date().toLocaleTimeString();
@@ -637,15 +777,22 @@
                 try {
                     const res = await fetch(API_UPDATE, {
                         method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
+                        headers: csrfHeaders(),
                         body: JSON.stringify({ key: key, value: value })
                     });
+                    if (handleAuthFailure(res)) return;
                     const result = await res.json();
 
                     if (result.success) {
+                        if (state.value && Object.prototype.hasOwnProperty.call(state.value, result.key)) {
+                            state.value[result.key] = result.new_value_stored;
+                        }
                         showToast(`Setting '${key}' updated.`);
                         fetchState();
                     } else {
+                        if (res.status === 403) {
+                            await fetchAuthStatus();
+                        }
                         alert(`Error when updating: ${result.error}`);
                     }
                 } catch (error) {
@@ -653,10 +800,22 @@
                 }
             };
 
+            const requestShutdown = () => {
+                const confirmed = window.confirm("Shutdown the Home Energy Control process?");
+                if (confirmed) {
+                    updateSetting('reboot_request', true);
+                }
+            };
+
+            const requestSummary = () => {
+                updateSetting('summary_request', true);
+            };
+
             const fetchLogs = async () => {
                 isFetchingLogs.value = true;
                 try {
                     const res = await fetch(`${API_LOGS}?limit=${logLimit.value}`);
+                    if (handleAuthFailure(res)) return;
                     if (res.ok) {
                         const data = await res.json();
                         logs.value = data.logs;
@@ -669,9 +828,12 @@
             };
 
             // --- Lifecycle Hooks ---
-            onMounted(() => {
-                fetchState();
-                refreshTimer = setInterval(fetchState, 10000);
+            onMounted(async () => {
+                await fetchAuthStatus();
+                if (auth.value.authenticated) {
+                    await fetchState();
+                    startRefreshTimer();
+                }
             });
 
             onUnmounted(() => {
@@ -680,7 +842,8 @@
 
             return { currentTab, state, lastSync, enums, statusColor, currentPrice, formatTime, updateSetting, toast,
                 formatPeakTimestamp, logs, fetchLogs, isFetchingLogs, logFilter, filteredLogs, formattedState,
-                isCurrentInterval, fetchState, batteryModeDisplay, logLimit, formatTimeHm}
+                isCurrentInterval, fetchState, batteryModeDisplay, logLimit, formatTimeHm, authChecked, auth,
+                loginPassword, loginError, isLoggingIn, login, logout, requestShutdown, requestSummary}
         }
     }).mount('#app')
 </script>
