@@ -63,20 +63,16 @@ loads from `hec/config.yaml` and `hec/.env`. Keep API keys such as `ENTSOE_API_K
 
 For non-sensitive helper tasks, agents should call the local Ollama models through Aider so the helper can
 inspect, summarize, find code in repository files and write boilerplate code. This only works on this desktop PC, not on
-other devices. Current device: laptop.
+other devices. So ask permission first.
 
 ```powershell
 aider --model ollama_chat/qwen3.6:35b --no-show-model-warnings --no-auto-commits --yes-always --read hec\path\to\file.py --message "<task prompt>"
 ```
 
-`qwen3-coder:30b` can also be used:
-
-```powershell
-aider --model ollama_chat/qwen3-coder:30b --no-show-model-warnings --no-auto-commits --yes-always --read hec\path\to\file.py --message "<task prompt>"
-```
-
-Use `qwen3-coder:30b` first for code-focused repo inspection or implementation because it gives terser answers. Use
-`qwen3.6:35b` for broader reasoning or vision-capable tasks; it may emit a long `THINKING` block.
+Available models:
+**ollama_chat/qwen3.6:35b (for broader reasoning or vision-capable tasks)
+**ollama_chat/qwen3-coder:30b (for code-focused repo inspection or implementation)
+**ollama_chat/minimax-m3:cloud (for big context window)
 
 Use `--read` for read-only inspection. Pass files as positional arguments only when the helper should be allowed to edit
 them. Keep `--no-auto-commits`, inspect any generated diff before accepting it.
