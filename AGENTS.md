@@ -69,14 +69,10 @@ other devices. So ask permission first.
 aider --model ollama_chat/qwen3.6:35b --no-show-model-warnings --no-auto-commits --yes-always --read hec\path\to\file.py --message "<task prompt>"
 ```
 
-`qwen3-coder:30b` can also be used:
-
-```powershell
-aider --model ollama_chat/qwen3-coder:30b --no-show-model-warnings --no-auto-commits --yes-always --read hec\path\to\file.py --message "<task prompt>"
-```
-
-Use `qwen3-coder:30b` first for code-focused repo inspection or implementation because it gives terser answers. Use
-`qwen3.6:35b` for broader reasoning or vision-capable tasks; it may emit a long `THINKING` block.
+Available models:
+**ollama_chat/qwen3.6:35b (for broader reasoning or vision-capable tasks)
+**ollama_chat/qwen3-coder:30b (for code-focused repo inspection or implementation)
+**ollama_chat/minimax-m3:cloud (for big context window)
 
 Use `--read` for read-only inspection. Pass files as positional arguments only when the helper should be allowed to edit
 them. Keep `--no-auto-commits`, inspect any generated diff before accepting it.
