@@ -174,7 +174,7 @@ def _validate_location(section: Mapping[str, Any]) -> LocationConfig:
         raise ConfigValidationError("location.longitude must be between -180 and 180")
     return LocationConfig(
         city=_string(section, "city", "location.city"),
-        region_name_for_astral_optional=_string(
+        region_name_for_astral_optional=_optional_string(
             section,
             "region_name_for_astral_optional",
             default="",
@@ -239,6 +239,21 @@ def _string(section: Mapping[str, Any], key: str, display_name: str | None = Non
     if value is None or not isinstance(value, str) or not value.strip():
         raise ConfigValidationError(f"{name} must be a non-empty string")
     return value
+
+
+def _optional_string(
+        section: Mapping[str, Any],
+        key: str,
+        display_name: str | None = None,
+        default: str = "",
+) -> str:
+    value = section.get(key, default)
+    name = display_name or key
+    if value is None:
+        return default
+    if not isinstance(value, str):
+        raise ConfigValidationError(f"{name} must be a string")
+    return value.strip()
 
 
 def _bool(section: Mapping[str, Any], key: str, default: bool) -> bool:

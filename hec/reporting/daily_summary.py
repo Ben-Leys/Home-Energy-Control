@@ -111,7 +111,7 @@ class DailySummaryGenerator:
         return all_days_forecasts
 
     @staticmethod
-    def _format_hours(self, hours_list: List[int]) -> str:
+    def _format_hours(hours_list: List[int]) -> str:
         if not hours_list:
             return "none"
         hours_list = sorted(set(hours_list))
@@ -127,7 +127,7 @@ class DailySummaryGenerator:
         return ', '.join(f"{start} - {end}" for start, end in ranges) + " h"
 
     @staticmethod
-    def _format_hours_summary(self, t_day_nepi: List[NetElectricityPriceInterval], adjusted_solar,
+    def _format_hours_summary(t_day_nepi: List[NetElectricityPriceInterval], adjusted_solar,
                               res_min, solar_income) -> Tuple[str, str]:
         """Helper to format cheapest, most expensive and negative price hours."""
 
@@ -168,9 +168,9 @@ class DailySummaryGenerator:
         })
 
         # 4) Format HTML snippets
-        cheapest_str = self._format_hours(self, cheapest_hours)
-        expensive_str = self._format_hours(self, expensive_hours)
-        negative_str = self._format_hours(self, negative_hours)
+        cheapest_str = DailySummaryGenerator._format_hours(cheapest_hours)
+        expensive_str = DailySummaryGenerator._format_hours(expensive_hours)
+        negative_str = DailySummaryGenerator._format_hours(negative_hours)
 
         summary_html = (
             f"<td style='padding:4px;'>⬆️ Expensive: {expensive_str}<br>"
@@ -260,8 +260,7 @@ class DailySummaryGenerator:
         html.append(f"<td>{income_bar}</td></tr>")
 
         # Hour summaries and negative/income rows
-        summary_html, negative_html = self._format_hours_summary(self, t_day_nepi, adjusted_solar,
-                                                                 res_min, solar_income)
+        summary_html, negative_html = self._format_hours_summary(t_day_nepi, adjusted_solar, res_min, solar_income)
         html.append(f"<tr>{negative_html}{summary_html}</tr>")
         # Close table
         html.append("</table>")

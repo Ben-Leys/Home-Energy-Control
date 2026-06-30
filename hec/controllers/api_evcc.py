@@ -169,6 +169,7 @@ class EvccApiClient:
         if not (self.min_current <= current_amps <= self.max_current):
             logger.warning(f"EVCC API: Invalid min current {current_amps}. "
                            f"Must be {self.min_current}-{self.max_current}.")
+            return False
         return self._send_command(f"/mincurrent/{current_amps}", loadpoint_id=loadpoint_id)
 
     def set_smart_cost_limit(self, cost_limit_eur_kwh: float, loadpoint_id: Optional[int] = None) -> bool:

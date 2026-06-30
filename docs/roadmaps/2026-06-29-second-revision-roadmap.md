@@ -69,9 +69,6 @@ features.
 
 **Work:**
 
-- Stop manual dashboard summaries from forcing a price refresh by default. `task_system_mediator()` currently calls
-  `request_daily_summary_background_job(..., renew_prices=True)`, which defeats the cached summary path and a current
-  phase-4 test reportedly fails.
 - Fix fixed-contract market handling. `MarketContext.refresh_if_needed()` should populate fixed buy/sell prices,
   set `next_update_at`, mark `is_fixed_contract`, and return `True` so the mediator does not skip control logic when
   the active tariff is fixed.
@@ -83,15 +80,11 @@ features.
   timestamp from the poller.
 - Fix the daily-summary static helper signatures. `_format_hours()` and `_format_hours_summary()` are static methods
   but still pass `self` around; make the call shape normal and test it.
-- Fix daily-summary solar math for hourly price resolution. The current aggregation and later `* 4` can overstate
-  income on 60-minute price days.
-- Remove the unused all-time battery-savings calculation from the daily summary unless it is rendered. The hard-coded
-  `date(2025, 10, 28)` path is expensive and currently not user-facing.
 - Harden plot generation basics:
   - force the Matplotlib `Agg` backend before importing `pyplot`;
   - close figures in `finally`, not only on the success path;
   - replace spring-DST zero-price filler bars with missing values so the chart does not show fake zero prices.
-- Fix dashboard current price display to use `active_contract_type` instead of always showing dynamic prices.
+- Fix dashboard current price display to show 'Market price' because it's showing dynamic prices.
 - Clamp `/api/v1/logs?limit=` to a real range such as `1..20000`; do not let negative limits behave like unlimited.
 - Allow empty `region_name_for_astral_optional` if the field is truly optional.
 - Fix `store_da_prices()` return count so historic backfill progress is meaningful.

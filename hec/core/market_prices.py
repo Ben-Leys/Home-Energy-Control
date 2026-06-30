@@ -28,11 +28,9 @@ class MarketContext:
             return False
 
         contract = current.active_contract_type
-        if contract == 'fixed':
-            self.is_fixed_contract = True
-            return False
+        self.is_fixed_contract = contract == 'fixed'
 
-        prices = current.net_prices_eur_per_kwh.get(contract, {})
+        prices = (current.net_prices_eur_per_kwh or {}).get(contract, {})
         self.buy_price = prices.get('buy', 0.0)
         self.sell_price = prices.get('sell', 0.0)
 

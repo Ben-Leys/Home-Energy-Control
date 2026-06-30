@@ -268,10 +268,22 @@ def task_poll_evcc_state(evcc_client: Optional[EvccApiClient], db_handler: Datab
     if evcc_state:
         cur_state = EVCCOverallState(timestamp_utc_iso=evcc_state.get("timestamp_utc_iso"),
                                      residual_power=evcc_state.get('residualPower'))
-        loadpoints = evcc_state.get('loadpoints')
-        lp_data = loadpoints[0] if loadpoints else None
-        currents = lp_data.get("chargeCurrents", [])
-        charge_current = sum(currents) if currents else None
+        GLOBAL_APP_STATE.set("evcc_overall_state", cur_state.to_dict())
+
+        loadpoints = evcc_state.get('loadpoints') or []
+        if not loadpoints:
+            logger.warning("EVCC polling task: state payload has no loadpoints.")
+            GLOBAL_APP_STATE.set("evcc_loadpoint_state", None)
+            return
+
+        lp_data = loadpoints[0] or {}
+        currents = lp_data.get("chargeCurrents")
+        if currents is None:
+            logger.warning("EVCC polling task: loadpoint payload is missing chargeCurrents.")
+            charge_current = None
+        else:
+            charge_current = sum(currents) if currents else None
+        session_energy = lp_data.get('sessionEnergy')
         cur_lp = EVCCLoadpointState(loadpoint_id=1,
                                     is_connected=lp_data.get('connected'),
                                     is_charging=lp_data.get('charging'),
@@ -282,10 +294,9 @@ def task_poll_evcc_state(evcc_client: Optional[EvccApiClient], db_handler: Datab
                                     disable_threshold=lp_data.get('disableThreshold'),
                                     limit_energy=lp_data.get('limitEnergy'),
                                     mode=lp_data.get('mode'),
-                                    session_energy=lp_data.get('sessionEnergy'),
+                                    session_energy=session_energy,
                                     smart_cost_active=lp_data.get('smartCostActive'),
                                     plan_active=lp_data.get('planActive'))
-        GLOBAL_APP_STATE.set("evcc_overall_state", cur_state.to_dict())
         GLOBAL_APP_STATE.set("evcc_loadpoint_state", cur_lp.to_dict())
         logger.debug(f"EVCC: AppState updated. Mode: {cur_lp.mode}, Charging: {cur_lp.is_charging}")
 
@@ -296,6 +307,9 @@ def task_poll_evcc_state(evcc_client: Optional[EvccApiClient], db_handler: Datab
         last_logged_slot = GLOBAL_APP_STATE.get("evcc_last_logged_slot")
 
         if last_logged_slot is None or current_slot_ts > last_logged_slot:
+            if session_energy is None:
+                logger.warning("EVCC polling task: loadpoint payload is missing sessionEnergy; skipping DB log.")
+                return
             session_energy_kwh = cur_lp.session_energy / 1000
 
             db_handler.store_evcc_session(now_utc, session_energy_kwh)

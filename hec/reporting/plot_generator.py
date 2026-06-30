@@ -5,6 +5,9 @@ from datetime import datetime, date, timedelta, time
 from typing import List, Optional, Tuple
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+import matplotlib
+
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -49,8 +52,8 @@ def _prepare_price_data_for_plot(
         # Duplicate the 8th element (index 7) 4 times to fill the jump
         # Insert at index 8
         for i in range(1, 5):
-            buy_raw.insert(8, 0)
-            sell_raw.insert(8, 0)
+            buy_raw.insert(8, np.nan)
+            sell_raw.insert(8, np.nan)
             new_ts = ts_raw[7] + pd.Timedelta(minutes=15 * i)
             ts_raw.insert(8, new_ts)
 
@@ -128,6 +131,7 @@ def generate_price_solar_plot(
         return None
 
     # --- Plotting ---
+    fig = None
     try:
         with plt.style.context('default'):
             fig, ax1 = plt.subplots(figsize=(16, 10))  # Wider for more intervals
@@ -234,11 +238,13 @@ def generate_price_solar_plot(
             buffer = io.BytesIO()
             plt.savefig(buffer, format='png', dpi=300)  # Control DPI for image size/quality
             buffer.seek(0)
-            plt.close(fig)
             return buffer
     except Exception as e:
         logger.error(f"Error generating price/solar plot: {e}", exc_info=True)
         return None
+    finally:
+        if fig is not None:
+            plt.close(fig)
 
 
 def generate_future_price_plot(
@@ -335,6 +341,7 @@ def generate_future_price_plot(
     y_min = min(min_price * 1.1, -0.025) if min_price < 0 else 0
     y_max = max_price * 1.1
 
+    fig = None
     try:
         with plt.style.context('default'):
             fig, ax1 = plt.subplots(figsize=(16, 10))
@@ -404,9 +411,11 @@ def generate_future_price_plot(
             buf = io.BytesIO()
             plt.savefig(buf, format='png', dpi=300)
             buf.seek(0)
-            plt.close(fig)
             return buf
 
     except Exception as e:
         logger.error(f"Error generating future price plot: {e}", exc_info=True)
         return None
+    finally:
+        if fig is not None:
+            plt.close(fig)

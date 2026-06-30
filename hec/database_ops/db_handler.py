@@ -457,8 +457,9 @@ class DatabaseHandler:
                 VALUES (?, ?, ?, ?);
             """
                 cursor.executemany(sql, rows_to_insert)
+                inserted_count = cursor.rowcount if cursor.rowcount >= 0 else len(rows_to_insert)
 
-                if cursor.rowcount > 0:
+                if inserted_count > 0:
                     logger.info(
                         f"Successfully stored or updated {inserted_count} price points in the database.")
                 else:
@@ -814,7 +815,7 @@ class DatabaseHandler:
 
                 ts_start, imp_start, exp_start = readings[start_idx]
 
-                if not imp_start or not exp_start:
+                if imp_start is None or exp_start is None:
                     continue
 
                 # 2. Find the end reading: first reading >= iv_end_utc
@@ -828,6 +829,9 @@ class DatabaseHandler:
                     end_idx = n - 1
                 else:
                     ts_end, imp_end, exp_end = readings[end_idx]
+
+                if imp_end is None or exp_end is None:
+                    continue
 
                 # The actual duration covered by these two readings (in seconds)
                 actual_duration_sec = (ts_end - ts_start).total_seconds()

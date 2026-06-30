@@ -364,8 +364,10 @@ def get_logs():
 
     try:
         limit = request.args.get('limit', default=1000, type=int)
-        limit = min(limit, 20000)
-    except ValueError:
+        if limit is None:
+            limit = 1000
+        limit = max(1, min(limit, 20000))
+    except (TypeError, ValueError):
         limit = 1000
 
     logs = _DB_INSTANCE.get_latest_logs(limit)

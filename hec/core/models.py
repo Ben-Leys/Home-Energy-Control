@@ -56,7 +56,7 @@ class NetElectricityPriceInterval:
 
 @dataclass(frozen=True)
 class EVCCOverallState:
-    timestamp_utc_iso: str = datetime.now(timezone.utc).isoformat()
+    timestamp_utc_iso: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     residual_power: int = 0
 
     def to_dict(self) -> Dict[str, Any]:
