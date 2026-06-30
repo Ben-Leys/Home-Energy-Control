@@ -51,6 +51,7 @@ def valid_config():
                 "cookie_max_age_days": 30,
                 "csrf_enabled": True,
                 "same_origin_enabled": True,
+                "trusted_origins": ["https://hec.leysvanh.synology.me"],
             },
         },
         "runtime": {
@@ -76,6 +77,7 @@ class TestPhase7ConfigValidation(unittest.TestCase):
         self.assertEqual("home_energy.db", typed_config.database.path)
         self.assertEqual("Europe/Brussels", typed_config.scheduler.timezone)
         self.assertEqual(8123, typed_config.api_server.port)
+        self.assertEqual(("https://hec.leysvanh.synology.me",), typed_config.api_server.auth.trusted_origins)
         self.assertEqual(10, typed_config.http.default_timeout_seconds)
 
     def test_validate_app_config_does_not_require_standalone_location(self):

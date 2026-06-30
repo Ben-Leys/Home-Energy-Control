@@ -31,6 +31,7 @@ _AUTH_CONFIG = {
     "password_hash": None,
     "csrf_enabled": True,
     "same_origin_enabled": True,
+    "trusted_origins": set(),
 }
 
 _SETTING_TYPE_MAP = {
@@ -64,6 +65,28 @@ _CONTENT_SECURITY_POLICY = (
     "base-uri 'self'; "
     "frame-ancestors 'none'"
 )
+
+
+def _canonical_origin(value: str) -> Optional[str]:
+    parsed = urlparse(str(value or "").strip())
+    if not parsed.scheme or not parsed.netloc:
+        return None
+    return f"{parsed.scheme.lower()}://{parsed.netloc.lower()}"
+
+
+def _configured_trusted_origins(auth_config: dict) -> set[str]:
+    raw_origins = auth_config.get("trusted_origins", []) or []
+    if isinstance(raw_origins, str):
+        raw_origins = [raw_origins]
+
+    trusted_origins = set()
+    for raw_origin in raw_origins:
+        origin = _canonical_origin(raw_origin)
+        if origin:
+            trusted_origins.add(origin)
+        else:
+            logger.warning("Ignoring invalid API trusted origin: %r", raw_origin)
+    return trusted_origins
 
 
 @api_app.after_request
@@ -116,6 +139,7 @@ def configure_api_security(app_config: dict):
         "password_hash": password_hash,
         "csrf_enabled": bool(auth_config.get("csrf_enabled", True)),
         "same_origin_enabled": bool(auth_config.get("same_origin_enabled", True)),
+        "trusted_origins": _configured_trusted_origins(auth_config),
     }
 
 
@@ -196,9 +220,13 @@ def _same_origin_request() -> bool:
     if not candidate:
         return True
 
-    parsed = urlparse(candidate)
-    host_url = urlparse(request.host_url)
-    return parsed.scheme == host_url.scheme and parsed.netloc == host_url.netloc
+    request_origin = _canonical_origin(candidate)
+    host_origin = _canonical_origin(request.host_url)
+    if not request_origin:
+        return False
+    if request_origin == host_origin:
+        return True
+    return request_origin in _AUTH_CONFIG.get("trusted_origins", set())
 
 
 def require_csrf(view_func):

@@ -44,6 +44,7 @@ class AuthConfig:
     cookie_max_age_days: int = 365
     csrf_enabled: bool = True
     same_origin_enabled: bool = True
+    trusted_origins: tuple[str, ...] = ()
     secure_cookie: bool = False
 
 
@@ -167,6 +168,7 @@ def _validate_api_server(section: Mapping[str, Any]) -> ApiServerConfig:
         cookie_max_age_days=_int(auth_section, "cookie_max_age_days", default=365, minimum=1),
         csrf_enabled=_bool(auth_section, "csrf_enabled", default=True),
         same_origin_enabled=_bool(auth_section, "same_origin_enabled", default=True),
+        trusted_origins=_string_tuple(auth_section, "trusted_origins", default=()),
         secure_cookie=_bool(auth_section, "secure_cookie", default=False),
     )
     return ApiServerConfig(
@@ -206,6 +208,19 @@ def _string(section: Mapping[str, Any], key: str, display_name: str | None = Non
     if value is None or not isinstance(value, str) or not value.strip():
         raise ConfigValidationError(f"{name} must be a non-empty string")
     return value
+
+
+def _string_tuple(section: Mapping[str, Any], key: str, default: tuple[str, ...]) -> tuple[str, ...]:
+    value = section.get(key, default)
+    if not isinstance(value, (list, tuple)):
+        raise ConfigValidationError(f"{key} must be a list of non-empty strings")
+
+    items = []
+    for item in value:
+        if not isinstance(item, str) or not item.strip():
+            raise ConfigValidationError(f"{key} must be a list of non-empty strings")
+        items.append(item.strip())
+    return tuple(items)
 
 
 def _bool(section: Mapping[str, Any], key: str, default: bool) -> bool:

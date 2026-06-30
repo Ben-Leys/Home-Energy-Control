@@ -40,6 +40,8 @@ api_server:
     cookie_max_age_days: 365
     csrf_enabled: true
     same_origin_enabled: true
+    trusted_origins:
+      - https://hec.leysvanh.synology.me
     secure_cookie: false
 
 runtime:

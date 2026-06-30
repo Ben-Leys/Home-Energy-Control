@@ -28,9 +28,10 @@ class TestApiPhase1Security(unittest.TestCase):
         GLOBAL_APP_STATE.db_handler = self.original_db_handler
         api_server.configure_api_security({"api_server": {"auth": {"enabled": False}}})
 
-    def login(self):
+    def login(self, base_url=None):
         response = self.client.post(
             "/api/v1/auth/login",
+            base_url=base_url,
             json={"password": "local-password"},
         )
         self.assertEqual(200, response.status_code)
@@ -71,6 +72,33 @@ class TestApiPhase1Security(unittest.TestCase):
         self.assertEqual(200, update_response.status_code)
         self.assertEqual("MODE_AUTO", update_response.get_json()["new_value_stored"])
         self.assertIs(c.OperatingMode.MODE_AUTO, GLOBAL_APP_STATE.get("app_operating_mode"))
+
+    def test_same_origin_accepts_configured_trusted_origin(self):
+        api_server.configure_api_security({
+            "api_server": {
+                "auth": {
+                    "enabled": True,
+                    "password": "local-password",
+                    "cookie_secret": "test-cookie-secret",
+                    "cookie_max_age_days": 30,
+                    "trusted_origins": ["https://hec.leysvanh.synology.me"],
+                }
+            }
+        })
+        csrf_token = self.login(base_url="http://127.0.0.1:8123")
+
+        response = self.client.post(
+            "/api/v1/settings/update",
+            base_url="http://127.0.0.1:8123",
+            headers={
+                "Origin": "https://hec.leysvanh.synology.me",
+                "X-CSRF-Token": csrf_token,
+            },
+            json={"key": "app_operating_mode", "value": "MODE_AUTO"},
+        )
+
+        self.assertEqual(200, response.status_code)
+        self.assertEqual("MODE_AUTO", response.get_json()["new_value_stored"])
 
     def test_update_endpoint_rejects_non_allowlisted_app_state_keys(self):
         csrf_token = self.login()
