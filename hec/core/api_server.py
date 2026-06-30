@@ -55,9 +55,10 @@ _RANGE_LIMITS = {
 }
 _CONTENT_SECURITY_POLICY = (
     "default-src 'self'; "
-    "script-src 'self' https://unpkg.com 'unsafe-inline'; "
+    "script-src 'self' https://unpkg.com 'unsafe-inline' 'unsafe-eval'; "
     "style-src 'self' 'unsafe-inline'; "
     "connect-src 'self'; "
+    "font-src 'self' data:; "
     "img-src 'self' data:; "
     "object-src 'none'; "
     "base-uri 'self'; "
