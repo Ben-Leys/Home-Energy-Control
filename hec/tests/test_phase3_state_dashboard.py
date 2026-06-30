@@ -140,7 +140,7 @@ class TestApiPhase3StateResponses(unittest.TestCase):
             html = response.get_data(as_text=True)
             self.assertIn('<div class="header-row">', html)
             self.assertIn('<h3>🏠 Home Energy Control</h3>', html)
-            self.assertIn('POLL_INTERVAL_MS = 5000', html)
+            self.assertIn('POLL_INTERVAL_MS = 15000', html)
             self.assertIn('pendingEdits', html)
             self.assertIn('lastConfirmedState', html)
             self.assertIn('since_version', html)
