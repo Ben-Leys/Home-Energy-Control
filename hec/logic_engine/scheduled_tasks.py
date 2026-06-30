@@ -118,7 +118,7 @@ def task_midnight_rollover(db_handler: DatabaseHandler, app_config: dict):
     else:  # No prices for tomorrow, try fetch from API
         populate_appstate_with_price_data(db_handler, app_config, True)
 
-    _, sunrise, sunset = is_daylight(app_config, db_handler)
+    _, sunrise, sunset = is_daylight(app_config, return_dt=True)
     GLOBAL_APP_STATE.set("sunrise", sunrise)
     GLOBAL_APP_STATE.set("sunset", sunset)
 

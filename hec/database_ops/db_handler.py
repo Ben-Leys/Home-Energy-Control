@@ -1326,17 +1326,16 @@ class DatabaseHandler:
                 value_type_str = "str_fallback"
                 value_json_str = json.dumps(str(value))
 
-            with self._get_connection() as conn:
-                cursor = conn.cursor()
+            with self.transaction() as conn:
                 sql = """
                     INSERT OR REPLACE INTO app_settings 
                     (setting_key, setting_value, value_type, last_updated_utc)
                     VALUES (?, ?, ?, ?);
                 """
-                cursor.execute(sql, (key, value_json_str, value_type_str, now_utc_str))
+                conn.execute(sql, (key, value_json_str, value_type_str, now_utc_str))
 
-                logger.info(f"Setting '{key}' saved to database with value type '{value_type_str}'.")
-                return True
+            logger.info(f"Setting '{key}' saved to database with value type '{value_type_str}'.")
+            return True
         except sqlite3.Error as e:
             logger.error(f"Error saving setting '{key}' to database: {e}", exc_info=True)
             return False

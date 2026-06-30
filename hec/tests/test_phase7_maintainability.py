@@ -1,7 +1,10 @@
 import unittest
+import warnings
 from datetime import date
 from pathlib import Path
 from unittest.mock import MagicMock
+
+import urllib3
 
 from hec.core import api_server
 from hec.core.app_state import AppState, GLOBAL_APP_STATE
@@ -30,12 +33,14 @@ def valid_config():
         "historic_data": {
             "start_date": "2026-01-01",
         },
-        "location": {
-            "city": "Putte",
-            "region_name_for_astral_optional": "Belgium",
-            "timezone": "Europe/Brussels",
-            "latitude": 51.05483,
-            "longitude": 4.62877,
+        "inverter": {
+            "location": {
+                "city": "Putte",
+                "region_name_for_astral_optional": "Belgium",
+                "timezone": "Europe/Brussels",
+                "latitude": 51.05483,
+                "longitude": 4.62877,
+            },
         },
         "api_server": {
             "enabled": True,
@@ -72,6 +77,16 @@ class TestPhase7ConfigValidation(unittest.TestCase):
         self.assertEqual("Europe/Brussels", typed_config.scheduler.timezone)
         self.assertEqual(8123, typed_config.api_server.port)
         self.assertEqual(10, typed_config.http.default_timeout_seconds)
+
+    def test_validate_app_config_does_not_require_standalone_location(self):
+        from hec.core.config_schema import validate_app_config
+
+        config = valid_config()
+        config.pop("location", None)
+
+        typed_config = validate_app_config(config)
+
+        self.assertEqual("home_energy.db", typed_config.database.path)
 
     def test_validate_app_config_rejects_missing_database_path_and_bad_timezone(self):
         from hec.core.config_schema import ConfigValidationError, validate_app_config
@@ -115,6 +130,34 @@ class TestPhase7HttpAndTimezoneUtilities(unittest.TestCase):
         self.assertEqual(7, session.calls[0][2]["timeout"])
         self.assertFalse(session.calls[0][2]["verify"])
         self.assertEqual(["https://", "http://"], [prefix for prefix, _ in session.mounts])
+
+    def test_http_client_suppresses_unverified_tls_warning_when_tls_verification_disabled(self):
+        from hec.utils.http_client import HttpClient
+
+        class FakeSession:
+            def mount(self, prefix, adapter):
+                pass
+
+            def request(self, method, url, **kwargs):
+                warnings.warn(
+                    "Unverified HTTPS request",
+                    urllib3.exceptions.InsecureRequestWarning,
+                    stacklevel=2,
+                )
+                response = MagicMock()
+                response.status_code = 200
+                return response
+
+        client = HttpClient(verify_tls=False, session=FakeSession())
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            response = client.get("https://example.test/api")
+
+        self.assertEqual(200, response.status_code)
+        self.assertFalse(
+            any(isinstance(warning.message, urllib3.exceptions.InsecureRequestWarning) for warning in caught)
+        )
 
     def test_local_day_bounds_handle_dst_length_in_utc(self):
         from hec.utils.time_utils import local_day_bounds

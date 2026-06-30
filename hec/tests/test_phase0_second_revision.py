@@ -34,12 +34,14 @@ def _valid_config():
         "database": {"path": "home_energy.db"},
         "scheduler": {"timezone": "Europe/Brussels"},
         "historic_data": {"start_date": "2026-01-01"},
-        "location": {
-            "city": "Putte",
-            "region_name_for_astral_optional": "",
-            "timezone": "Europe/Brussels",
-            "latitude": 51.05483,
-            "longitude": 4.62877,
+        "inverter": {
+            "location": {
+                "city": "Putte",
+                "region_name_for_astral_optional": "",
+                "timezone": "Europe/Brussels",
+                "latitude": 51.05483,
+                "longitude": 4.62877,
+            },
         },
     }
 
@@ -246,10 +248,10 @@ class TestPhase0DashboardAndApi(unittest.TestCase):
 
 
 class TestPhase0ConfigValidation(unittest.TestCase):
-    def test_empty_region_name_for_astral_is_allowed_when_optional(self):
+    def test_location_is_allowed_under_inverter_without_standalone_location(self):
         typed_config = validate_app_config(_valid_config())
 
-        self.assertEqual("", typed_config.location.region_name_for_astral_optional)
+        self.assertEqual("home_energy.db", typed_config.database.path)
 
 
 class TestPhase0DatabaseFixes(unittest.TestCase):

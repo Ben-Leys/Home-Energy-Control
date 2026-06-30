@@ -1,8 +1,9 @@
 import unittest
 from datetime import date, datetime, timezone, timedelta
+from unittest.mock import Mock, patch
 
 from hec.core.models import NetElectricityPriceInterval
-from hec.utils.utils import calculate_easter, is_a_holiday, get_interval_from_list
+from hec.utils.utils import calculate_easter, is_a_holiday, get_interval_from_list, is_daylight
 
 
 class Test(unittest.TestCase):
@@ -162,6 +163,63 @@ class Test(unittest.TestCase):
             is_a_holiday("2024-01-01")
         with self.assertRaises(TypeError):
             is_a_holiday(123)
+
+    def test_is_daylight_returns_tuple_when_datetimes_requested_without_inverter_location(self):
+        result = is_daylight({"location": self.valid_location_config()}, return_dt=True)
+
+        self.assertEqual(result, (True, None, None))
+
+    def test_is_daylight_uses_inverter_location_not_standalone_location(self):
+        app_config = {
+            "location": {
+                "city": "Wrong",
+                "region_name_for_astral_optional": "Nowhere",
+                "timezone": "UTC",
+                "latitude": 0.0,
+                "longitude": 0.0,
+            },
+            "inverter": {"location": self.valid_location_config()},
+        }
+        fake_city = Mock(observer=object(), timezone=timezone.utc)
+        sunlight = {
+            "sunrise": datetime(2000, 1, 1, tzinfo=timezone.utc),
+            "sunset": datetime(2100, 1, 1, tzinfo=timezone.utc),
+        }
+
+        with (
+            patch("hec.utils.utils.LocationInfo", return_value=fake_city) as location_info,
+            patch("hec.utils.utils.sun", return_value=sunlight),
+        ):
+            is_daylight(app_config, return_dt=True)
+
+        location_info.assert_called_once_with("Putte", "Belgium", "Europe/Brussels", 51.05483, 4.62877)
+
+    def test_is_daylight_allows_missing_optional_region_in_inverter_location(self):
+        location_config = self.valid_location_config()
+        location_config.pop("region_name_for_astral_optional")
+        fake_city = Mock(observer=object(), timezone=timezone.utc)
+        sunlight = {
+            "sunrise": datetime(2000, 1, 1, tzinfo=timezone.utc),
+            "sunset": datetime(2100, 1, 1, tzinfo=timezone.utc),
+        }
+
+        with (
+            patch("hec.utils.utils.LocationInfo", return_value=fake_city) as location_info,
+            patch("hec.utils.utils.sun", return_value=sunlight),
+        ):
+            is_daylight({"inverter": {"location": location_config}}, return_dt=True)
+
+        location_info.assert_called_once_with("Putte", "", "Europe/Brussels", 51.05483, 4.62877)
+
+    @staticmethod
+    def valid_location_config():
+        return {
+            "city": "Putte",
+            "region_name_for_astral_optional": "Belgium",
+            "timezone": "Europe/Brussels",
+            "latitude": 51.05483,
+            "longitude": 4.62877,
+        }
 
 
 if __name__ == '__main__':

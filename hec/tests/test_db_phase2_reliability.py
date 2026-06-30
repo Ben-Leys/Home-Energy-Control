@@ -1,11 +1,15 @@
+import io
+import logging
 import sqlite3
 import threading
 import time
 import unittest
+from contextlib import redirect_stderr
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
+from hec.core.app_logging import GlobalStateHandler
 from hec.database_ops.db_handler import DatabaseHandler
 
 
@@ -138,6 +142,38 @@ class TestDatabasePhase2Reliability(unittest.TestCase):
                 for row in conn.execute("SELECT message FROM logs ORDER BY id").fetchall()
             ]
         self.assertIn("waited for lock", messages)
+
+    def test_save_setting_logs_after_setting_transaction_commits(self):
+        handler = self.make_handler(busy_timeout_ms=50)
+        db_logger = logging.getLogger("hec.database_ops.db_handler")
+        original_level = db_logger.level
+        log_handler = GlobalStateHandler(global_app_state=object())
+        log_handler.setLevel(logging.INFO)
+        log_handler.setFormatter(logging.Formatter("%(message)s"))
+        log_handler.set_db_handler(handler)
+        stderr = io.StringIO()
+
+        db_logger.setLevel(logging.INFO)
+        db_logger.addHandler(log_handler)
+        try:
+            with redirect_stderr(stderr):
+                self.assertTrue(handler.save_setting("empty_since", None))
+        finally:
+            db_logger.removeHandler(log_handler)
+            db_logger.setLevel(original_level)
+
+        self.assertNotIn("database is locked", stderr.getvalue().lower())
+
+        with handler.connection() as conn:
+            messages = [
+                row["message"]
+                for row in conn.execute("SELECT message FROM logs ORDER BY id").fetchall()
+            ]
+
+        self.assertTrue(
+            any("Setting 'empty_since' saved to database" in message for message in messages),
+            messages,
+        )
 
     def test_schema_migration_table_is_idempotent(self):
         handler = self.make_handler()

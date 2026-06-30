@@ -125,16 +125,19 @@ def get_predicted_price_points_for_date(db_handler, target_date: date) -> List[P
     return price_points
 
 
-def is_daylight(app_config: dict, return_dt=False) -> bool | tuple[bool, datetime, datetime]:
+def is_daylight(app_config: dict, return_dt=False) -> bool | tuple[bool, Optional[datetime], Optional[datetime]]:
     """Checks if it's currently daylight hours based on configured location."""
-    location_config = app_config.get('inverter').get('location')
-    if not location_config or not all(k in location_config for k in ['latitude', 'longitude', 'timezone']):
+    location_config = (app_config.get('inverter') or {}).get('location')
+    required_location_keys = ['city', 'latitude', 'longitude', 'timezone']
+    if not location_config or not all(k in location_config for k in required_location_keys):
         logger.warning("Location for sunrise/sunset calculation not fully configured. Assuming daylight.")
+        if return_dt:
+            return True, None, None
         return True
 
     now_dt_aware = datetime.now().astimezone()
     city = LocationInfo(location_config['city'],
-                        location_config['region_name_for_astral_optional'],
+                        location_config.get('region_name_for_astral_optional', ''),
                         location_config['timezone'],
                         location_config['latitude'],
                         location_config['longitude'])
@@ -146,9 +149,9 @@ def is_daylight(app_config: dict, return_dt=False) -> bool | tuple[bool, datetim
     is_light = sunrise_local <= now_dt_aware <= sunset_local
     logger.debug(f"Daylight check: Now={now_dt_aware.strftime('%H:%M')}, Sunrise={sunrise_local.strftime('%H:%M')}, "
                  f"Sunset={sunset_local.strftime('%H:%M')} -> Is Daylight: {is_light}")
-    if not return_dt:
-        return is_light
-    return is_light, sunrise_local, sunset_local
+    if return_dt:
+        return is_light, sunrise_local, sunset_local
+    return is_light
 
 
 def send_email_with_attachments(

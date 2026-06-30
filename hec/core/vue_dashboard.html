@@ -283,7 +283,7 @@
                 <div class="card">
                     <h4>💡 Market price</h4>
                     <div style="grid-column: span 2; font-size: 0.8rem; color: var(--info-label); margin-bottom: 12px">
-                        Interval: {{ formatTimeHm(currentPrice.start) }} - {{ formatTimeHm(currentPrice.end) }} (LT)
+                        Interval: {{ formatTimeHm(currentPrice?.start) }} - {{ formatTimeHm(currentPrice?.end) }} (LT)
                     </div>
                     <div v-if="currentPrice" class="grid-2">
                         <div class="metric">

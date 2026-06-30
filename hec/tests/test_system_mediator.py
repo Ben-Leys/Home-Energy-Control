@@ -443,6 +443,26 @@ class TestSystemMediatorFunctional(unittest.TestCase):
                 self.assertEqual(self.mediator.new_bat_mode, expected_mode)
 
     @patch('hec.logic_engine.system_mediator.datetime')
+    def test_prediction_plan_block_discharge_treats_missing_average_as_zero(self, mock_datetime):
+        """
+        SCENARIO: Rolling averages are present but not mature enough to calculate numeric values.
+        EXPECTED: Battery block-discharge logic treats missing averages as zero instead of crashing.
+        """
+        now = datetime(2025, 5, 24, 15, 0, tzinfo=pytz.UTC)
+        mock_datetime.now.return_value = now
+        self._set_prediction_plan_row(now, block_d=True)
+        GLOBAL_APP_STATE.set('evcc_loadpoint_state',
+                             EVCCLoadpointState(is_connected=False, is_charging=False).to_dict())
+        GLOBAL_APP_STATE.set("battery_records", [{"state_of_charge_pct": 50}])
+        GLOBAL_APP_STATE.set("battery_data", {"max_consumption_w": 1600})
+        GLOBAL_APP_STATE.set("average_grid_import_watts", {"2m": None, "5m": None})
+        self.mediator.current_max_peak_kw = 2.5
+
+        self.mediator._determine_battery_state()
+
+        self.assertEqual(c.BatteryState.BATTERY_BLOCK_DISCHARGE, self.mediator.new_bat_mode)
+
+    @patch('hec.logic_engine.system_mediator.datetime')
     def test_prediction_force_charge_obeys_peak_safety_budget(self, mock_datetime):
         """
         SCENARIO: The optimizer requests force charging for the active interval.

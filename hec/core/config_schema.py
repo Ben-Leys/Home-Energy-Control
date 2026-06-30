@@ -36,15 +36,6 @@ class HistoricDataConfig:
 
 
 @dataclass(frozen=True)
-class LocationConfig:
-    city: str
-    region_name_for_astral_optional: str
-    timezone: str
-    latitude: float
-    longitude: float
-
-
-@dataclass(frozen=True)
 class AuthConfig:
     enabled: bool = False
     password_env: str = "HEC_AUTH_PASSWORD"
@@ -86,7 +77,6 @@ class TypedAppConfig:
     database: DatabaseConfig
     scheduler: SchedulerConfig
     historic_data: HistoricDataConfig
-    location: LocationConfig
     api_server: ApiServerConfig
     runtime: RuntimeConfig
     http: HttpConfig
@@ -101,7 +91,6 @@ def validate_app_config(config: Mapping[str, Any]) -> TypedAppConfig:
     database = _validate_database(_section(config, "database"))
     scheduler = _validate_scheduler(_section(config, "scheduler"))
     historic_data = _validate_historic_data(_section(config, "historic_data"))
-    location = _validate_location(_section(config, "location"))
     api_server = _validate_api_server(_section(config, "api_server", required=False))
     runtime = _validate_runtime(_section(config, "runtime", required=False))
     http = _validate_http(_section(config, "http", required=False))
@@ -111,7 +100,6 @@ def validate_app_config(config: Mapping[str, Any]) -> TypedAppConfig:
         database=database,
         scheduler=scheduler,
         historic_data=historic_data,
-        location=location,
         api_server=api_server,
         runtime=runtime,
         http=http,
@@ -162,27 +150,6 @@ def _validate_historic_data(section: Mapping[str, Any]) -> HistoricDataConfig:
     except ValueError as exc:
         raise ConfigValidationError("historic_data.start_date must be an ISO date") from exc
     return HistoricDataConfig(start_date=start_date)
-
-
-def _validate_location(section: Mapping[str, Any]) -> LocationConfig:
-    timezone_name = _timezone(section, "timezone", "location.timezone")
-    latitude = _float(section, "latitude", "location.latitude")
-    longitude = _float(section, "longitude", "location.longitude")
-    if not -90 <= latitude <= 90:
-        raise ConfigValidationError("location.latitude must be between -90 and 90")
-    if not -180 <= longitude <= 180:
-        raise ConfigValidationError("location.longitude must be between -180 and 180")
-    return LocationConfig(
-        city=_string(section, "city", "location.city"),
-        region_name_for_astral_optional=_optional_string(
-            section,
-            "region_name_for_astral_optional",
-            default="",
-        ),
-        timezone=timezone_name,
-        latitude=latitude,
-        longitude=longitude,
-    )
 
 
 def _validate_api_server(section: Mapping[str, Any]) -> ApiServerConfig:
@@ -239,21 +206,6 @@ def _string(section: Mapping[str, Any], key: str, display_name: str | None = Non
     if value is None or not isinstance(value, str) or not value.strip():
         raise ConfigValidationError(f"{name} must be a non-empty string")
     return value
-
-
-def _optional_string(
-        section: Mapping[str, Any],
-        key: str,
-        display_name: str | None = None,
-        default: str = "",
-) -> str:
-    value = section.get(key, default)
-    name = display_name or key
-    if value is None:
-        return default
-    if not isinstance(value, str):
-        raise ConfigValidationError(f"{name} must be a string")
-    return value.strip()
 
 
 def _bool(section: Mapping[str, Any], key: str, default: bool) -> bool:

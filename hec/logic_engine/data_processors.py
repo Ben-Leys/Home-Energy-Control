@@ -57,7 +57,7 @@ def populate_appstate_with_price_data(db_handler: DatabaseHandler, app_config: d
         logger.warning("No 'electricity_prices_today' found in AppState. Price-based decisions will fail.")
 
     # Sunrise and sunset hours
-    _, sunrise, sunset = is_daylight(app_config, db_handler)
+    _, sunrise, sunset = is_daylight(app_config, return_dt=True)
     GLOBAL_APP_STATE.set("sunrise", sunrise)
     GLOBAL_APP_STATE.set("sunset", sunset)
 

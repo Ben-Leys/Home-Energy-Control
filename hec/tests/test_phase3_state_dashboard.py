@@ -149,6 +149,19 @@ class TestApiPhase3StateResponses(unittest.TestCase):
         finally:
             response.close()
 
+    def test_dashboard_current_price_interval_render_is_null_safe(self):
+        response = self.client.get("/")
+        try:
+            self.assertEqual(200, response.status_code)
+
+            html = response.get_data(as_text=True)
+            self.assertIn("formatTimeHm(currentPrice?.start)", html)
+            self.assertIn("formatTimeHm(currentPrice?.end)", html)
+            self.assertNotIn("formatTimeHm(currentPrice.start)", html)
+            self.assertNotIn("formatTimeHm(currentPrice.end)", html)
+        finally:
+            response.close()
+
 
 class TestDashboardStateSyncJavaScript(unittest.TestCase):
     @classmethod

@@ -27,13 +27,6 @@ scheduler:
 historic_data:
   start_date: "2026-01-01"
 
-location:
-  city: Putte
-  region_name_for_astral_optional: Belgium
-  timezone: Europe/Brussels
-  latitude: 51.05483
-  longitude: 4.62877
-
 api_server:
   enabled: true
   host: 0.0.0.0

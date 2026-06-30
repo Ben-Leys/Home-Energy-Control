@@ -1,7 +1,9 @@
+import warnings
 from typing import Any, Mapping, Optional
 
 import requests
 from requests.adapters import HTTPAdapter
+from urllib3.exceptions import InsecureRequestWarning
 from urllib3.util.retry import Retry
 
 
@@ -36,6 +38,10 @@ class HttpClient:
     def request(self, method: str, url: str, **kwargs: Any):
         kwargs.setdefault("timeout", self.default_timeout_seconds)
         kwargs.setdefault("verify", self.verify_tls)
+        if kwargs.get("verify") is False:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", InsecureRequestWarning)
+                return self.session.request(method.upper(), url, **kwargs)
         return self.session.request(method.upper(), url, **kwargs)
 
     def get(self, url: str, **kwargs: Any):

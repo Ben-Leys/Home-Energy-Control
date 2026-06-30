@@ -29,6 +29,26 @@ _SHORTAGE_CONFIG = {
 }
 
 
+def _safe_watts(value) -> float:
+    if value is None:
+        return 0.0
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _average_grid_import_watts(window: str) -> float:
+    metrics = GLOBAL_APP_STATE.get('average_grid_import_watts') or {}
+    if not isinstance(metrics, dict):
+        return 0.0
+    return _safe_watts(metrics.get(window))
+
+
+def _average_grid_import_kw(window: str) -> float:
+    return _average_grid_import_watts(window) / 1000
+
+
 class SystemMediator:
 
     def __init__(
@@ -265,9 +285,8 @@ class SystemMediator:
         logger.debug(f"Grid power: {grid_kw:.2f} kW. Base available for charging: {avail_kw:.2f} kW")
 
         # Shortage Adjustments
-        average_import = GLOBAL_APP_STATE.get('average_grid_import_watts', {})
         for window, (hi_mult, (low, high)) in _SHORTAGE_CONFIG.items():
-            avg_kw = (average_import.get(window, 0)) / 1000
+            avg_kw = _average_grid_import_kw(window)
             shortage = threshold_kw - avg_kw
 
             if shortage <= low:
@@ -677,7 +696,7 @@ class SystemMediator:
             return
 
         if is_block_d or would_block_discharge:
-            avg_kw_2m = (GLOBAL_APP_STATE.get('average_grid_import_watts', {}).get("2m", 0)) / 1000
+            avg_kw_2m = _average_grid_import_kw("2m")
             may_cause_peak = avg_kw_2m > self.current_max_peak_kw
             if not may_cause_peak:
                 self.new_bat_mode = c.BatteryState.BATTERY_BLOCK_DISCHARGE
@@ -712,7 +731,7 @@ class SystemMediator:
         allowed_ws = self.current_max_peak_kw * 1000 * 900
 
         # Estimated Joules already spent (using 5m average as a proxy for the current window)
-        avg_5m_w = GLOBAL_APP_STATE.get('average_grid_import_watts', {}).get('5m', 0)
+        avg_5m_w = _average_grid_import_watts('5m')
         spent_ws = avg_5m_w * seconds_passed
 
         remaining_ws = allowed_ws - spent_ws
@@ -876,9 +895,7 @@ class SystemMediator:
             logger.error(f"Failed to update battery state: {e}")
 
     def _handle_peak_consumption(self) -> bool:
-        metrics = GLOBAL_APP_STATE.get('average_grid_import_watts', {})
-        get_kw = lambda key: (metrics.get(key) or 0) / 1000
-        avg = {k: get_kw(k) for k in ['5m', '10m', '15m']}
+        avg = {k: _average_grid_import_kw(k) for k in ['5m', '10m', '15m']}
 
         # Detection logic
         limit = self.current_max_peak_kw
