@@ -944,11 +944,12 @@
 
             const isPending = (key) => Boolean(pendingEdits.value[key]);
 
-            const applyStatePayload = (payload) => {
+            const applyStatePayload = (payload, options = {}) => {
                 if (!payload) return;
                 const payloadVersion = normalizeStateVersion(payload.state_version);
                 const currentVersion = normalizeStateVersion(stateVersion.value);
-                if (payloadVersion !== null && currentVersion !== null && payloadVersion < currentVersion) {
+                const allowVersionReset = Boolean(options.allowVersionReset);
+                if (payloadVersion !== null && currentVersion !== null && payloadVersion < currentVersion && !allowVersionReset) {
                     return;
                 }
                 if (payloadVersion !== null) {
@@ -1068,9 +1069,10 @@
 
             const fetchState = async () => {
                 try {
-                    const url = stateVersion.value === null || stateVersion.value === undefined
+                    const requestedVersion = normalizeStateVersion(stateVersion.value);
+                    const url = requestedVersion === null
                         ? API_STATE
-                        : `${API_STATE}?since_version=${encodeURIComponent(stateVersion.value)}`;
+                        : `${API_STATE}?since_version=${encodeURIComponent(requestedVersion)}`;
                     const res = await fetch(url, { headers: statePollHeaders() });
                     if (handleAuthFailure(res)) return;
                     if (res.status === 304) {
@@ -1078,7 +1080,11 @@
                         return;
                     }
                     if (res.ok) {
-                        applyStatePayload(await res.json());
+                        const payload = await res.json();
+                        const payloadVersion = normalizeStateVersion(payload?.state_version);
+                        applyStatePayload(payload, {
+                            allowVersionReset: requestedVersion !== null && payloadVersion !== null && requestedVersion > payloadVersion
+                        });
                         lastSync.value = new Date().toLocaleTimeString();
                     }
                 } catch (error) {

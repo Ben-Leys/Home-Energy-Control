@@ -119,6 +119,16 @@ class TestApiPhase3StateResponses(unittest.TestCase):
         self.assertEqual(200, changed_response.status_code)
         self.assertGreater(changed_response.get_json()["state_version"], first_version)
 
+    def test_state_endpoint_returns_full_state_when_client_version_is_ahead(self):
+        GLOBAL_APP_STATE.set("app_operating_mode", c.OperatingMode.MODE_MANUAL)
+        state_version = GLOBAL_APP_STATE.get_state_version()
+
+        response = self.client.get(f"/api/v1/state?since_version={state_version + 1000}")
+
+        self.assertEqual(200, response.status_code)
+        self.assertEqual(state_version, response.get_json()["state_version"])
+        self.assertEqual(f'"{state_version}"', response.headers["ETag"])
+
     def test_update_endpoint_returns_canonical_state_and_state_version(self):
         response = self.client.post(
             "/api/v1/settings/update",
@@ -258,6 +268,30 @@ hooks.applyStatePayload({ state_version: 2, evcc_manual_limit: 6 });
 assert.strictEqual(hooks.stateVersion.value, 3);
 assert.strictEqual(hooks.state.value.evcc_manual_limit, 12);
 assert.strictEqual(hooks.lastConfirmedState.value.evcc_manual_limit, 12);
+"""
+        )
+
+    def test_fetch_state_accepts_lower_version_after_server_restart(self):
+        self._run_dashboard_js(
+            """
+hooks.applyStatePayload({ state_version: 29036, electricity_prices_today: ['old'] });
+
+let requestedUrl = null;
+globalThis.fetch = async (url) => {
+  requestedUrl = url;
+  return {
+    status: 200,
+    ok: true,
+    json: async () => ({ state_version: 4, electricity_prices_today: ['new'] })
+  };
+};
+
+await component.fetchState();
+
+assert.strictEqual(requestedUrl, '/api/v1/state?since_version=29036');
+assert.strictEqual(hooks.stateVersion.value, 4);
+assert.deepStrictEqual(hooks.state.value.electricity_prices_today, ['new']);
+assert.deepStrictEqual(hooks.lastConfirmedState.value.electricity_prices_today, ['new']);
 """
         )
 

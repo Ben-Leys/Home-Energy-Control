@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 from typing import List, Dict, Any, Optional
 
 from hec.utils.http_client import build_http_client
-from hec.utils.time_utils import local_now
+from hec.utils.time_utils import ensure_aware, get_zone, local_now
 
 logger = logging.getLogger(__name__)
 
@@ -73,7 +73,9 @@ def fetch_and_process_forecast(target_day_local: datetime, app_config: dict, for
     config = app_config.get('elia', {})
     http_client = app_config.get("_http_client") or build_http_client(app_config, default_timeout_seconds=30)
 
-    today = local_now(target_day_local.tzinfo).date()
+    local_tz = get_zone(config['timezone'])
+    target_day_local = ensure_aware(target_day_local, local_tz).astimezone(local_tz)
+    today = local_now(local_tz).date()
     target_date = target_day_local.date()
     is_past = target_date < today
 

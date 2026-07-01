@@ -374,7 +374,7 @@ def get_app_state_api():
     if requested_version is None:
         requested_version = _parse_state_version(request.headers.get("If-None-Match"))
 
-    if requested_version is not None and requested_version >= state_version:
+    if requested_version is not None and requested_version == state_version:
         response = make_response("", 304)
         response.headers["ETag"] = _state_etag(state_version)
         return response
