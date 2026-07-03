@@ -474,10 +474,20 @@ def _set_summary_job_status(state: str, message: str):
     })
 
 
+def _is_summary_job_active() -> bool:
+    status = GLOBAL_APP_STATE.get("summary_job_status", {}) or {}
+    if status.get("state") in {"queued", "running"}:
+        return True
+
+    with _summary_job_lock:
+        return _summary_job_thread is not None and _summary_job_thread.is_alive()
+
+
 def task_send_daily_energy_summary_email(app_config, db_handler, tariff_manager, renew_prices=False):
     """
     Scheduled task to generate and send the daily energy summary email.
     """
+    _set_summary_job_status("running", "Daily summary is running")
     forecasts = populate_appstate_with_forecast_data(db_handler)
 
     summary_generator = DailySummaryGenerator(app_config, db_handler, tariff_manager, forecasts)
@@ -491,11 +501,14 @@ def task_send_daily_energy_summary_email(app_config, db_handler, tariff_manager,
         success = summary_generator.generate_and_send_summary(app_config)
         if success:
             logger.info("Daily energy summary email generated and sent successfully.")
+            _set_summary_job_status("success", "Daily summary email sent")
         else:
             logger.error("Failed to generate or send daily energy summary email.")
+            _set_summary_job_status("failed", "Daily summary email failed")
         return success
     except Exception as e:
         logger.error(f"Error in task_send_daily_energy_summary_email: {e}", exc_info=True)
+        _set_summary_job_status("failed", "Daily summary email failed")
         return False
 
 
@@ -568,6 +581,10 @@ def task_run_battery_predictor(app_config, db_handler: DatabaseHandler):
     Scheduled task to run the battery predictor.
     Generates the base 48h plan once per day, and optimizes it every 15 minutes.
     """
+    if _is_summary_job_active():
+        logger.info("Battery predictor skipped while daily summary is active.")
+        return
+
     logger.info("Running battery predictor task...")
     bp = BatteryPredictor(app_config)
     cd = ConsumptionPredictor(db_handler)

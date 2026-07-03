@@ -19,6 +19,9 @@ from hec.logic_engine.cost_calculator import calculate_net_intervals_for_day
 
 logger = logging.getLogger(__name__)
 
+EMAIL_PLOT_FIGSIZE = (12, 7.5)
+EMAIL_PLOT_DPI = 180
+
 
 def _resolve_plot_timezone(app_config) -> ZoneInfo:
     timezone_name = (
@@ -134,7 +137,7 @@ def generate_price_solar_plot(
     fig = None
     try:
         with plt.style.context('default'):
-            fig, ax1 = plt.subplots(figsize=(16, 10))  # Wider for more intervals
+            fig, ax1 = plt.subplots(figsize=EMAIL_PLOT_FIGSIZE)
 
             intervals_n_date_to_plot = intervals_to_show_per_hour * 10
             total_intervals_to_plot = intervals_n_date_to_plot + intervals_to_show_per_hour * 24
@@ -236,7 +239,7 @@ def generate_price_solar_plot(
 
             fig.tight_layout()
             buffer = io.BytesIO()
-            plt.savefig(buffer, format='png', dpi=300)  # Control DPI for image size/quality
+            plt.savefig(buffer, format='png', dpi=EMAIL_PLOT_DPI)
             buffer.seek(0)
             return buffer
     except Exception as e:
@@ -344,7 +347,7 @@ def generate_future_price_plot(
     fig = None
     try:
         with plt.style.context('default'):
-            fig, ax1 = plt.subplots(figsize=(16, 10))
+            fig, ax1 = plt.subplots(figsize=EMAIL_PLOT_FIGSIZE)
             x = np.arange(total_intervals)
 
             # bars for buy/sell
@@ -409,7 +412,7 @@ def generate_future_price_plot(
 
             fig.tight_layout()
             buf = io.BytesIO()
-            plt.savefig(buf, format='png', dpi=300)
+            plt.savefig(buf, format='png', dpi=EMAIL_PLOT_DPI)
             buf.seek(0)
             return buf
 

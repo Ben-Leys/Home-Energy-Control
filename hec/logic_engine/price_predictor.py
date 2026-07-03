@@ -23,7 +23,7 @@ class EnergyPricePredictor:
         n_estimators = int(predictor_config.get("random_forest_estimators",
                                                 predictor_config.get("n_estimators", 100)))
         n_jobs = int(predictor_config.get("random_forest_n_jobs", predictor_config.get("n_jobs", 1)))
-        self.training_window_days = int(predictor_config.get("training_window_days", 400))
+        self.training_window_days = int(predictor_config.get("training_window_days", 200))
         self.retrain_after_days = int(predictor_config.get("retrain_after_days", 7))
         self.model_path = self._resolve_model_path(predictor_config)
         self.model = RandomForestRegressor(n_estimators=n_estimators, random_state=42, n_jobs=n_jobs)

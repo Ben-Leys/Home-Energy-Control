@@ -17,7 +17,7 @@ from hec.logic_engine.cost_calculator import (
 from hec.logic_engine import scheduled_tasks
 from hec.logic_engine.price_predictor import EnergyPricePredictor
 from hec.reporting.daily_summary import DailySummaryGenerator
-from hec.reporting.plot_generator import generate_future_price_plot
+from hec.reporting.plot_generator import generate_future_price_plot, generate_price_solar_plot
 
 
 def write_tariffs(path: Path, fixed_buy_price: float):
@@ -540,6 +540,68 @@ class TestPhase4PredictionAndSummary(unittest.TestCase):
         self.assertIn("03-07-2026", title)
         self.assertNotIn("02-07-2026", title)
 
+    def test_email_plots_use_lighter_readable_render_settings(self):
+        target_date = date(2026, 7, 1)
+        today_start = datetime.combine(target_date, time.min, tzinfo=timezone.utc)
+        tomorrow_start = today_start + timedelta(days=1)
+        today_prices = [make_price_interval(today_start + timedelta(hours=hour)) for hour in range(24)]
+        tomorrow_prices = [make_price_interval(tomorrow_start + timedelta(hours=hour)) for hour in range(24)]
+        future_df = pd.DataFrame({
+            "timestamp_utc": [tomorrow_start + timedelta(minutes=15 * i) for i in range(8)],
+            "predicted_gross_price_kwh": [0.10] * 8,
+            "solar_factor": [0.2] * 8,
+            "wind_factor": [0.3] * 8,
+            "grid_load_mwh": [100.0] * 8,
+        })
+        savefig_dpi_values = []
+
+        def record_savefig(buffer, *args, **kwargs):
+            savefig_dpi_values.append(kwargs.get("dpi"))
+            buffer.write(b"plot")
+
+        def intervals_from_price_points(_db, _app_config, _target_date, price_points, **_kwargs):
+            return [
+                NetElectricityPriceInterval(
+                    interval_start_local=price_point.timestamp_utc,
+                    resolution_minutes=15,
+                    active_contract_type="dynamic",
+                    net_prices_eur_per_kwh={
+                        "dynamic": {"buy": 0.20, "sell": 0.05},
+                        "fixed": {"buy": 0.30, "sell": 0.04},
+                    },
+                )
+                for price_point in price_points
+            ]
+
+        with (
+            patch("hec.reporting.plot_generator.plt.savefig", side_effect=record_savefig),
+            patch(
+                "hec.reporting.plot_generator.calculate_net_intervals_for_day",
+                side_effect=intervals_from_price_points,
+            ),
+        ):
+            price_plot = generate_price_solar_plot(
+                target_date,
+                today_prices[-10:],
+                tomorrow_prices,
+                [1.0] * 24,
+                fixed_buy_price=0.30,
+                fixed_sell_price=0.04,
+                forecast_resolution=60,
+                inverter_kw=7.0,
+            )
+            future_plot = generate_future_price_plot(
+                MagicMock(),
+                {},
+                [future_df],
+                target_date,
+                inverter_kw=7.0,
+            )
+
+        self.assertIsNotNone(price_plot)
+        self.assertIsNotNone(future_plot)
+        self.assertEqual([180, 180], savefig_dpi_values)
+
     def test_prediction_cache_refresh_trains_when_needed_and_predicts_four_days_only(self):
         db_handler = MagicMock()
         db_handler.get_elia_forecasts.return_value = []
@@ -683,6 +745,31 @@ class TestPhase4PredictionAndSummary(unittest.TestCase):
 
         self.assertIn("summaryJobStatusText", html)
         self.assertIn("summary_job_status", html)
+
+    def test_battery_prediction_skips_when_summary_job_is_running(self):
+        previous_values = GLOBAL_APP_STATE.current_values.copy()
+        previous_prediction_plan_df = GLOBAL_APP_STATE.prediction_plan_df
+        try:
+            GLOBAL_APP_STATE.current_values["summary_job_status"] = {
+                "state": "running",
+                "message": "Daily summary is running",
+                "updated_at_utc": datetime.now(timezone.utc).isoformat(),
+            }
+            GLOBAL_APP_STATE.current_values["battery_records"] = [
+                {"state_of_charge_pct": 50.0},
+            ]
+
+            with (
+                patch("hec.logic_engine.scheduled_tasks.BatteryPredictor") as battery_predictor,
+                patch("hec.logic_engine.scheduled_tasks.ConsumptionPredictor") as consumption_predictor,
+            ):
+                scheduled_tasks.task_run_battery_predictor({}, MagicMock())
+
+            battery_predictor.assert_not_called()
+            consumption_predictor.assert_not_called()
+        finally:
+            GLOBAL_APP_STATE.current_values = previous_values
+            GLOBAL_APP_STATE.prediction_plan_df = previous_prediction_plan_df
 
 
 if __name__ == "__main__":
