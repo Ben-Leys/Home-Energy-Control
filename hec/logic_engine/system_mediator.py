@@ -503,11 +503,8 @@ class SystemMediator:
             elapsed_min = (now - self.last_pv_limit_change_time).total_seconds() / 60 \
                 if self.last_pv_limit_change_time else 10
 
-            is_big_change = abs(raw_limit_w - cur_limit_w) >= 900
             is_time_elapsed = elapsed_min >= self.buffer_before_pv_limit_change
-            is_over_threshold = abs(desired_limit_w - cur_limit_w) > (abs(upper_limit_w) / 2)
-
-            can_update = is_big_change or (is_time_elapsed and is_over_threshold)
+            force_update = False
 
             # 5. Long-term import correction
             if elapsed_min >= 5:
@@ -520,7 +517,7 @@ class SystemMediator:
 
                 if still_importing and prod_is_capped:
                     desired_limit_w += (avg_5m_import_w * 3)
-                    can_update = True
+                    force_update = True
                     logger.info(f"Sustained import detected. Boosting limit to {desired_limit_w:.0f} W")
 
             # 6 Minimum for battery charging
@@ -549,13 +546,19 @@ class SystemMediator:
 
                     # Force an update if the current limit is significantly below the new one
                     if abs(desired_limit_w - cur_limit_w) >= 600:
-                        can_update = True
+                        force_update = True
             logger.info(f"Desired limit: {desired_limit_w} W")
 
             # 7. Apply decision
+            final_limit_w = int(max(0, min(desired_limit_w, self.inverter_client.standard_power_limit)))
+            final_delta_w = abs(final_limit_w - int(cur_limit_w))
+            is_big_change = final_delta_w >= 900
+            is_over_threshold = final_delta_w > (abs(upper_limit_w) / 2)
+            can_update = is_big_change or (is_time_elapsed and is_over_threshold) or (force_update and is_over_threshold)
+
             if can_update:
                 # Hardware limits
-                self.new_inv_limit = int(max(0, min(desired_limit_w, self.inverter_client.standard_power_limit)))
+                self.new_inv_limit = final_limit_w
             else:
                 self.new_inv_limit = int(cur_limit_w)
 
@@ -773,7 +776,10 @@ class SystemMediator:
         limit_changed = int(self.new_inv_limit) != int(cur_limit_w)
         state_changed = self.new_inv_state != cur_manual_state
 
-        if not limit_changed and not state_changed:
+        if not limit_changed:
+            if state_changed:
+                GLOBAL_APP_STATE.set('inverter_manual_state', self.new_inv_state)
+                GLOBAL_APP_STATE.set('inverter_manual_limit', self.new_inv_limit)
             return
 
         try:

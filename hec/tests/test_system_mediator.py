@@ -197,7 +197,8 @@ class TestSystemMediatorFunctional(unittest.TestCase):
 
         # --- Assertions for Inverter ---
         self.assertEqual(GLOBAL_APP_STATE.get('inverter_manual_state'), c.InverterManualState.INV_CMD_LIMIT_MANUAL)
-        self.mock_inverter_client.set_active_power_limit.assert_called_with(7000)
+        self.assertEqual(GLOBAL_APP_STATE.get('inverter_manual_limit'), 7000)
+        self.mock_inverter_client.set_active_power_limit.assert_not_called()
 
     @patch('hec.core.market_prices.datetime')
     @patch('hec.logic_engine.system_mediator.datetime')
@@ -357,6 +358,53 @@ class TestSystemMediatorFunctional(unittest.TestCase):
         self.mediator._recalculate_inverter_limit()
 
         self.assertIsInstance(self.mediator.new_inv_limit, int)
+
+    def test_inverter_limit_rechecks_deadband_after_battery_charge_boost(self):
+        """
+        SCENARIO: Battery charge headroom changes a large pre-boost delta into a tiny final delta.
+        EXPECTED: The final target is kept at the current limit instead of writing a 2 W update.
+        """
+        now = datetime.now(tz=pytz.UTC)
+        self.mock_inverter_client.power_limit_timestamps.clear()
+        for _ in range(4):
+            self.mock_inverter_client.power_limit_timestamps.append(now - timedelta(minutes=1))
+        self.mediator.last_pv_limit_change_time = now - timedelta(minutes=3)
+
+        GLOBAL_APP_STATE.set('p1_meter_data', {"active_power_w": 1018, "monthly_power_peak_w": 2500})
+        GLOBAL_APP_STATE.set('inverter_data', {"active_power_limit_watts": 2255, "pv_power_watts": 0})
+        GLOBAL_APP_STATE.set('average_grid_import_watts', {'5m': 0})
+        GLOBAL_APP_STATE.set('average_solar_production_watts', {'5m': 0})
+        GLOBAL_APP_STATE.set('battery_records', [{"state_of_charge_pct": 50}, {"state_of_charge_pct": 50}])
+        GLOBAL_APP_STATE.set('battery_data', {
+            "max_consumption_w": 1059.34,
+            "battery_count": 2,
+            "power_w": 0,
+        })
+        self.mediator.market.buy_price = 0.20
+        self.mediator.market.sell_price = -0.01
+        self.mediator.new_bat_mode = c.BatteryState.BATTERY_ON
+        self.mediator.new_inv_state = c.InverterManualState.INV_CMD_LIMIT_TO_USE
+
+        self.mediator._recalculate_inverter_limit()
+
+        self.assertEqual(2255, self.mediator.new_inv_limit)
+
+    def test_apply_inverter_state_skips_hardware_write_for_state_only_change(self):
+        """
+        SCENARIO: The app mode changes, but the physical SMA power limit is already correct.
+        EXPECTED: App state is synced without sending a no-op Modbus write.
+        """
+        GLOBAL_APP_STATE.set('inverter_data', {"active_power_limit_watts": 7000, "pv_power_watts": 0})
+        GLOBAL_APP_STATE.set('inverter_manual_state', c.InverterManualState.INV_CMD_LIMIT_STANDARD)
+        self.mediator.new_inv_state = c.InverterManualState.INV_CMD_LIMIT_MANUAL
+        self.mediator.new_inv_limit = 7000
+
+        self.mediator._apply_inverter_state()
+
+        self.mock_inverter_client.set_active_power_limit.assert_not_called()
+        self.assertEqual(c.InverterManualState.INV_CMD_LIMIT_MANUAL,
+                         GLOBAL_APP_STATE.get('inverter_manual_state'))
+        self.assertEqual(7000, GLOBAL_APP_STATE.get('inverter_manual_limit'))
 
     @patch('hec.core.market_prices.datetime')
     @patch('hec.logic_engine.system_mediator.datetime')
