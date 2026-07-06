@@ -833,7 +833,10 @@ def register_all_jobs(scheduler: BaseScheduler, db_handler: DatabaseHandler, app
                     grace_time=job["misfire_grace_time"],
                 )
             else:
-                logger.warning(f"No trigger for job '{job['job_id']}'. Skipping.")
+                if job["job_id"] == PRICE_PREDICTION_JOB_ID:
+                    logger.info("Standalone price prediction job disabled; predictions refresh after Elia forecast fetch.")
+                else:
+                    logger.warning(f"No trigger for job '{job['job_id']}'. Skipping.")
 
         # Register P1 Meter job if available
         if p1_client:

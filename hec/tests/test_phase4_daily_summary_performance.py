@@ -732,6 +732,34 @@ class TestPhase4PredictionAndSummary(unittest.TestCase):
         scheduled_job_ids = [call.kwargs["id"] for call in scheduler.add_job.call_args_list]
         self.assertNotIn(scheduled_tasks.PRICE_PREDICTION_JOB_ID, scheduled_job_ids)
 
+    def test_disabled_price_prediction_job_is_not_logged_as_warning(self):
+        scheduler = MagicMock()
+        app_config = {
+            "tasks_schedule": {
+                "fetch_day_ahead_prices": {"trigger_args": {"hour": 13, "minute": 5}},
+                "midnight_rollover": {"trigger_args": {"hour": 0, "minute": 0}},
+                "fetch_elia_forecast": {"trigger_args": {"hour": 12, "minute": 30}},
+                "mediator_logic": {"trigger_args": {"second": "5,35"}},
+                "battery_prediction": {"trigger_args": {"minute": "*/15"}},
+            },
+        }
+
+        with patch.object(scheduled_tasks.logger, "warning") as warning_log:
+            scheduled_tasks.register_all_jobs(
+                scheduler,
+                MagicMock(),
+                app_config,
+                p1_client=None,
+                inv_client=None,
+                evcc_client=None,
+                tariff_manager=MagicMock(),
+                system_mediator=MagicMock(),
+                battery_clients=None,
+            )
+
+        warning_messages = [str(call.args[0]) for call in warning_log.call_args_list]
+        self.assertFalse(any(scheduled_tasks.PRICE_PREDICTION_JOB_ID in message for message in warning_messages))
+
     def test_price_prediction_job_can_be_scheduled_with_explicit_trigger(self):
         scheduler = MagicMock()
 
