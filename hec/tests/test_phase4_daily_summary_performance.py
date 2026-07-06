@@ -3,6 +3,7 @@ import unittest
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 from unittest.mock import MagicMock, patch
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 
@@ -338,6 +339,75 @@ class TestPhase4PredictionAndSummary(unittest.TestCase):
         self.assertIsNone(result)
         db_handler.store_predicted_prices.assert_not_called()
 
+    def test_price_predictor_generates_timestamps_for_configured_local_day(self):
+        db_handler = MagicMock()
+        predictor = EnergyPricePredictor(db_handler, {"scheduler": {"timezone": "Europe/Brussels"}})
+        predictor.is_trained = True
+        predictor.features = ["day_of_week", "is_weekend", "solar_factor", "wind_factor", "grid_load_mwh"]
+        predictor.model = MagicMock()
+        predictor.model.predict.side_effect = lambda features: [0.10] * len(features)
+
+        target_date = date(2026, 7, 9)
+        local_tz = ZoneInfo("Europe/Brussels")
+        local_start = datetime.combine(target_date, time.min, tzinfo=local_tz)
+
+        def forecast_records(forecast_type, value, capacity=None):
+            records = []
+            for interval in range(96):
+                record = {
+                    "timestamp_utc": local_start.astimezone(timezone.utc) + timedelta(minutes=15 * interval),
+                    "forecast_type": forecast_type,
+                    "resolution_minutes": 15,
+                    "most_recent_forecast_mwh": value,
+                    "monitored_capacity_mw": capacity,
+                }
+                records.append(record)
+            return records
+
+        result = predictor.predict_prices_for_day(
+            target_date,
+            {
+                "solar": forecast_records("solar", 50.0, 100.0),
+                "wind": forecast_records("wind", 25.0, 100.0),
+                "grid_load": forecast_records("grid_load", 1000.0),
+            },
+            save_to_db=False,
+        )
+
+        self.assertIsNotNone(result)
+        self.assertEqual(96, len(result))
+        self.assertEqual(datetime(2026, 7, 8, 22, 0, tzinfo=timezone.utc), result["timestamp_utc"].iloc[0])
+        self.assertEqual(datetime(2026, 7, 9, 21, 45, tzinfo=timezone.utc), result["timestamp_utc"].iloc[-1])
+        self.assertTrue((result["solar_factor"] > 0).any())
+        self.assertTrue((result["grid_load_mwh"] > 0).any())
+
+    @patch("hec.logic_engine.scheduled_tasks.task_refresh_price_predictions", return_value=[date(2026, 7, 7)])
+    @patch("hec.logic_engine.scheduled_tasks.sleep", return_value=None)
+    @patch("hec.logic_engine.scheduled_tasks.fetch_and_process_forecast")
+    def test_elia_forecast_fetch_refreshes_prediction_cache_after_storing_forecasts(
+            self,
+            fetch_forecast,
+            _sleep,
+            refresh_predictions,
+    ):
+        fetch_forecast.return_value = [
+            {
+                "timestamp_utc": datetime(2026, 7, 7, tzinfo=timezone.utc),
+                "forecast_type": "solar",
+                "resolution_minutes": 15,
+                "most_recent_forecast_mwh": 10.0,
+                "monitored_capacity_mw": 100.0,
+            }
+        ]
+        db_handler = MagicMock()
+        db_handler.store_elia_forecasts.return_value = 1
+        app_config = {"scheduler": {"timezone": "Europe/Brussels"}}
+
+        scheduled_tasks.task_fetch_elia_forecasts(db_handler, app_config)
+
+        db_handler.store_elia_forecasts.assert_called_once()
+        refresh_predictions.assert_called_once_with(app_config, db_handler)
+
     @patch("hec.reporting.daily_summary.EnergyPricePredictor", UntrainedPricePredictor)
     @patch("hec.reporting.daily_summary.send_email_with_attachments", return_value=True)
     @patch("hec.reporting.daily_summary.calculate_battery_saving_for_period", return_value=make_savings())
@@ -643,6 +713,48 @@ class TestPhase4PredictionAndSummary(unittest.TestCase):
         self.assertEqual([(date(2024, 1, 1), tomorrow - timedelta(days=2))], predictor.train_calls)
         self.assertEqual([tomorrow + timedelta(days=i) for i in range(4)], predictor.predicted_dates)
         self.assertEqual(predictor.predicted_dates, refreshed_dates)
+
+    def test_price_prediction_job_is_not_scheduled_without_explicit_trigger(self):
+        scheduler = MagicMock()
+
+        scheduled_tasks.register_all_jobs(
+            scheduler,
+            MagicMock(),
+            {"tasks_schedule": {}},
+            p1_client=None,
+            inv_client=None,
+            evcc_client=None,
+            tariff_manager=MagicMock(),
+            system_mediator=MagicMock(),
+            battery_clients=None,
+        )
+
+        scheduled_job_ids = [call.kwargs["id"] for call in scheduler.add_job.call_args_list]
+        self.assertNotIn(scheduled_tasks.PRICE_PREDICTION_JOB_ID, scheduled_job_ids)
+
+    def test_price_prediction_job_can_be_scheduled_with_explicit_trigger(self):
+        scheduler = MagicMock()
+
+        scheduled_tasks.register_all_jobs(
+            scheduler,
+            MagicMock(),
+            {
+                "tasks_schedule": {
+                    "price_prediction": {
+                        "trigger_args": {"hour": 12, "minute": 35},
+                    },
+                },
+            },
+            p1_client=None,
+            inv_client=None,
+            evcc_client=None,
+            tariff_manager=MagicMock(),
+            system_mediator=MagicMock(),
+            battery_clients=None,
+        )
+
+        scheduled_job_ids = [call.kwargs["id"] for call in scheduler.add_job.call_args_list]
+        self.assertIn(scheduled_tasks.PRICE_PREDICTION_JOB_ID, scheduled_job_ids)
 
     def test_tariff_reload_task_forces_tariff_manager_reload(self):
         tariff_manager = MagicMock()

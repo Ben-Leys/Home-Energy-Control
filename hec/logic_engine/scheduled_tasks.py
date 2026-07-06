@@ -400,6 +400,7 @@ def task_fetch_elia_forecasts(db_handler: DatabaseHandler, app_config: dict):
     if all_fetched_records:
         logger.info(f"Finished fetching Elia forecasts. Total days: {days_to_fetch} rec: {len(all_fetched_records)}.")
         db_handler.store_elia_forecasts(all_fetched_records)
+        task_refresh_price_predictions(app_config, db_handler)
     else:
         logger.warning(f"No Elia forecast data fetched for {days_to_fetch} days. Check API.")
 
@@ -789,7 +790,7 @@ def register_all_jobs(scheduler: BaseScheduler, db_handler: DatabaseHandler, app
                 "job_id": PRICE_PREDICTION_JOB_ID,
                 "task_function": task_refresh_price_predictions,
                 "trigger": "cron",
-                "trigger_args": {"hour": 3, "minute": 20},
+                "trigger_args": "",
                 "job_args": [app_config, db_handler],
                 "name": "Refresh price prediction cache",
                 "misfire_grace_time": 3600,

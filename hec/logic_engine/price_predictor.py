@@ -10,6 +10,7 @@ import pandas as pd
 from sklearn.ensemble import RandomForestRegressor
 
 from hec.database_ops.db_handler import DatabaseHandler
+from hec.utils.time_utils import DEFAULT_TIMEZONE, local_day_bounds
 from hec.utils.utils import is_a_holiday
 
 logger = logging.getLogger(__name__)
@@ -39,6 +40,14 @@ class EnergyPricePredictor:
         if "price_prediction" in app_config:
             return app_config.get("price_prediction") or {}
         return app_config or {}
+
+    def _prediction_timezone_name(self) -> str:
+        return (
+            (self.app_config or {}).get("location", {}).get("timezone")
+            or (self.app_config or {}).get("scheduler", {}).get("timezone")
+            or (self.app_config or {}).get("elia", {}).get("timezone")
+            or DEFAULT_TIMEZONE
+        )
 
     def _resolve_model_path(self, predictor_config: Dict[str, Any]) -> Optional[Path]:
         db_path = getattr(self.db_handler, "db_path", None)
@@ -260,11 +269,14 @@ class EnergyPricePredictor:
 
         logger.info(f"Predicting prices for {target_predict_date}")
 
-        num_intervals = 96
-
-        # Create a DataFrame with future timestamps for the target_predict_date
-        start_dt_utc = datetime.combine(target_predict_date, datetime.min.time(), tzinfo=timezone.utc)
-        future_timestamps_utc = [start_dt_utc + timedelta(minutes=15 * i) for i in range(num_intervals)]
+        # Create a DataFrame with future timestamps for the configured local day.
+        start_dt_utc, end_dt_utc = local_day_bounds(target_predict_date, self._prediction_timezone_name())
+        future_timestamps_utc = pd.date_range(
+            start=start_dt_utc,
+            end=end_dt_utc,
+            freq="15min",
+            inclusive="left",
+        )
         future_df = pd.DataFrame({'timestamp_utc': future_timestamps_utc})
         future_df['day_of_week'] = future_df['timestamp_utc'].dt.dayofweek
         future_df['is_weekend'] = future_df['day_of_week'].isin([5, 6]).astype(int)
