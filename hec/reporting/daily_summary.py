@@ -1,4 +1,5 @@
 # hec/reporting/daily_summary.py
+import gc
 import logging
 from datetime import datetime, timedelta, date, timezone
 from typing import List, Dict, Any, Optional, Tuple
@@ -25,8 +26,13 @@ class DailySummaryGenerator:
         self.app_config = app_config
         self.db_handler = db_handler
         self.tariff_manager = tariff_manager
-        self.price_predictor = EnergyPricePredictor(db_handler, app_config)
+        self.price_predictor: Optional[EnergyPricePredictor] = None
         self.forecasts = forecasts
+
+    def _get_price_predictor(self) -> EnergyPricePredictor:
+        if self.price_predictor is None:
+            self.price_predictor = EnergyPricePredictor(self.db_handler, self.app_config)
+        return self.price_predictor
 
     @staticmethod
     def _has_usable_forecast_features(prediction_df: pd.DataFrame) -> bool:
@@ -323,6 +329,9 @@ class DailySummaryGenerator:
         logger.info("Starting generation of daily energy summary email.")
         profiler = profiler or DailySummaryTimingProfiler()
         status = "error"
+        plot_buffer_d1 = None
+        plot_buffer_predictions = None
+        images_to_attach = []
 
         try:
             with profiler.step("data_loading"):
@@ -388,18 +397,23 @@ class DailySummaryGenerator:
             predicted_prices_dfs = []
             with profiler.step("price_model_training"):
                 # --- 4. Price Prediction for D+1 to D+4 ---
-                if force_prediction_refresh and self.price_predictor.needs_training():
+                if force_prediction_refresh:
+                    price_predictor = self._get_price_predictor()
+                else:
+                    price_predictor = None
+
+                if price_predictor is not None and price_predictor.needs_training():
                     logger.info("Price predictor model not trained. Training now for email report...")
                     train_end = y_date
                     train_start = self._get_historic_training_start()
 
                     prediction_start_dt = datetime.now()
-                    self.price_predictor.train_model(train_start, train_end)
+                    price_predictor.train_model(train_start, train_end)
                     logger.info(f"Training finished. Trained {(train_end - train_start).days} days of data "
                                 f"in {(datetime.now() - prediction_start_dt).total_seconds():.2f} seconds")
 
             with profiler.step("price_prediction"):
-                if force_prediction_refresh and self.price_predictor.is_trained:
+                if price_predictor is not None and price_predictor.is_trained:
                     elia_forecasts_d1_d5 = self._get_elia_forecasts_for_days(
                         start_date_local=t_date,
                         num_days=self.FUTURE_PREDICTION_DAYS
@@ -414,8 +428,8 @@ class DailySummaryGenerator:
                                 if rec['timestamp_utc'].astimezone(local_tz).date() == predict_date
                             ]
 
-                        day_prediction_df = self.price_predictor.predict_prices_for_day(predict_date,
-                                                                                        daily_elia_fc_for_predictor)
+                        day_prediction_df = price_predictor.predict_prices_for_day(predict_date,
+                                                                                   daily_elia_fc_for_predictor)
                         if day_prediction_df is not None:
                             predicted_prices_dfs.append(day_prediction_df)
                 else:
@@ -425,7 +439,6 @@ class DailySummaryGenerator:
                         self.FUTURE_PREDICTION_DAYS,
                     )
 
-            plot_buffer_predictions = None
             with profiler.step("plotting"):
                 if predicted_prices_dfs:
                     plot_buffer_predictions = generate_future_price_plot(self.db_handler, app_config,
@@ -454,18 +467,17 @@ class DailySummaryGenerator:
                 y_date_savings = calculate_battery_saving_for_period(y_date, y_date, self.app_config,
                                                                      self.db_handler, self.tariff_manager)
                 n_month_savings = calculate_battery_saving_for_period(start_date, end_date, self.app_config,
-                                                                      self.db_handler, self.tariff_manager)
+                                                                       self.db_handler, self.tariff_manager)
                 n_year_savings = calculate_battery_saving_for_period(first_day_of_year, end_date, self.app_config,
                                                                      self.db_handler, self.tariff_manager)
-                total_savings = calculate_battery_saving_for_period(date(2025, 10, 28), end_date,
-                                                                    self.app_config, self.db_handler,
-                                                                    self.tariff_manager)
+                # total_savings = calculate_battery_saving_for_period(date(2025, 10, 28), end_date,
+                #                                                     self.app_config, self.db_handler,
+                #                                                     self.tariff_manager)
                 # --- 6. Prepare Email Content ---
                 email_data = {
                     "target_day_date_str": t_date.strftime('%d-%m-%Y (%A)'),
                     "target_day_prices": t_date_nepi,
                     "t_date_solar": t_date_solar,
-                    "predicted_prices_df": pd.concat(predicted_prices_dfs) if predicted_prices_dfs else None,
                     "yesterday_date_str": y_date.strftime('%d-%m'),
                     "month_name": start_date.strftime("%B"),
                     "year": start_date.strftime("%Y"),
@@ -475,13 +487,12 @@ class DailySummaryGenerator:
                     "d_savings": y_date_savings,
                     "m_savings": n_month_savings,
                     "y_savings": n_year_savings,
-                    "t_savings": total_savings,
+                    # "t_savings": total_savings,
                 }
                 html_body = self._generate_html_content(email_data)
 
             with profiler.step("smtp"):
                 # --- 7. Send Email ---
-                images_to_attach = []
                 if plot_buffer_d1:
                     images_to_attach.append(
                         (plot_buffer_d1.getvalue(), "price_solar_tomorrow.png", "price_solar_plot_tomorrow"))
@@ -504,4 +515,12 @@ class DailySummaryGenerator:
             status = "success" if success else "failed"
             return success
         finally:
+            for plot_buffer in (plot_buffer_d1, plot_buffer_predictions):
+                if plot_buffer is not None:
+                    try:
+                        plot_buffer.close()
+                    except Exception:
+                        logger.debug("Failed to close daily summary plot buffer.", exc_info=True)
+            images_to_attach.clear()
+            gc.collect()
             profiler.log_report(logger, status)

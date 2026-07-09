@@ -143,6 +143,38 @@ class TestDailySummaryGeneratorProfiling(unittest.TestCase):
             },
         )
 
+    @patch("hec.reporting.daily_summary.EnergyPricePredictor")
+    @patch("hec.reporting.daily_summary.send_email_with_attachments", return_value=True)
+    @patch("hec.reporting.daily_summary.calculate_battery_saving_for_period", return_value=make_savings())
+    @patch("hec.reporting.daily_summary.calculate_total_costs_for_period", return_value=make_costs())
+    @patch("hec.reporting.daily_summary.generate_future_price_plot", return_value=None)
+    @patch("hec.reporting.daily_summary.generate_price_solar_plot", return_value=io.BytesIO(b"plot"))
+    def test_cached_summary_does_not_load_price_predictor(
+            self,
+            _price_plot,
+            _future_plot,
+            _costs,
+            _savings,
+            _send_email,
+            price_predictor_class,
+    ):
+        db_handler = MagicMock()
+        db_handler.get_elia_forecasts.return_value = []
+        db_handler.get_predicted_prices_for_date.return_value = []
+        app_config = {
+            "historic_data": {"start_date": "2025-01-01"},
+            "inverter": {"standard_power_limit": 7000, "panel_peak_w": 5000},
+            "smtp": {
+                "sender_email": "sender@example.invalid",
+                "default_recipients": ["recipient@example.invalid"],
+            },
+        }
+        generator = DailySummaryGenerator(app_config, db_handler, MagicMock(), {"solar": []})
+
+        self.assertTrue(generator.generate_and_send_summary(app_config))
+
+        price_predictor_class.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

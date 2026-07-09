@@ -146,6 +146,10 @@ tasks_schedule:
   battery_update:
     second: "*/15"
 
+reporting:
+  daily_summary_process_isolation: true
+  daily_summary_timeout_seconds: 900
+
 smtp:
   host: smtp.example.com
   port: 465

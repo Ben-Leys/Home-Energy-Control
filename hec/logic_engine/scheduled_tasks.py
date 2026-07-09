@@ -1,9 +1,12 @@
 # hec/logic_engine/scheduled_tasks.py
 import logging
+import multiprocessing
 import os
+import queue
 import signal
 import sys
 import threading
+import traceback
 from time import sleep
 from datetime import datetime, timedelta, timezone, time, date
 from typing import Optional, List, Dict, Any
@@ -87,7 +90,6 @@ def task_fetch_and_store_day_ahead_prices(scheduler: BaseScheduler, db_handler: 
             if daily_summary_mail:
                 register_job(scheduler, DAILY_SUMMARY_EMAIL_JOB_ID, task_send_daily_energy_summary_email, "date", {},
                              [app_config, db_handler, tariff_manager], "Daily summary e-mail", 3600)
-            task_run_battery_predictor(app_config, db_handler)
             return
 
     # --- Handle Retries if no price points ---
@@ -484,22 +486,122 @@ def _is_summary_job_active() -> bool:
         return _summary_job_thread is not None and _summary_job_thread.is_alive()
 
 
+def _daily_summary_process_isolation_enabled(app_config: dict) -> bool:
+    reporting_config = (app_config or {}).get("reporting", {})
+    if "daily_summary_process_isolation" in reporting_config:
+        return bool(reporting_config.get("daily_summary_process_isolation"))
+
+    runtime_config = (app_config or {}).get("runtime", {})
+    if "daily_summary_process_isolation" in runtime_config:
+        return bool(runtime_config.get("daily_summary_process_isolation"))
+
+    return True
+
+
+def _run_daily_summary_worker(app_config: dict, renew_prices: bool, result_queue):
+    """Generate the daily summary in a short-lived child process."""
+    child_db_handler = None
+    try:
+        from hec.core.app_logging import start_logger
+        from hec.core.app_state import GLOBAL_APP_STATE as child_app_state
+        from hec.core.tariff_manager import initialize_tariff_manager
+        from hec.database_ops.db_handler import DatabaseHandler
+        from hec.logic_engine.data_processors import (
+            populate_appstate_with_forecast_data,
+            populate_appstate_with_price_data,
+        )
+        from hec.reporting.daily_summary import DailySummaryGenerator
+
+        start_logger(app_config, None)
+        child_db_handler = DatabaseHandler(app_config["database"])
+        child_db_handler.initialize_database()
+        child_app_state.set_db_handler(child_db_handler)
+
+        tariff_manager = initialize_tariff_manager(app_config)
+        populate_appstate_with_price_data(child_db_handler, app_config, renew_prices)
+        forecasts = populate_appstate_with_forecast_data(child_db_handler)
+
+        summary_generator = DailySummaryGenerator(app_config, child_db_handler, tariff_manager, forecasts)
+        success = summary_generator.generate_and_send_summary(app_config)
+        result_queue.put({"success": bool(success)})
+    except BaseException as exc:
+        try:
+            result_queue.put({
+                "success": False,
+                "error": repr(exc),
+                "traceback": traceback.format_exc(),
+            })
+        except Exception:
+            pass
+        raise
+    finally:
+        if child_db_handler is not None:
+            child_db_handler.close_connection()
+
+
+def _run_daily_summary_in_subprocess(app_config: dict, renew_prices: bool = False) -> bool:
+    timeout_seconds = int(
+        (app_config or {})
+        .get("reporting", {})
+        .get("daily_summary_timeout_seconds", 900)
+    )
+    context = multiprocessing.get_context("spawn")
+    result_queue = context.Queue(maxsize=1)
+    process = context.Process(
+        target=_run_daily_summary_worker,
+        args=(app_config, renew_prices, result_queue),
+        name="daily-summary-email",
+    )
+
+    logger.info("Starting daily summary email in isolated subprocess.")
+    process.start()
+    process.join(timeout_seconds)
+
+    if process.is_alive():
+        logger.error("Daily summary subprocess exceeded %s seconds; terminating.", timeout_seconds)
+        process.terminate()
+        process.join(30)
+        return False
+
+    try:
+        result = result_queue.get(timeout=5)
+    except queue.Empty:
+        result = None
+    finally:
+        result_queue.close()
+        result_queue.join_thread()
+
+    if process.exitcode != 0:
+        logger.error("Daily summary subprocess exited with code %s. Result: %s", process.exitcode, result)
+        if result and result.get("traceback"):
+            logger.error("Daily summary subprocess traceback:\n%s", result["traceback"])
+        return False
+
+    if not result:
+        logger.error("Daily summary subprocess exited without a result.")
+        return False
+
+    return bool(result.get("success"))
+
+
 def task_send_daily_energy_summary_email(app_config, db_handler, tariff_manager, renew_prices=False):
     """
     Scheduled task to generate and send the daily energy summary email.
     """
     _set_summary_job_status("running", "Daily summary is running")
-    forecasts = populate_appstate_with_forecast_data(db_handler)
-
-    summary_generator = DailySummaryGenerator(app_config, db_handler, tariff_manager, forecasts)
     logger.info("Running task: Send Daily Energy Summary Email.")
 
-    t_date_prices = GLOBAL_APP_STATE.get("electricity_prices_tomorrow")
-    if not t_date_prices or renew_prices:
-        populate_appstate_with_price_data(db_handler, app_config, True)
-
     try:
-        success = summary_generator.generate_and_send_summary(app_config)
+        if _daily_summary_process_isolation_enabled(app_config):
+            success = _run_daily_summary_in_subprocess(app_config, renew_prices)
+        else:
+            forecasts = populate_appstate_with_forecast_data(db_handler)
+            summary_generator = DailySummaryGenerator(app_config, db_handler, tariff_manager, forecasts)
+            t_date_prices = GLOBAL_APP_STATE.get("electricity_prices_tomorrow")
+            if not t_date_prices or renew_prices:
+                populate_appstate_with_price_data(db_handler, app_config, True)
+            success = summary_generator.generate_and_send_summary(app_config)
+
         if success:
             logger.info("Daily energy summary email generated and sent successfully.")
             _set_summary_job_status("success", "Daily summary email sent")
@@ -514,12 +616,16 @@ def task_send_daily_energy_summary_email(app_config, db_handler, tariff_manager,
 
 
 def _run_daily_summary_background_job(app_config, db_handler, tariff_manager, renew_prices=False):
-    _set_summary_job_status("running", "Daily summary is running")
-    success = task_send_daily_energy_summary_email(app_config, db_handler, tariff_manager, renew_prices)
-    if success:
-        _set_summary_job_status("success", "Daily summary email sent")
-    else:
-        _set_summary_job_status("failed", "Daily summary email failed")
+    try:
+        _set_summary_job_status("running", "Daily summary is running")
+        success = task_send_daily_energy_summary_email(app_config, db_handler, tariff_manager, renew_prices)
+        if success:
+            _set_summary_job_status("success", "Daily summary email sent")
+        else:
+            _set_summary_job_status("failed", "Daily summary email failed")
+    finally:
+        if hasattr(db_handler, "close_current_thread_connection"):
+            db_handler.close_current_thread_connection()
 
 
 def request_daily_summary_background_job(app_config, db_handler, tariff_manager, renew_prices=False) -> bool:

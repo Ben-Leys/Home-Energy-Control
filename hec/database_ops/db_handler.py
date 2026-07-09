@@ -144,6 +144,17 @@ class DatabaseHandler:
         if connections:
             logger.info("SQLite database connection(s) closed.")
 
+    def close_current_thread_connection(self):
+        """Close the SQLite connection cached for the calling thread, if any."""
+        thread_id = threading.get_ident()
+        with self._connection_lock:
+            conn = self._thread_connections.pop(thread_id, None)
+            if conn is not None and conn is self.conn:
+                self.conn = None
+
+        if conn is not None:
+            conn.close()
+
     def initialize_database(self):
         """Creates necessary tables if they don't exist."""
         try:
