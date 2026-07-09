@@ -79,6 +79,19 @@ class TestDatabasePhase2Reliability(unittest.TestCase):
         self.assertEqual(1, len(thread_connection_holder))
         self.assertIsNot(main_connection, thread_connection_holder[0])
 
+    def test_close_current_thread_connection_removes_cached_connection(self):
+        handler = self.make_handler()
+        connection = handler._get_connection()
+        thread_id = threading.get_ident()
+
+        self.assertIn(thread_id, handler._thread_connections)
+
+        handler.close_current_thread_connection()
+
+        self.assertNotIn(thread_id, handler._thread_connections)
+        with self.assertRaises(sqlite3.ProgrammingError):
+            connection.execute("SELECT 1")
+
     def test_transaction_rolls_back_failed_write(self):
         handler = self.make_handler()
 
