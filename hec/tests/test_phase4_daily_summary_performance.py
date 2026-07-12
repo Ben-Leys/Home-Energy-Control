@@ -450,6 +450,48 @@ class TestPhase4PredictionAndSummary(unittest.TestCase):
         send_summary.assert_called_once()
         db_handler.close_current_thread_connection.assert_called_once()
 
+    @patch("hec.logic_engine.scheduled_tasks.register_job")
+    @patch("hec.logic_engine.scheduled_tasks.task_run_battery_predictor")
+    @patch("hec.logic_engine.scheduled_tasks.process_price_points_to_app_state", return_value=True)
+    @patch("hec.logic_engine.scheduled_tasks.fetch_entsoe_prices", return_value=[object()])
+    def test_day_ahead_fetch_schedules_summary_without_running_battery_prediction(
+            self,
+            _fetch_prices,
+            _process_prices,
+            run_battery_predictor,
+            register_job,
+    ):
+        scheduled_tasks.fetch_prices_attempt_count = 0
+
+        scheduled_tasks.task_fetch_and_store_day_ahead_prices(
+            MagicMock(),
+            MagicMock(),
+            {"tasks_schedule": {"fetch_day_ahead_prices": {"summary_email": True}}},
+            MagicMock(),
+        )
+
+        run_battery_predictor.assert_not_called()
+        register_job.assert_called_once()
+        self.assertEqual(scheduled_tasks.DAILY_SUMMARY_EMAIL_JOB_ID, register_job.call_args.args[1])
+
+    @patch("hec.logic_engine.scheduled_tasks._run_daily_summary_in_subprocess", return_value=True)
+    def test_scheduled_summary_uses_process_isolation_by_default(self, run_summary):
+        app_config = {"reporting": {}}
+
+        success = scheduled_tasks.task_send_daily_energy_summary_email(app_config, MagicMock(), MagicMock())
+
+        self.assertTrue(success)
+        run_summary.assert_called_once_with(app_config, False)
+
+    @patch("hec.logic_engine.scheduled_tasks.task_send_daily_energy_summary_email", return_value=True)
+    def test_manual_summary_background_thread_closes_its_cached_db_connection(self, send_summary):
+        db_handler = MagicMock()
+
+        scheduled_tasks._run_daily_summary_background_job({}, db_handler, MagicMock(), renew_prices=True)
+
+        send_summary.assert_called_once()
+        db_handler.close_current_thread_connection.assert_called_once()
+
     @patch("hec.reporting.daily_summary.EnergyPricePredictor", UntrainedPricePredictor)
     @patch("hec.reporting.daily_summary.send_email_with_attachments", return_value=True)
     @patch("hec.reporting.daily_summary.calculate_battery_saving_for_period", return_value=make_savings())
