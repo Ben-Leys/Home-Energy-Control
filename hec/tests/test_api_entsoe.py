@@ -157,6 +157,29 @@ XML_NO_TIMESERIES = b"""<?xml version="1.0" encoding="UTF-8"?>
 </Publication_MarketDocument>
 """
 
+XML_SINGLE_ZERO_PT15M = b"""<?xml version="1.0" encoding="UTF-8"?>
+<Publication_MarketDocument xmlns="urn:iec62325.351:tc57wg16:451-3:publicationdocument:7:3">
+    <period.timeInterval>
+        <start>2026-07-23T22:00Z</start>
+        <end>2026-07-24T22:00Z</end>
+    </period.timeInterval>
+    <TimeSeries>
+        <mRID>1</mRID>
+        <Period>
+            <timeInterval>
+                <start>2026-07-23T22:00Z</start>
+                <end>2026-07-24T22:00Z</end>
+            </timeInterval>
+            <resolution>PT15M</resolution>
+            <Point>
+                <position>1</position>
+                <price.amount>0</price.amount>
+            </Point>
+        </Period>
+    </TimeSeries>
+</Publication_MarketDocument>
+"""
+
 
 class TestApiEntsoe(unittest.TestCase):
 
@@ -242,6 +265,11 @@ class TestApiEntsoe(unittest.TestCase):
         result = api_entsoe._parse_entsoe_price_xml(XML_NO_TIMESERIES)
         self.assertIsNotNone(result)  # Returns [] if no TimeSeries but no error Reason
         self.assertEqual(len(result), 0)
+
+    def test_parse_xml_single_zero_point_is_treated_as_no_data(self):
+        result = api_entsoe._parse_entsoe_price_xml(XML_SINGLE_ZERO_PT15M)
+
+        self.assertEqual(result, [])
 
     def test_fetch_entsoe_prices_success(self):
         # Configure the mock response

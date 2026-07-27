@@ -183,6 +183,13 @@ def _parse_entsoe_price_xml(xml_content: bytes) -> Optional[List[PricePoint]]:
                 except ValueError:
                     logger.warning(f"Could not parse position/price for point: pos='{pos_text}', price='{price_text}'")
 
+        if (expected_total_positions > 1 and len(parsed_points_data) == 1
+                and next(iter(parsed_points_data.values())) == 0):
+            logger.warning(
+                "ENTSO-E returned a single zero-valued price point for a period expecting "
+                f"{expected_total_positions} points. Treating the response as no data so it can be retried.")
+            return []
+
         current_period_price_points: List[PricePoint] = []
         last_known_price: Optional[float] = None
 
