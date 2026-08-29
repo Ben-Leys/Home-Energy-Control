@@ -607,8 +607,8 @@ class SystemMediator:
             self.battery_force_start_time = None
             return
 
-        # C: SOC < 2%
-        if lowest_soc < 2 and not empty_too_long:
+        # C: SOC <= 3%
+        if lowest_soc <= 3 and not empty_too_long:
             would_block_discharge = True
 
         # 2. Prediction plan

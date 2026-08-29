@@ -152,14 +152,29 @@ class DailySummaryGenerator:
 
         # --- 2) Negative‐price summary & income saved by shutting off panels ---
         negative_hours = sorted({h for h, sp in hourly_sell if sp < 0})
-        negative_income = sum(-sp * adjusted_solar[i] for i, (h, sp) in enumerate(hourly_sell) if sp < 0)
+        negative_income = 0.0
+        adjusted_solar_list = adjusted_solar or []
+        for i, pi in enumerate(t_day_nepi):
+            if i >= len(adjusted_solar_list):
+                break
+            solar_kwh = adjusted_solar_list[i]
+            if solar_kwh is None or solar_kwh <= 0:
+                continue
+            contract = pi.active_contract_type
+            sell = pi.net_prices_eur_per_kwh.get(contract, {}).get("sell")
+            if sell is not None and sell < 0:
+                negative_income += -sell * solar_kwh
 
         # --- 3) Cheapest vs most expensive buy‐price hours ---
         hourly_buy_sorted = sorted(hourly_buy, key=lambda x: x[1])
-        # cheapest 6‐interval average
-        cheapest_avg = sum(p for _, p in hourly_buy_sorted[:6]) / 6
-        # most expensive 6‐interval average
-        expensive_avg = sum(p for _, p in hourly_buy_sorted[-6:]) / 6
+        if hourly_buy_sorted:
+            cheapest_slice = hourly_buy_sorted[:min(6, len(hourly_buy_sorted))]
+            expensive_slice = hourly_buy_sorted[-min(6, len(hourly_buy_sorted)):]
+            cheapest_avg = sum(p for _, p in cheapest_slice) / len(cheapest_slice)
+            expensive_avg = sum(p for _, p in expensive_slice) / len(expensive_slice)
+        else:
+            cheapest_avg = 0.0
+            expensive_avg = 0.0
 
         cheapest_hours = sorted({
             h for h, p in hourly_buy
@@ -198,14 +213,14 @@ class DailySummaryGenerator:
 
         # --- Target Day Summary (D+1) ---
         t_day_nepi: List[NetElectricityPriceInterval] = data.get("target_day_prices", [])
-        t_day_solar = data.get("t_date_solar", [0, 0])
+        t_day_solar = data.get("t_date_solar") or []
         t_day_solar = [value if value is not None else 0 for value in t_day_solar]
 
         # --- 1) Align solar to price resolution & compute solar income ---
         solar_income = 0
         if t_day_nepi:
             res_min = t_day_nepi[0].resolution_minutes
-            factor = res_min // 15  # Factor to aggregate solar data (1 for 15 min, 4 for 60 min)
+            factor = max(1, res_min // 15)  # Factor to aggregate solar data (1 for 15 min, 4 for 60 min)
             adjusted_solar = [
                 sum(t_day_solar[i:i + factor]) / 4
                 for i in range(0, len(t_day_solar), factor)
@@ -214,6 +229,7 @@ class DailySummaryGenerator:
         else:
             logger.warning("No target day prices provided; unable to compute solar income.")
             adjusted_solar = []
+            res_min = 60
             t_day_total_solar = 0
 
         for idx, pi in enumerate(t_day_nepi):

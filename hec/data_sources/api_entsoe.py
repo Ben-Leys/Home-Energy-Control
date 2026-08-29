@@ -124,6 +124,12 @@ def _parse_entsoe_price_xml(xml_content: bytes) -> Optional[List[PricePoint]]:
         # but the structure is otherwise valid but empty.
         return []
 
+    if len(time_series_elements) > 1:
+        logger.info(
+            f"ENTSO-E response contained {len(time_series_elements)} TimeSeries elements. Using the first TimeSeries."
+        )
+        time_series_elements = [time_series_elements[0]]
+
     all_price_points = []
 
     for ts_element in time_series_elements:

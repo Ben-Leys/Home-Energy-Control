@@ -163,6 +163,74 @@ class TestPhase0DailySummaryHelpers(unittest.TestCase):
         self.assertIn("Cheap", summary_html)
         self.assertEqual("<td></td>", negative_html)
 
+    def test_format_hours_summary_handles_negative_sell_prices_and_truncated_solar(self):
+        start = datetime(2026, 7, 1, tzinfo=timezone.utc)
+        intervals = [
+            NetElectricityPriceInterval(
+                interval_start_local=start + timedelta(hours=hour),
+                resolution_minutes=60,
+                active_contract_type="dynamic",
+                net_prices_eur_per_kwh={
+                    "dynamic": {"buy": 0.10, "sell": -0.05 if hour in (12, 13) else 0.05}
+                },
+            )
+            for hour in range(24)
+        ]
+
+        # Truncated adjusted_solar list (e.g. only 2 entries for 24 intervals)
+        summary_html, negative_html = DailySummaryGenerator._format_hours_summary(
+            intervals,
+            adjusted_solar=[1.0, 1.0],
+            res_min=60,
+            solar_income=0.0,
+        )
+
+        self.assertIn("Expensive", summary_html)
+        self.assertIn("12 - 14 h", negative_html)
+        self.assertIn("Shut off panels saves: € 0.00", negative_html)
+
+    def test_format_hours_summary_computes_saved_negative_income_accurately(self):
+        start = datetime(2026, 7, 1, tzinfo=timezone.utc)
+        intervals = [
+            NetElectricityPriceInterval(
+                interval_start_local=start + timedelta(hours=hour),
+                resolution_minutes=60,
+                active_contract_type="dynamic",
+                net_prices_eur_per_kwh={
+                    "dynamic": {"buy": 0.10, "sell": -0.05 if hour in (12, 13) else 0.05}
+                },
+            )
+            for hour in range(24)
+        ]
+
+        # 2 kWh in hour 12, 3 kWh in hour 13 -> (-(-0.05) * 2) + (-(-0.05) * 3) = 0.10 + 0.15 = 0.25
+        adjusted_solar = [0.0] * 24
+        adjusted_solar[12] = 2.0
+        adjusted_solar[13] = 3.0
+
+        summary_html, negative_html = DailySummaryGenerator._format_hours_summary(
+            intervals,
+            adjusted_solar=adjusted_solar,
+            res_min=60,
+            solar_income=0.50,
+        )
+
+        self.assertIn("12 - 14 h", negative_html)
+        self.assertIn("Shut off panels saves: € 0.25", negative_html)
+
+    def test_format_hours_summary_handles_empty_intervals_and_none_solar(self):
+        summary_html, negative_html = DailySummaryGenerator._format_hours_summary(
+            [],
+            adjusted_solar=None,
+            res_min=60,
+            solar_income=0.0,
+        )
+
+        self.assertIn("Expensive: none", summary_html)
+        self.assertIn("Cheap: none", summary_html)
+        self.assertEqual("<td></td>", negative_html)
+
+
 
 class TestPhase0PlotGeneration(unittest.TestCase):
     def tearDown(self):

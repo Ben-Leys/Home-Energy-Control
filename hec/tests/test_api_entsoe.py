@@ -271,6 +271,41 @@ class TestApiEntsoe(unittest.TestCase):
 
         self.assertEqual(result, [])
 
+    def test_parse_xml_multiple_timeseries_takes_first(self):
+        # Construct XML with duplicate TimeSeries
+        xml_with_two_series = XML_SUCCESS_PT60M_4POINTS.replace(
+            b"</Publication_MarketDocument>",
+            b"""    <TimeSeries>
+        <mRID>2</mRID>
+        <auction.type>A01</auction.type>
+        <businessType>A62</businessType>
+        <in_Domain.mRID codingScheme="A01">10YBE----------2</in_Domain.mRID>
+        <out_Domain.mRID codingScheme="A01">10YBE----------2</out_Domain.mRID>
+        <contract_MarketAgreement.type>A01</contract_MarketAgreement.type>
+        <currency_Unit.name>EUR</currency_Unit.name>
+        <price_Measure_Unit.name>MWH</price_Measure_Unit.name>
+        <curveType>A03</curveType>
+        <Period>
+            <timeInterval>
+                <start>2025-05-20T22:00Z</start>
+                <end>2025-05-21T22:00Z</end>
+            </timeInterval>
+            <resolution>PT60M</resolution>
+            <Point>
+                <position>1</position>
+                <price.amount>999</price.amount>
+            </Point>
+        </Period>
+    </TimeSeries>
+</Publication_MarketDocument>""",
+        )
+        result = api_entsoe._parse_entsoe_price_xml(xml_with_two_series)
+        self.assertIsNotNone(result)
+        # Should only parse the 24 points from the first TimeSeries, not points from the second
+        self.assertEqual(len(result), 24)
+        self.assertEqual(result[0].price_eur_per_mwh, 110)
+
+
     def test_fetch_entsoe_prices_success(self):
         # Configure the mock response
         mock_response = MagicMock()

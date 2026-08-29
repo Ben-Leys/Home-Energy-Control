@@ -270,8 +270,8 @@ class BatteryPredictor:
                 new_c = actual_added / self.charge_eff  # The gross amount taken from solar/grid
                 current_soc_kwh += actual_added
             elif new_c < 0:  # Discharging
-                # Can't discharge more than what is in the tank and stopping at 2%
-                min_soc_kwh = self.capacity_kwh * 0.02
+                # Can't discharge more than what is in the tank and stopping at 6%
+                min_soc_kwh = self.capacity_kwh * 0.06
                 actual_removed = min(abs(new_c) / self.discharge_eff, current_soc_kwh - min_soc_kwh)
                 new_c = -(actual_removed * self.discharge_eff)  # The net amount delivered to house
                 current_soc_kwh -= actual_removed
@@ -557,7 +557,7 @@ class BatteryPredictor:
                 trials.append((current_cost, current_df['block_d'].copy()))
 
                 # If the peak is covered, we skip
-                if impacted_df.at[t_peak, 'new_pct'] >= 3: # was new_grid >= -0.001
+                if impacted_df.at[t_peak, 'new_pct'] >= 7: # was new_grid >= -0.001
                     break
 
             # 4. Find the best trial (the one with the lowest total cost)
